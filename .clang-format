@@ -1,0 +1,14 @@
+BasedOnStyle: Google
+ColumnLimit: 80
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>'      # C/system and other angle-bracket headers ending in .h (rules §3 group 2)
+    Priority: 1
+  - Regex: '^<[^.]*>'      # C++ standard library (group 3)
+    Priority: 2
+  - Regex: '^<.*>'         # other libraries, e.g. <glm/vec3.hpp> (group 4)
+    Priority: 3
+  - Regex: '^".*"'         # project headers (group 5)
+    Priority: 4

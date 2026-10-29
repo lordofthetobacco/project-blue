@@ -62,7 +62,45 @@ FetchContent_Declare(assimp
     GIT_SHALLOW    TRUE
     SYSTEM)
 
+# --- JoltPhysics ---------------------------------------------------------------
+# /MD like the rest of the project; OVERRIDE_CXX_FLAGS OFF keeps Jolt from rewriting the
+# global CMAKE_CXX_FLAGS that first-party targets inherit.
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
+set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(JoltPhysics
+    GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG        v5.6.0
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  Build
+    SYSTEM)
+
 FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui assimp)
+
+# Jolt only adds /arch:AVX2 and its JPH_USE_* definitions when CMAKE_VS_PLATFORM_NAME is
+# x64, which is empty under Ninja. Set it just for Jolt so it keeps its default AVX2 build.
+if(NOT CMAKE_VS_PLATFORM_NAME AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+    set(CMAKE_VS_PLATFORM_NAME x64)
+    FetchContent_MakeAvailable(JoltPhysics)
+    unset(CMAKE_VS_PLATFORM_NAME)
+else()
+    FetchContent_MakeAvailable(JoltPhysics)
+endif()
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp

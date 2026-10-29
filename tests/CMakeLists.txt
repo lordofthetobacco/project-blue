@@ -9,17 +9,24 @@ FetchContent_Declare(doctest
 FetchContent_MakeAvailable(doctest)
 
 add_executable(blue_tests
-    Main.cpp
-    ModelImporterTests.cpp
-    SceneSerializerTests.cpp
-    PlacementTests.cpp
-    MeshDataTests.cpp
-    SceneRoundTripTests.cpp
-    CameraControllerTests.cpp
-    InputSettingsTests.cpp
-    InputMapperTests.cpp
-    ProjectionTests.cpp
+    test_main.cc
+    model_importer_test.cc
+    scene_serializer_test.cc
+    scene_test.cc
+    placement_test.cc
+    mesh_data_test.cc
+    scene_round_trip_test.cc
+    camera_controller_test.cc
+    input_settings_test.cc
+    input_mapper_test.cc
+    projection_test.cc
+    result_test.cc
+    path_test.cc
+    file_system_test.cc
+    physics_world_test.cc
 )
+
+target_include_directories(blue_tests PRIVATE ${CMAKE_SOURCE_DIR})
 
 target_compile_definitions(blue_tests PRIVATE
     BLUE_SAMPLES_DIR="${CMAKE_SOURCE_DIR}/samples"
@@ -27,6 +34,6 @@ target_compile_definitions(blue_tests PRIVATE
 
 blue_target_defaults(blue_tests)
 
-target_link_libraries(blue_tests PRIVATE blue_scene blue_asset blue_input_mapper doctest::doctest)
+target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_input_mapper blue_physics doctest::doctest)
 
 add_test(NAME blue_tests COMMAND blue_tests)

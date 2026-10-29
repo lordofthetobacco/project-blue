@@ -1,0 +1,129 @@
+#ifndef BLUE_PHYSICS_PHYSICS_WORLD_H_
+#define BLUE_PHYSICS_PHYSICS_WORLD_H_
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+
+#include <glm/gtc/quaternion.hpp>
+#include <glm/vec3.hpp>
+
+#include "asset/mesh_data.h"
+#include "core/result.h"
+#include "scene/scene.h"
+
+namespace blue::physics {
+
+class PhysicsRuntime;
+
+// Handle of a body inside one PhysicsWorld. Handles of removed bodies are
+// detected as stale (operations on them are ignored), but a handle is only
+// meaningful for the world that created it.
+enum class BodyId : uint32_t {};
+
+enum class PhysicsError {
+  kInvalidShape,         // Bad body description, bounds, scale or mesh data.
+  kDynamicTriangleMesh,  // Triangle meshes can only be static.
+  kTooManyBodies,        // The world's body capacity is exhausted.
+  kShapeBuildFailed,     // The physics library rejected the shape.
+};
+
+// Returns a short human-readable name for `error`. Never null.
+const char* ToString(PhysicsError error);
+
+struct Pose {
+  glm::vec3 position{0.0f};
+  glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};  // identity (w, x, y, z)
+};
+
+// Everything needed to create one body. `mesh` is borrowed for the duration of
+// CreateBody only and must be non-null for kConvexHull and kTriangleMesh.
+// `shape_key` identifies the source mesh so equal shapes are built once; an
+// empty key disables sharing for that body.
+struct BodyDesc {
+  scene::RigidBody body;
+  Pose pose;
+  glm::vec3 scale{1.0f};
+  asset::Bounds bounds;  // Local-space bounds of the mesh (box/sphere sizing).
+  const asset::MeshData* mesh = nullptr;
+  std::string shape_key;  // E.g. the entity's mesh path.
+};
+
+struct RayHit {
+  BodyId body;
+  glm::vec3 point;
+  glm::vec3 normal;
+  float fraction;  // Hit distance divided by the cast's max_distance, [0, 1].
+};
+
+struct PhysicsStats {
+  int bodies;         // Bodies in the world, static ones included.
+  int active_bodies;  // Dynamic bodies currently awake.
+  // Wall-clock time spent stepping the simulation in the most recent Update
+  // call that ran at least one step.
+  float last_step_ms;
+};
+
+// A rigid-body simulation (JoltPhysics) advanced in fixed 1/60 s steps. SI
+// units, right-handed, Y-up, single precision. Not thread-safe: call every
+// method from one thread (the simulation itself uses worker threads
+// internally). Not copyable and not movable.
+class PhysicsWorld {
+ public:
+  // `runtime` must outlive the world; it only documents that process-wide
+  // setup exists.
+  explicit PhysicsWorld(const PhysicsRuntime& runtime);
+  PhysicsWorld(const PhysicsWorld&) = delete;
+  PhysicsWorld& operator=(const PhysicsWorld&) = delete;
+  ~PhysicsWorld();
+
+  // Creates a body and returns its handle. Shapes come from the mesh bounds
+  // (box, sphere) or vertices (hull, triangle mesh) scaled by `desc.scale`.
+  // Axes of a box thinner than 0.1 m are thickened to 0.1 m towards -axis so a
+  // flat ground plane keeps its surface as the box's top face.
+  core::Result<BodyId, PhysicsError> CreateBody(const BodyDesc& desc);
+
+  // Removes a body. Unknown or stale handles are ignored.
+  void RemoveBody(BodyId id);
+  void RemoveAllBodies();
+
+  void SetGravity(glm::vec3 gravity);
+
+  // Applies `force` (N) at the center of mass for the next physics step only.
+  // Like Jolt, forces are cleared after a step: call this every frame to keep
+  // a force acting. Wakes a sleeping body. Ignored for static bodies.
+  void AddForce(BodyId id, glm::vec3 force);
+
+  // Applies an instantaneous impulse (N*s) at the center of mass / at
+  // `world_point`. Wakes a sleeping body. Ignored for static bodies.
+  void AddImpulse(BodyId id, glm::vec3 impulse);
+  void AddImpulseAtPoint(BodyId id, glm::vec3 impulse, glm::vec3 world_point);
+
+  // Casts a ray from `origin` along `direction` (need not be normalized) and
+  // returns the closest hit within `max_distance` meters, if any.
+  std::optional<RayHit> CastRay(glm::vec3 origin, glm::vec3 direction,
+                                float max_distance) const;
+
+  // Advances the simulation by `frame_seconds` of real time using fixed 1/60 s
+  // steps: time accumulates (at most 0.25 s per call), whole steps run, at most
+  // 4 per call. If more were due the backlog is dropped rather than carried.
+  void Update(float frame_seconds);
+
+  // Returns the pose of `id` interpolated between its last two steps by the
+  // accumulator remainder, for smooth rendering. Static bodies return their
+  // fixed pose. An unknown handle returns an identity pose.
+  Pose InterpolatedPose(BodyId id) const;
+
+  glm::vec3 LinearVelocity(BodyId id) const;
+  bool IsDynamic(BodyId id) const;
+  PhysicsStats Stats() const;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace blue::physics
+
+#endif  // BLUE_PHYSICS_PHYSICS_WORLD_H_
