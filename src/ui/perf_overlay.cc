@@ -6,6 +6,7 @@
 #include <vulkan/vk_enum_string_helper.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include "core/log.h"
 #include "lighting/cascades.h"
@@ -146,7 +147,7 @@ float FrameTimeHistory::max() const {
 
 PerfOverlay::PerfOverlay(const platform::Window& window,
                          const render::Renderer& renderer)
-    : renderer_(renderer) {
+    : window_(window), renderer_(renderer) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
 
@@ -154,12 +155,7 @@ PerfOverlay::PerfOverlay(const platform::Window& window,
   io.IniFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
-  const float scale = window.DisplayScale();
-  ImGuiStyle& style = ImGui::GetStyle();
-  ImGui::StyleColorsDark();
-  style.ScaleAllSizes(scale);
-  style.FontScaleDpi = scale;
-  style.WindowRounding = 4.0f * scale;
+  UpdateScale();
 
   ImGui_ImplSDL3_InitForVulkan(window.handle());
 
@@ -224,7 +220,8 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
   }
 
   ImGui_ImplVulkan_NewFrame();
-  ImGui_ImplSDL3_NewFrame();
+  ImGui_ImplSDL3_NewFrame();  // Refreshes io.DisplaySize from the window.
+  UpdateScale();
   ImGui::NewFrame();
 
   BuildResult result;
@@ -268,9 +265,9 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
 bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
   const ImGuiStyle& style = ImGui::GetStyle();
   const ImVec2 display = ImGui::GetIO().DisplaySize;
-  ImGui::SetNextWindowPos({display.x - style.WindowPadding.x,
-                           style.WindowPadding.y},
-                          ImGuiCond_Always, {1.0f, 0.0f});
+  ImGui::SetNextWindowPos(
+      {display.x - style.WindowPadding.x, style.WindowPadding.y},
+      ImGuiCond_Always, {1.0f, 0.0f});
   ImGui::SetNextWindowBgAlpha(0.75f);
   constexpr ImGuiWindowFlags kFlags =
       ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
@@ -291,20 +288,43 @@ bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
                        "%.2f");
     changed = ImGui::IsItemDeactivatedAfterEdit() || changed;
     ImGui::SliderFloat("Mouse sensitivity", &settings.mouse_sensitivity,
-                       input::kMinMouseSensitivity,
-                       input::kMaxMouseSensitivity, "%.4f",
-                       ImGuiSliderFlags_Logarithmic);
+                       input::kMinMouseSensitivity, input::kMaxMouseSensitivity,
+                       "%.4f", ImGuiSliderFlags_Logarithmic);
     changed = ImGui::IsItemDeactivatedAfterEdit() || changed;
     ImGui::PopItemWidth();
     changed = ImGui::Checkbox("Invert Y", &settings.invert_y) || changed;
-    changed = ImGui::Checkbox("Sprint toggles", &settings.sprint_toggle) ||
-              changed;
-    changed = ImGui::Checkbox("Crouch toggles", &settings.crouch_toggle) ||
-              changed;
+    changed =
+        ImGui::Checkbox("Sprint toggles", &settings.sprint_toggle) || changed;
+    changed =
+        ImGui::Checkbox("Crouch toggles", &settings.crouch_toggle) || changed;
     ImGui::TextDisabled("Esc frees the cursor to use this window");
   }
   ImGui::End();
   return changed;
+}
+
+void PerfOverlay::UpdateScale() {
+  // Before the first frame DisplaySize is still zero; fall back to the
+  // window's own logical size then.
+  float height = ImGui::GetIO().DisplaySize.y;
+  if (height <= 0.0f) {
+    height = static_cast<float>(window_.height());
+  }
+  const float window_scale = height > 0.0f ? height / kReferenceHeight : 1.0f;
+  const float scale = std::clamp(window_scale * window_.DisplayScale(),
+                                 kMinUiScale, kMaxUiScale);
+  if (std::abs(scale - ui_scale_) < 1.0e-3f) {
+    return;
+  }
+  ui_scale_ = scale;
+
+  // ScaleAllSizes compounds, so always start from a fresh style.
+  ImGuiStyle& style = ImGui::GetStyle();
+  style = ImGuiStyle();
+  ImGui::StyleColorsDark();
+  style.ScaleAllSizes(scale);
+  style.FontScaleDpi = scale;
+  style.WindowRounding = 4.0f * scale;
 }
 
 void PerfOverlay::DrawTimings(float cpu_frame_ms) const {

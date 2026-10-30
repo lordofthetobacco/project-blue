@@ -37,6 +37,18 @@ float Window::DisplayScale() const {
   return scale > 0.0f ? scale : 1.0f;
 }
 
+int Window::width() const {
+  int width = 0;
+  SDL_GetWindowSize(window_, &width, nullptr);
+  return width;
+}
+
+int Window::height() const {
+  int height = 0;
+  SDL_GetWindowSize(window_, nullptr, &height);
+  return height;
+}
+
 bool Window::IsMinimized() const {
   return (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED) != 0;
 }

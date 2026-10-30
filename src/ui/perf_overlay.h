@@ -104,10 +104,19 @@ struct BuildResult {
 };
 
 // Dear ImGui performance overlay: FPS, CPU/GPU frame time, frame-time graph,
-// device info. Owns the ImGui context and backends. Borrows `renderer`, which
-// must outlive it. Neither copyable nor movable. Not thread-safe.
+// device info, player settings. Owns the ImGui context and backends. Borrows
+// `window` and `renderer`, which must outlive it. The UI scales with the
+// window: full size at kReferenceHeight logical pixels, times the monitor's
+// DPI scale, so it keeps the same share of the screen when the window is
+// resized or moved between displays. Neither copyable nor movable. Not
+// thread-safe.
 class PerfOverlay {
  public:
+  // Logical window height at which the UI is drawn at its designed size.
+  static constexpr float kReferenceHeight = 1080.0f;
+  static constexpr float kMinUiScale = 0.5f;
+  static constexpr float kMaxUiScale = 4.0f;
+
   PerfOverlay(const platform::Window& window, const render::Renderer& renderer);
   ~PerfOverlay();
 
@@ -133,15 +142,20 @@ class PerfOverlay {
   [[nodiscard]] bool WantsKeyboard() const;
 
  private:
+  // Recomputes the UI scale from the window and DPI and, if it changed,
+  // rebuilds the style around it. Call between frames.
+  void UpdateScale();
   // Each Draw* helper emits one section of the overlay window.
   void DrawTimings(float cpu_frame_ms) const;
   void DrawDeviceInfo() const;
   // Emits the settings window; returns true when an edit was completed.
   [[nodiscard]] bool DrawSettings(input::InputSettings& settings) const;
 
+  const platform::Window& window_;
   const render::Renderer& renderer_;
   FrameTimeHistory cpu_history_;
   std::optional<double> gpu_frame_ms_;
+  float ui_scale_ = 0.0f;  // 0 until the first UpdateScale().
   bool visible_ = true;
 };
 

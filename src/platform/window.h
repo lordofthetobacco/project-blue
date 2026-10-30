@@ -26,6 +26,9 @@ class Window {
   [[nodiscard]] VkExtent2D PixelSize() const;
   // Returns the content scale of the display the window is on; always > 0.
   [[nodiscard]] float DisplayScale() const;
+  // Logical (points, not pixels) window size; 0 if unknown.
+  [[nodiscard]] int width() const;
+  [[nodiscard]] int height() const;
   [[nodiscard]] bool IsMinimized() const;
 
   // Relative mode hides the cursor, confines it to the window and reports raw
