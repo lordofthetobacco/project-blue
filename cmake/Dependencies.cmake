@@ -49,7 +49,14 @@ set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
 set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
 set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+# Bundled zlib only on Windows. Its classic-Mac block in zutil.h redefines fdopen to
+# NULL when TARGET_OS_MAC is set, which breaks against the macOS 26+ SDK stdio.h; macOS
+# and Linux ship a system zlib that assimp picks up through find_package.
+if(WIN32)
+  set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+else()
+  set(ASSIMP_BUILD_ZLIB OFF CACHE BOOL "" FORCE)
+endif()
 set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)

@@ -23,8 +23,6 @@ using Result = core::Result<JPH::ShapeRefC, PhysicsError>;
 
 // Axes thinner than kMinBoxThickness get this half extent.
 constexpr float kThinHalfExtent = 0.5f * kMinBoxThickness;
-// Scale components below this magnitude are treated as zero.
-constexpr float kMinScale = 1.0e-4f;
 
 bool IsFinite(glm::vec3 v) {
   return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);

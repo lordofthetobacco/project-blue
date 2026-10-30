@@ -212,17 +212,17 @@ Scene MakeSampleScene() {
   scene.sun = {{0.3f, -0.9f, 0.1f}, {0.8f, 0.7f, 0.6f}, 4.5f, false};
   scene.sun = {{0.3f, -0.9f, 0.1f}, {0.8f, 0.7f, 0.6f}, 4.5f, false};
 
-  scene.entities.push_back({"Cube", "builtin:cube", {}});
+  scene.entities.push_back({"Cube", "builtin:cube", {}, {}});
   scene.entities.push_back({"Zażółć gęślą jaźń \xF0\x9F\x9A\x80",
                             "models/teapot.obj",
                             {{1.0f, -2.0f, 3.5f},
                              glm::normalize(glm::quat(0.9f, 0.1f, -0.3f, 0.2f)),
-                             {2.0f, 0.5f, 1.25f}}});
+                             {2.0f, 0.5f, 1.25f}}, {}});
   scene.entities.push_back({"",
                             "builtin:plane",
                             {{0.0f, 0.1f, 0.0f},
                              glm::angleAxis(1.1f, glm::vec3(0.0f, 1.0f, 0.0f)),
-                             {10.0f, 1.0f, 10.0f}}});
+                             {10.0f, 1.0f, 10.0f}}, {}});
   scene.gravity = {0.5f, -3.711f, 0.25f};
   scene.entities[1].body = RigidBody{.motion = MotionType::kDynamic,
                                      .shape = ShapeType::kConvexHull,
@@ -259,8 +259,8 @@ TEST_CASE("mesh paths are stored relative to the scene file") {
   const std::string scene_file = dir.Child("scenes/a.bscn");
 
   Scene scene;
-  scene.entities.push_back({"Teapot", asset_file, {}});
-  scene.entities.push_back({"Cube", "builtin:cube", {}});
+  scene.entities.push_back({"Teapot", asset_file, {}, {}});
+  scene.entities.push_back({"Cube", "builtin:cube", {}, {}});
 
   REQUIRE(SaveScene(scene, scene_file).ok());
 
@@ -452,7 +452,7 @@ TEST_CASE("save rejects scenes the loader would refuse") {
 
   SUBCASE("oversized entity name") {
     Scene scene;
-    scene.entities.push_back({std::string(4097, 'a'), "builtin:cube", {}});
+    scene.entities.push_back({std::string(4097, 'a'), "builtin:cube", {}, {}});
     const auto saved = SaveScene(scene, file);
     REQUIRE_FALSE(saved.ok());
     CHECK((saved.error() == SceneIoError::kInvalidScene));
@@ -462,7 +462,7 @@ TEST_CASE("save rejects scenes the loader would refuse") {
 
   SUBCASE("non-finite position") {
     Scene scene;
-    scene.entities.push_back({"Bad", "builtin:cube", {}});
+    scene.entities.push_back({"Bad", "builtin:cube", {}, {}});
     scene.entities[0].transform.position.x = std::bit_cast<float>(0x7FC00000U);
     const auto saved = SaveScene(scene, file);
     REQUIRE_FALSE(saved.ok());
@@ -624,7 +624,7 @@ TEST_CASE("save rejects invalid physics data without writing anything") {
   const std::string file = dir.Child("invalid_physics.bscn");
 
   Scene scene;
-  scene.entities.push_back({"Body", "builtin:cube", {}});
+  scene.entities.push_back({"Body", "builtin:cube", {}, {}});
   scene.entities[0].body = RigidBody{};
 
   SUBCASE("non-positive dynamic mass") { scene.entities[0].body->mass = 0.0f; }
