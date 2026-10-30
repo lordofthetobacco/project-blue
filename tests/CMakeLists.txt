@@ -25,16 +25,20 @@ add_executable(blue_tests
     file_system_test.cc
     physics_world_test.cc
     scene_physics_test.cc
+    cascades_test.cc
+    shader_compiler_test.cc
+    shader_watcher_test.cc
 )
 
 target_include_directories(blue_tests PRIVATE ${CMAKE_SOURCE_DIR})
 
 target_compile_definitions(blue_tests PRIVATE
     BLUE_SAMPLES_DIR="${CMAKE_SOURCE_DIR}/samples"
+    BLUE_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
 )
 
 blue_target_defaults(blue_tests)
 
-target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_input_mapper blue_physics doctest::doctest)
+target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_input_mapper blue_physics blue_lighting blue_shader doctest::doctest)
 
 add_test(NAME blue_tests COMMAND blue_tests)

@@ -73,12 +73,30 @@ struct SceneLight {
   float intensity = 18.0f;
 };
 
-// The contents of a scene file: entities plus the camera, light and ambient
-// term that make up the environment.
+// Directional light (the sun). `direction` is the direction the light
+// travels, normalized: (0, -1, 0) for a sun straight overhead.
+struct SunLight {
+  // normalize(-0.4, -1.0, -0.3); the unnormalized length is sqrt(1.25).
+  glm::vec3 direction{-0.357771f, -0.894427f, -0.268328f};
+  glm::vec3 color{1.0f, 0.95f, 0.85f};  // Linear RGB.
+  float intensity = 3.0f;
+  bool casts_shadows = true;
+};
+
+// Returns why `sun` is invalid, or std::nullopt if it is valid: every value
+// must be finite, the direction must be longer than 1e-6 (it need not be
+// normalized), and color and intensity must be >= 0. The returned view points
+// to a string literal.
+[[nodiscard]] std::optional<std::string_view> ValidateSunLight(
+    const SunLight& sun);
+
+// The contents of a scene file: entities plus the camera, light, sun and
+// ambient term that make up the environment.
 struct Scene {
   std::vector<Entity> entities;
   SceneCamera camera;
   SceneLight light;
+  SunLight sun;
   glm::vec3 ambient{0.025f};
   glm::vec3 gravity{0.0f, -9.81f, 0.0f};  // m/s^2
 };

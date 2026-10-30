@@ -2,7 +2,11 @@
 
 #include <imgui_impl_vulkan.h>
 
+#include <cstdint>
 #include <cstring>
+#include <memory>
+#include <span>
+#include <string>
 
 #include <glm/mat4x4.hpp>
 #include <glm/matrix.hpp>
@@ -21,7 +25,7 @@ namespace {
 constexpr float kDepthClearValue = 0.0f;
 constexpr VkCompareOp kDepthCompareOp = VK_COMPARE_OP_GREATER;
 
-// Must match FrameUniforms in shaders/mesh.*  (std140).
+// Must match FrameUniforms in shaders/common.glsl (std140).
 struct FrameUniforms {
   glm::mat4 view_proj;
   glm::vec4 camera_position;
@@ -91,11 +95,12 @@ ImageDesc DepthImageDesc(VkExtent2D extent) {
 }
 
 GraphicsPipelineDesc MeshPipelineDesc(
-    const std::string& shader_dir,
+    std::span<const uint32_t> vertex_spirv,
+    std::span<const uint32_t> fragment_spirv,
     const VkDescriptorSetLayout& frame_set_layout, VkFormat color_format) {
   return {
-      .vertex_shader = core::JoinPath(shader_dir, "mesh.vert.spv"),
-      .fragment_shader = core::JoinPath(shader_dir, "mesh.frag.spv"),
+      .vertex_spirv = vertex_spirv,
+      .fragment_spirv = fragment_spirv,
       .vertex_bindings = kVertexBindings,
       .vertex_attributes = kVertexAttributes,
       .set_layouts = {&frame_set_layout, 1},
@@ -139,18 +144,31 @@ void ImageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,
 }  // namespace
 
 Renderer::Renderer(const platform::Window& window,
-                   const std::string& shader_dir)
+                   const std::string& shader_dir,
+                   shader::CompileMode shader_mode)
     : window_(window),
       context_(window),
       swapchain_(context_, window.PixelSize(), vsync_),
       depth_(context_, DepthImageDesc(swapchain_.extent())),
       frame_set_layout_(CreateFrameSetLayout(context_.device())),
       descriptor_pool_(CreateDescriptorPool(context_.device())),
-      mesh_pipeline_(
-          context_.device(),
-          MeshPipelineDesc(shader_dir, frame_set_layout_, swapchain_.format())),
+      shader_programs_(context_.device(), shader_mode),
       gpu_timer_(context_) {
+  AddMeshProgram(shader_dir);
   CreateFrames();
+}
+
+void Renderer::AddMeshProgram(const std::string& shader_dir) {
+  shader_programs_.Add(
+      core::JoinPath(shader_dir, "mesh.vert"),
+      core::JoinPath(shader_dir, "mesh.frag"),
+      [this](std::span<const uint32_t> vertex,
+             std::span<const uint32_t> fragment) {
+        mesh_pipeline_ = std::make_unique<Pipeline>(
+            context_.device(),
+            MeshPipelineDesc(vertex, fragment, frame_set_layout_,
+                             swapchain_.format()));
+      });
 }
 
 Renderer::~Renderer() {
@@ -452,9 +470,9 @@ void Renderer::BeginRendering(VkCommandBuffer cmd, uint32_t image_index) const {
 void Renderer::DrawScene(VkCommandBuffer cmd, const Frame& frame,
                          const SceneView& view) {
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    mesh_pipeline_.handle());
+                    mesh_pipeline_->handle());
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          mesh_pipeline_.layout(), 0, 1, &frame.descriptor_set,
+                          mesh_pipeline_->layout(), 0, 1, &frame.descriptor_set,
                           0, nullptr);
 
   stats_ = {};
@@ -464,7 +482,7 @@ void Renderer::DrawScene(VkCommandBuffer cmd, const Frame& frame,
         .model = item.transform,
         .normal_matrix = glm::transpose(glm::inverse(item.transform)),
     };
-    vkCmdPushConstants(cmd, mesh_pipeline_.layout(),
+    vkCmdPushConstants(cmd, mesh_pipeline_->layout(),
                        kDrawConstantsRange.stageFlags, 0, sizeof(draw), &draw);
     mesh.Draw(cmd);
     ++stats_.draw_calls;

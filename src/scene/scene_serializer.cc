@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include <glm/geometric.hpp>
+
 #include "core/path.h"
 #include "platform/file_system.h"
 #include "scene/binary_stream.h"
@@ -27,6 +29,11 @@ constexpr size_t kMaxSceneFileSize = 64 * 1024 * 1024;
 constexpr uint32_t kEnvironmentChunk = MakeFourcc('E', 'N', 'V', 'R');
 constexpr uint32_t kEntitiesChunk = MakeFourcc('E', 'N', 'T', 'S');
 constexpr uint32_t kPhysicsChunk = MakeFourcc('P', 'H', 'Y', 'S');
+constexpr uint32_t kSunChunk = MakeFourcc('S', 'U', 'N', ' ');
+
+// SUN chunk size: vec3 direction, vec3 color, f32 intensity, u32 flags.
+constexpr size_t kSunChunkBytes = 8 * sizeof(uint32_t);
+constexpr uint32_t kSunCastsShadowsFlag = 1U << 0;
 
 // Two empty strings, vec3 position, quat, vec3 scale: the smallest possible
 // entity record.
@@ -144,10 +151,21 @@ bool HasPhysicsData(const Scene& scene) {
          std::ranges::any_of(scene.entities, HasBody);
 }
 
+// Returns whether the SUN chunk carries information: any field that differs
+// from the default sun. Scenes with the default sun are written without the
+// chunk, so they stay byte-identical to files from before the sun existed.
+bool HasSunData(const SunLight& sun) {
+  const SunLight defaults;
+  return sun.direction != defaults.direction || sun.color != defaults.color ||
+         sun.intensity != defaults.intensity ||
+         sun.casts_shadows != defaults.casts_shadows;
+}
+
 // Rejects scenes the loader would refuse, so a save never produces an
 // unreadable file.
 bool IsSerializable(const Scene& scene, const std::string& scene_dir) {
-  if (!IsEnvironmentFinite(scene) || !IsFinite(scene.gravity)) {
+  if (!IsEnvironmentFinite(scene) || !IsFinite(scene.gravity) ||
+      ValidateSunLight(scene.sun).has_value()) {
     return false;
   }
   return std::ranges::all_of(scene.entities, [&](const Entity& entity) {
@@ -184,8 +202,18 @@ void EncodePhysics(const Scene& scene, BinaryWriter& writer) {
   writer.EndChunk(chunk);
 }
 
+// Appends the SUN chunk for `sun`.
+void EncodeSun(const SunLight& sun, BinaryWriter& writer) {
+  const size_t chunk = writer.BeginChunk(kSunChunk);
+  WriteVec3(writer, sun.direction);
+  WriteVec3(writer, sun.color);
+  writer.WriteF32(sun.intensity);
+  writer.WriteU32(sun.casts_shadows ? kSunCastsShadowsFlag : 0U);
+  writer.EndChunk(chunk);
+}
+
 // Returns the chunked payload (environment, entities, then the optional
-// physics chunk) for `scene`.
+// physics and sun chunks) for `scene`.
 std::vector<std::byte> EncodePayload(const Scene& scene,
                                      const std::string& scene_dir) {
   BinaryWriter writer;
@@ -213,6 +241,9 @@ std::vector<std::byte> EncodePayload(const Scene& scene,
 
   if (HasPhysicsData(scene)) {
     EncodePhysics(scene, writer);
+  }
+  if (HasSunData(scene.sun)) {
+    EncodeSun(scene.sun, writer);
   }
   return writer.bytes();
 }
@@ -315,6 +346,30 @@ Status DecodePhysics(std::span<const std::byte> body, Scene& scene) {
   return Status::Ok();
 }
 
+// Decodes the SUN chunk `body` into `scene.sun`, normalizing the direction.
+Status DecodeSun(std::span<const std::byte> body, Scene& scene) {
+  if (body.size() != kSunChunkBytes) {
+    return Status::Error(SceneIoError::kCorrupt);
+  }
+  BinaryReader reader(body);
+  SunLight sun;
+  sun.direction = ReadVec3(reader);
+  sun.color = ReadVec3(reader);
+  sun.intensity = reader.ReadF32();
+  const uint32_t flags = reader.ReadU32();
+  if (auto status = ToResult(reader.status()); !status.ok()) {
+    return status;
+  }
+  if ((flags & ~kSunCastsShadowsFlag) != 0 ||
+      ValidateSunLight(sun).has_value()) {
+    return Status::Error(SceneIoError::kCorrupt);
+  }
+  sun.casts_shadows = (flags & kSunCastsShadowsFlag) != 0;
+  sun.direction = glm::normalize(sun.direction);
+  scene.sun = sun;
+  return Status::Ok();
+}
+
 // Validates the header and checksum of the scene file `file` and decodes its
 // chunks. Unknown chunks are skipped.
 SceneResult DecodeFile(std::span<const std::byte> file,
@@ -352,6 +407,7 @@ SceneResult DecodeFile(std::span<const std::byte> file,
   Scene scene;
   bool has_environment = false;
   bool has_entities = false;
+  bool has_sun = false;
   std::optional<std::span<const std::byte>> physics;
   BinaryReader chunks(payload);
   while (chunks.remaining() > 0) {
@@ -372,6 +428,14 @@ SceneResult DecodeFile(std::span<const std::byte> file,
         return SceneResult::Error(SceneIoError::kCorrupt);
       }
       physics = body;
+    } else if (fourcc == kSunChunk) {
+      if (has_sun) {
+        return SceneResult::Error(SceneIoError::kCorrupt);
+      }
+      has_sun = true;
+      if (auto decoded = DecodeSun(body, scene); !decoded.ok()) {
+        return SceneResult::Error(decoded.error());
+      }
     } else if (fourcc == kEnvironmentChunk || fourcc == kEntitiesChunk) {
       bool& seen = fourcc == kEnvironmentChunk ? has_environment : has_entities;
       if (seen) {
@@ -418,7 +482,7 @@ const char* ToString(SceneIoError error) {
       return "corrupt scene data";
     case SceneIoError::kInvalidScene:
       return "scene cannot be serialized (oversized string, non-finite "
-             "value or invalid rigid body)";
+             "value, invalid rigid body or invalid sun)";
   }
   return "unknown error";
 }

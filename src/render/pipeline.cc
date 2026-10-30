@@ -1,46 +1,24 @@
 #include "render/pipeline.h"
 
-#include <array>
-#include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <string>
+#include <span>
 #include <vector>
 
 #include "core/log.h"
-#include "platform/file_system.h"
 #include "render/vk_check.h"
 
 namespace blue::render {
 
 namespace {
 
-constexpr size_t kMaxShaderBytes = 16 * 1024 * 1024;
-
-// Reads the SPIR-V binary at `path`. Fatal if it is missing or malformed.
-std::vector<uint32_t> ReadSpirv(const std::string& path) {
-  const auto file = platform::ReadFile(path, kMaxShaderBytes);
-  if (!file.ok()) {
-    core::log::Fatal("Cannot read shader {}: {}", path,
-                     platform::ToString(file.error()));
+VkShaderModule CreateShaderModule(VkDevice device,
+                                  std::span<const uint32_t> code) {
+  if (code.empty()) {
+    core::log::Fatal("Cannot create a pipeline from empty SPIR-V");
   }
-
-  const std::vector<std::byte>& bytes = file.value();
-  if (bytes.empty() || bytes.size() % sizeof(uint32_t) != 0) {
-    core::log::Fatal("Shader {} is not valid SPIR-V ({} bytes)", path,
-                     bytes.size());
-  }
-
-  std::vector<uint32_t> code(bytes.size() / sizeof(uint32_t));
-  std::memcpy(code.data(), bytes.data(), bytes.size());
-  return code;
-}
-
-VkShaderModule CreateShaderModule(VkDevice device, const std::string& path) {
-  const std::vector<uint32_t> code = ReadSpirv(path);
   const VkShaderModuleCreateInfo create_info{
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = code.size() * sizeof(uint32_t),
+      .codeSize = code.size_bytes(),
       .pCode = code.data(),
   };
   VkShaderModule module = VK_NULL_HANDLE;
@@ -63,24 +41,25 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
   CheckVk(vkCreatePipelineLayout(device_, &layout_info, nullptr, &layout_));
 
   const VkShaderModule vertex_module =
-      CreateShaderModule(device_, desc.vertex_shader);
-  const VkShaderModule fragment_module =
-      CreateShaderModule(device_, desc.fragment_shader);
+      CreateShaderModule(device_, desc.vertex_spirv);
+  VkShaderModule fragment_module = VK_NULL_HANDLE;
 
-  const std::array stages = {
-      VkPipelineShaderStageCreateInfo{
-          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          .stage = VK_SHADER_STAGE_VERTEX_BIT,
-          .module = vertex_module,
-          .pName = "main",
-      },
-      VkPipelineShaderStageCreateInfo{
-          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-          .module = fragment_module,
-          .pName = "main",
-      },
-  };
+  std::vector<VkPipelineShaderStageCreateInfo> stages;
+  stages.push_back({
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage = VK_SHADER_STAGE_VERTEX_BIT,
+      .module = vertex_module,
+      .pName = "main",
+  });
+  if (!desc.fragment_spirv.empty()) {
+    fragment_module = CreateShaderModule(device_, desc.fragment_spirv);
+    stages.push_back({
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragment_module,
+        .pName = "main",
+    });
+  }
 
   const VkPipelineVertexInputStateCreateInfo vertex_input{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -102,9 +81,11 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
   };
   const VkPipelineRasterizationStateCreateInfo rasterization{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .depthClampEnable = desc.depth_clamp,
       .polygonMode = VK_POLYGON_MODE_FILL,
       .cullMode = desc.cull_mode,
       .frontFace = desc.front_face,
+      .depthBiasEnable = desc.depth_bias,
       .lineWidth = 1.0f,
   };
   const VkPipelineMultisampleStateCreateInfo multisample{
@@ -123,13 +104,18 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
   };
+  const uint32_t color_attachment_count =
+      desc.color_format != VK_FORMAT_UNDEFINED ? 1 : 0;
   const VkPipelineColorBlendStateCreateInfo color_blend{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-      .attachmentCount = 1,
+      .attachmentCount = color_attachment_count,
       .pAttachments = &blend_attachment,
   };
-  constexpr std::array dynamic_states = {VK_DYNAMIC_STATE_VIEWPORT,
-                                         VK_DYNAMIC_STATE_SCISSOR};
+  std::vector<VkDynamicState> dynamic_states = {VK_DYNAMIC_STATE_VIEWPORT,
+                                                VK_DYNAMIC_STATE_SCISSOR};
+  if (desc.depth_bias) {
+    dynamic_states.push_back(VK_DYNAMIC_STATE_DEPTH_BIAS);
+  }
   const VkPipelineDynamicStateCreateInfo dynamic_state{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
       .dynamicStateCount = static_cast<uint32_t>(dynamic_states.size()),
@@ -137,7 +123,7 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
   };
   const VkPipelineRenderingCreateInfo rendering_info{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-      .colorAttachmentCount = 1,
+      .colorAttachmentCount = color_attachment_count,
       .pColorAttachmentFormats = &desc.color_format,
       .depthAttachmentFormat = desc.depth_format,
   };
@@ -160,7 +146,9 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
   CheckVk(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &create_info,
                                     nullptr, &pipeline_));
 
-  vkDestroyShaderModule(device_, fragment_module, nullptr);
+  if (fragment_module != VK_NULL_HANDLE) {
+    vkDestroyShaderModule(device_, fragment_module, nullptr);
+  }
   vkDestroyShaderModule(device_, vertex_module, nullptr);
 }
 

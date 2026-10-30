@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -140,6 +142,14 @@ bool PathExists(const std::string& path) {
 bool IsRegularFile(const std::string& path) {
   SDL_PathInfo info;
   return SDL_GetPathInfo(path.c_str(), &info) && info.type == SDL_PATHTYPE_FILE;
+}
+
+std::optional<int64_t> LastWriteTime(const std::string& path) {
+  SDL_PathInfo info;
+  if (!SDL_GetPathInfo(path.c_str(), &info)) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(info.modify_time);
 }
 
 bool RemovePath(const std::string& path) {

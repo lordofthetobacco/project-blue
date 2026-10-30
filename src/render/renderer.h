@@ -7,9 +7,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/mat4x4.hpp>
@@ -23,8 +25,10 @@
 #include "render/image.h"
 #include "render/mesh.h"
 #include "render/pipeline.h"
+#include "render/shader_programs.h"
 #include "render/swapchain.h"
 #include "render/vulkan_context.h"
+#include "shader/shader_compiler.h"
 
 namespace blue::render {
 
@@ -69,8 +73,11 @@ class Renderer {
  public:
   static constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
 
-  // Loads the compiled shaders from `shader_dir`.
-  Renderer(const platform::Window& window, const std::string& shader_dir);
+  // Compiles the GLSL shaders in `shader_dir` with `shader_mode` and watches
+  // them for changes (see ReloadChangedShaders()). A shader that does not
+  // compile at startup is fatal.
+  Renderer(const platform::Window& window, const std::string& shader_dir,
+           shader::CompileMode shader_mode);
   ~Renderer();
 
   Renderer(const Renderer&) = delete;
@@ -86,6 +93,19 @@ class Renderer {
   // Rebuilds the swapchain before the next frame, e.g. after a resize.
   void RequestSwapchainRebuild() { swapchain_dirty_ = true; }
   void SetVsync(bool enabled);
+
+  // Recompiles the shaders whose sources changed and swaps in the new
+  // pipelines; a shader that fails to compile keeps its previous version.
+  // Cheap when nothing changed, but not free (it stats the watched files):
+  // call it a few times per second, not every frame, and not while a frame is
+  // being recorded.
+  void ReloadChangedShaders() { shader_programs_.ReloadChanged(); }
+  // Returns the compiler message of the most recent shader that failed to
+  // reload and has not compiled since, or an empty view. Valid until the next
+  // ReloadChangedShaders() call.
+  [[nodiscard]] std::string_view last_shader_error() const {
+    return shader_programs_.last_error();
+  }
 
   [[nodiscard]] bool vsync() const { return vsync_; }
   [[nodiscard]] const VulkanContext& context() const { return context_; }
@@ -108,6 +128,8 @@ class Renderer {
   };
 
   void CreateFrames();
+  // Registers the mesh shaders in `shader_dir` and creates the mesh pipeline.
+  void AddMeshProgram(const std::string& shader_dir);
   [[nodiscard]] bool RebuildSwapchain();
 
   // Acquires the next swapchain image for `frame`. Returns nullopt, marking
@@ -141,7 +163,9 @@ class Renderer {
   std::array<Frame, kFramesInFlight> frames_;
   size_t frame_index_ = 0;
 
-  Pipeline mesh_pipeline_;
+  ShaderPrograms shader_programs_;
+  // Replaced when its shaders are reloaded; never null after construction.
+  std::unique_ptr<Pipeline> mesh_pipeline_;
   std::vector<Mesh> meshes_;
   RenderStats stats_;
   GpuTimer gpu_timer_;

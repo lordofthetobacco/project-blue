@@ -37,14 +37,22 @@ enum class SceneIoError {
 //           without it loads with no bodies and the default gravity. May
 //           precede ENTS. motion and shape hold the MotionType / ShapeType
 //           enumerator values.
+//   'SUN '  optional, once: vec3 direction (the way the light travels),
+//           vec3 color (linear RGB), f32 intensity, u32 flags (bit 0 =
+//           casts shadows, all other bits must be 0); exactly 32 bytes.
+//           Written only if the sun differs from the default one, so scenes
+//           with the default sun stay byte-identical to older files; a file
+//           without it loads with the default sun. The direction is
+//           normalized on load.
 inline constexpr uint32_t kSceneFormatVersion = 1;
 
 // Writes `scene` to the file at `path`, creating missing directories and
 // replacing an existing file atomically. Mesh paths are stored relative to the
 // scene file so a scene folder can be moved. Returns kInvalidScene, without
 // touching the file system, if the scene holds an oversized string or a
-// non-finite value, an invalid rigid body (see ValidateRigidBody()) or a
-// non-finite gravity, and kWriteFailed if the file cannot be written.
+// non-finite value, an invalid rigid body (see ValidateRigidBody()), an invalid
+// sun (see ValidateSunLight()) or a non-finite gravity, and kWriteFailed if the
+// file cannot be written.
 [[nodiscard]] core::Result<void, SceneIoError> SaveScene(
     const Scene& scene, const std::string& path);
 
@@ -52,7 +60,8 @@ inline constexpr uint32_t kSceneFormatVersion = 1;
 // file's directory and returned in generic ('/') form. Returns kCannotOpen if
 // the file cannot be read, kCorrupt if it exceeds the size limit, and the
 // matching error for any malformed contents, including physics records that
-// refer to missing entities or fail ValidateRigidBody(); hostile sizes are
+// refer to missing entities or fail ValidateRigidBody(), and a malformed or
+// invalid SUN chunk; hostile sizes are
 // rejected before they can drive an allocation.
 [[nodiscard]] core::Result<Scene, SceneIoError> LoadScene(
     const std::string& path);

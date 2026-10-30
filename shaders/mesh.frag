@@ -1,12 +1,6 @@
 #version 450
 
-layout(set = 0, binding = 0) uniform FrameUniforms {
-    mat4 viewProj;
-    vec4 cameraPosition;
-    vec4 lightPosition;
-    vec4 lightColor;   // rgb: color, a: intensity
-    vec4 ambientColor;
-} frame;
+#include "common.glsl"
 
 layout(location = 0) in vec3 inWorldPosition;
 layout(location = 1) in vec3 inNormal;

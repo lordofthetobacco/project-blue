@@ -76,6 +76,9 @@ struct SceneOverlayInfo {
   uint64_t triangles = 0;
   std::string_view scene_path;
   std::string_view status;
+  // Compiler message of the shader that failed to reload; empty when all
+  // shaders are fine. Only its first line is shown, in red.
+  std::string_view shader_error;
 };
 
 // Dear ImGui performance overlay: FPS, CPU/GPU frame time, frame-time graph,

@@ -30,6 +30,7 @@ constexpr std::array<char, 8> kMagic = {'B', 'L', 'U', 'E',
 constexpr uint32_t kEnvr = MakeFourcc('E', 'N', 'V', 'R');
 constexpr uint32_t kEnts = MakeFourcc('E', 'N', 'T', 'S');
 constexpr uint32_t kPhys = MakeFourcc('P', 'H', 'Y', 'S');
+constexpr uint32_t kSun = MakeFourcc('S', 'U', 'N', ' ');
 constexpr uint32_t kNanBits = 0x7FC00000U;
 
 std::vector<std::byte> ReadWholeFile(const std::string& path) {
@@ -64,6 +65,13 @@ void ExpectSameScene(const Scene& a, const Scene& b) {
   CHECK(SameBits(a.light.intensity, b.light.intensity));
   CHECK(SameBits(a.ambient, b.ambient));
   CHECK(SameBits(a.gravity, b.gravity));
+  // The loader normalizes a stored direction; applying the same operation to
+  // the original makes the comparison bit-exact. A default sun is not stored.
+  CHECK((SameBits(a.sun.direction, b.sun.direction) ||
+         SameBits(glm::normalize(a.sun.direction), b.sun.direction)));
+  CHECK(SameBits(a.sun.color, b.sun.color));
+  CHECK(SameBits(a.sun.intensity, b.sun.intensity));
+  CHECK(a.sun.casts_shadows == b.sun.casts_shadows);
 
   REQUIRE(a.entities.size() == b.entities.size());
   for (size_t i = 0; i < a.entities.size(); ++i) {
@@ -201,6 +209,8 @@ Scene MakeSampleScene() {
   scene.camera = {{1.5f, 2.5f, -3.5f}, {0.1f, 0.2f, 0.3f}, 72.5f};
   scene.light = {{-4.0f, 5.0f, 6.0f}, {0.3f, 0.6f, 0.9f}, 7.25f};
   scene.ambient = {0.01f, 0.02f, 0.03f};
+  scene.sun = {{0.3f, -0.9f, 0.1f}, {0.8f, 0.7f, 0.6f}, 4.5f, false};
+  scene.sun = {{0.3f, -0.9f, 0.1f}, {0.8f, 0.7f, 0.6f}, 4.5f, false};
 
   scene.entities.push_back({"Cube", "builtin:cube", {}});
   scene.entities.push_back({"Zażółć gęślą jaźń \xF0\x9F\x9A\x80",
@@ -650,6 +660,197 @@ TEST_CASE("load rejects oversized files before reading them") {
   const auto loaded = LoadScene(file);
   REQUIRE_FALSE(loaded.ok());
   CHECK((loaded.error() == SceneIoError::kCorrupt));
+}
+
+}  // namespace blue::scene
+
+namespace blue::scene {
+namespace {
+
+// Raw fields of a SUN chunk, for building valid and malformed ones.
+struct SunFields {
+  glm::vec3 direction{0.0f, -1.0f, 0.0f};
+  glm::vec3 color{1.0f, 0.5f, 0.25f};
+  float intensity = 2.0f;
+  uint32_t flags = 1;
+};
+
+void WriteSunChunk(BinaryWriter& writer, const SunFields& fields) {
+  const size_t chunk = writer.BeginChunk(kSun);
+  WriteVec3(writer, fields.direction.x, fields.direction.y, fields.direction.z);
+  WriteVec3(writer, fields.color.x, fields.color.y, fields.color.z);
+  writer.WriteF32(fields.intensity);
+  writer.WriteU32(fields.flags);
+  writer.EndChunk(chunk);
+}
+
+// Payload with ENVR, no entities and the given extra chunks.
+std::vector<std::byte> MakeSunPayload(std::span<const std::byte> sun_chunks) {
+  BinaryWriter payload;
+  WriteEnvironmentChunk(payload);
+  WriteEntitiesChunk(payload, 0);
+  payload.WriteBytes(sun_chunks);
+  return payload.bytes();
+}
+
+}  // namespace
+
+TEST_CASE("sun round trips and is written only when it is not the default") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("sun.bscn");
+  constexpr std::string_view kFourcc = "SUN ";
+
+  SUBCASE("custom sun") {
+    Scene scene;
+    scene.sun = {{0.3f, -0.9f, 0.1f}, {0.8f, 0.7f, 0.6f}, 4.5f, false};
+    REQUIRE(SaveScene(scene, file).ok());
+    const auto loaded = LoadScene(file);
+    REQUIRE(loaded.ok());
+    ExpectSameScene(scene, loaded.value());
+    CHECK(glm::length(loaded.value().sun.direction) ==
+          doctest::Approx(1.0f).epsilon(1e-6));
+    CHECK_FALSE(loaded.value().sun.casts_shadows);
+  }
+
+  SUBCASE("a non-normalized direction is normalized on load") {
+    Scene scene;
+    scene.sun.direction = {0.0f, -5.0f, 0.0f};
+    REQUIRE(SaveScene(scene, file).ok());
+    const auto loaded = LoadScene(file);
+    REQUIRE(loaded.ok());
+    CHECK(loaded.value().sun.direction == glm::vec3(0.0f, -1.0f, 0.0f));
+  }
+
+  SUBCASE("the default sun has no SUN chunk") {
+    REQUIRE(SaveScene(Scene{}, file).ok());
+    const std::vector<std::byte> raw = ReadWholeFile(file);
+    CHECK(std::ranges::search(raw, std::as_bytes(std::span(kFourcc))).empty());
+  }
+
+  SUBCASE("a sun differing only in the shadow flag is written") {
+    Scene scene;
+    scene.sun.casts_shadows = false;
+    REQUIRE(SaveScene(scene, file).ok());
+    const auto loaded = LoadScene(file);
+    REQUIRE(loaded.ok());
+    CHECK_FALSE(loaded.value().sun.casts_shadows);
+  }
+}
+
+TEST_CASE("files without a SUN chunk load with the default sun") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("no_sun.bscn");
+  WriteWholeFile(file, MakeEmptySceneFile());
+  const auto loaded = LoadScene(file);
+  REQUIRE(loaded.ok());
+  const SunLight defaults;
+  CHECK(loaded.value().sun.direction == defaults.direction);
+  CHECK(loaded.value().sun.color == defaults.color);
+  CHECK(loaded.value().sun.intensity == defaults.intensity);
+  CHECK(loaded.value().sun.casts_shadows == defaults.casts_shadows);
+}
+
+TEST_CASE("a valid hand-built SUN chunk loads") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("hand_sun.bscn");
+  BinaryWriter sun;
+  WriteSunChunk(sun, {});
+  WriteWholeFile(file, MakeFile(MakeSunPayload(sun.bytes())));
+  const auto loaded = LoadScene(file);
+  REQUIRE(loaded.ok());
+  CHECK(loaded.value().sun.color == glm::vec3(1.0f, 0.5f, 0.25f));
+  CHECK(loaded.value().sun.intensity == 2.0f);
+  CHECK(loaded.value().sun.casts_shadows);
+}
+
+TEST_CASE("malformed SUN chunks are rejected as corrupt") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("bad_sun.bscn");
+  const float nan = std::bit_cast<float>(kNanBits);
+
+  const auto expect_corrupt = [&](const BinaryWriter& sun) {
+    WriteWholeFile(file, MakeFile(MakeSunPayload(sun.bytes())));
+    const auto loaded = LoadScene(file);
+    REQUIRE_FALSE(loaded.ok());
+    CHECK((loaded.error() == SceneIoError::kCorrupt));
+  };
+  const auto expect_fields_corrupt = [&](const SunFields& fields) {
+    BinaryWriter sun;
+    WriteSunChunk(sun, fields);
+    expect_corrupt(sun);
+  };
+
+  SUBCASE("non-finite direction") {
+    expect_fields_corrupt({.direction = {nan, -1.0f, 0.0f}});
+  }
+
+  SUBCASE("zero direction") {
+    expect_fields_corrupt({.direction = {0.0f, 0.0f, 0.0f}});
+  }
+
+  SUBCASE("negative color") {
+    expect_fields_corrupt({.color = {1.0f, -0.1f, 1.0f}});
+  }
+
+  SUBCASE("non-finite color") {
+    expect_fields_corrupt({.color = {1.0f, nan, 1.0f}});
+  }
+
+  SUBCASE("negative intensity") { expect_fields_corrupt({.intensity = -1.0f}); }
+
+  SUBCASE("non-finite intensity") { expect_fields_corrupt({.intensity = nan}); }
+
+  SUBCASE("unknown flag bits") {
+    expect_fields_corrupt({.flags = 2});
+    expect_fields_corrupt({.flags = 0x80000001U});
+  }
+
+  SUBCASE("chunk too short") {
+    BinaryWriter sun;
+    const size_t chunk = sun.BeginChunk(kSun);
+    WriteVec3(sun, 0.0f, -1.0f, 0.0f);
+    sun.EndChunk(chunk);
+    expect_corrupt(sun);
+  }
+
+  SUBCASE("chunk too long") {
+    BinaryWriter sun;
+    const size_t chunk = sun.BeginChunk(kSun);
+    WriteVec3(sun, 0.0f, -1.0f, 0.0f);
+    WriteVec3(sun, 1.0f, 1.0f, 1.0f);
+    sun.WriteF32(1.0f);
+    sun.WriteU32(1);
+    sun.WriteU32(0);
+    sun.EndChunk(chunk);
+    expect_corrupt(sun);
+  }
+
+  SUBCASE("duplicate SUN chunk") {
+    BinaryWriter sun;
+    WriteSunChunk(sun, {});
+    WriteSunChunk(sun, {});
+    expect_corrupt(sun);
+  }
+}
+
+TEST_CASE("save rejects an invalid sun without writing anything") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("invalid_sun.bscn");
+  const float nan = std::bit_cast<float>(kNanBits);
+
+  Scene scene;
+  SUBCASE("non-finite direction") { scene.sun.direction.x = nan; }
+  SUBCASE("zero direction") { scene.sun.direction = glm::vec3(0.0f); }
+  SUBCASE("negative color") { scene.sun.color.z = -0.5f; }
+  SUBCASE("non-finite color") { scene.sun.color.y = nan; }
+  SUBCASE("negative intensity") { scene.sun.intensity = -2.0f; }
+  SUBCASE("non-finite intensity") { scene.sun.intensity = nan; }
+
+  const auto saved = SaveScene(scene, file);
+  REQUIRE_FALSE(saved.ok());
+  CHECK((saved.error() == SceneIoError::kInvalidScene));
+  CHECK_FALSE(platform::PathExists(file));
+  CHECK_FALSE(platform::PathExists(file + ".tmp"));
 }
 
 }  // namespace blue::scene

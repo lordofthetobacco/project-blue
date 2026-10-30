@@ -2,6 +2,8 @@
 #define BLUE_PLATFORM_FILE_SYSTEM_H_
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -53,6 +55,12 @@ bool PathExists(const std::string& path);
 
 // Returns true if `path` exists and is a regular file (not a directory).
 bool IsRegularFile(const std::string& path);
+
+// Returns the last modification time of the file or directory at `path` in
+// nanoseconds since the Unix epoch, or nullopt if it does not exist or its
+// metadata cannot be read. Only meaningful for comparing two readings of the
+// same path: the file system decides the granularity.
+std::optional<int64_t> LastWriteTime(const std::string& path);
 
 // Removes a file or an empty directory. Returns true on success, and also
 // when nothing exists at `path`; false if the removal failed (for example a

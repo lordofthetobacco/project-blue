@@ -87,7 +87,9 @@ bool SupportsRequiredFeatures(VkPhysicalDevice device) {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
       .pNext = &features13};
   vkGetPhysicalDeviceFeatures2(device, &features);
-  return features13.dynamicRendering && features13.synchronization2;
+  // Depth clamp keeps shadow casters in front of a cascade's near plane.
+  return features13.dynamicRendering && features13.synchronization2 &&
+         features.features.depthClamp;
 }
 
 // Returns a family that can both render and present; true for every desktop
@@ -296,6 +298,7 @@ void VulkanContext::CreateDevice() {
   const VkPhysicalDeviceFeatures2 features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
       .pNext = &features13,
+      .features = {.depthClamp = VK_TRUE},
   };
 
   const VkDeviceCreateInfo create_info{

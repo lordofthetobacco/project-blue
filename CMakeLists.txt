@@ -12,10 +12,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-find_package(Vulkan 1.3 REQUIRED COMPONENTS glslc)
+find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
 
 include(Dependencies)
-include(CompileShaders)
+include(ShaderSources)
 include(ProjectOptions)
 
 # Path handling and file system access (src/core/path.cc is pure; file_system.cc sits on
@@ -59,6 +59,17 @@ blue_target_defaults(blue_scene)
 
 target_link_libraries(blue_scene PUBLIC blue_core glm::glm)
 
+# Cascaded shadow map math for the sun (glm only).
+add_library(blue_lighting STATIC
+    src/lighting/cascades.cc
+)
+
+target_include_directories(blue_lighting PUBLIC src)
+
+blue_target_defaults(blue_lighting)
+
+target_link_libraries(blue_lighting PUBLIC glm::glm)
+
 # Rigid-body simulation on JoltPhysics. Jolt stays private: no Jolt type appears in the
 # public physics headers (its JPH_* definitions still propagate PUBLIC from Jolt itself,
 # so any target that includes Jolt headers gets matching settings).
@@ -100,6 +111,30 @@ blue_target_defaults(blue_input_mapper)
 
 target_link_libraries(blue_input_mapper PUBLIC blue_camera SDL3::SDL3-static glm::glm)
 
+# Runtime GLSL -> SPIR-V compilation (shaderc) and source change detection. No Vulkan device
+# needed. shaderc stays private: no shaderc type appears in the public headers. The imported
+# target links shaderc_combinedd.lib in Debug and shaderc_combined.lib otherwise, matching the
+# /MDd vs /MD runtime of this project.
+add_library(blue_shader STATIC
+    src/shader/shader_compiler.cc
+    src/shader/shader_watcher.cc
+)
+
+target_include_directories(blue_shader PUBLIC src)
+
+blue_target_defaults(blue_shader)
+
+target_link_libraries(blue_shader
+    PUBLIC blue_core
+    PRIVATE Vulkan::shaderc_combined
+)
+
+if(MSVC)
+    # The SDK's static shaderc libraries reference PDBs it does not ship (LNK4099 for every
+    # object). Nothing can be done about it in first-party code, so mute it for the linkers.
+    target_link_options(blue_shader INTERFACE /ignore:4099)
+endif()
+
 add_executable(project-blue
     src/main.cc
     src/app.cc
@@ -109,6 +144,7 @@ add_executable(project-blue
     src/render/buffer.cc
     src/render/image.cc
     src/render/pipeline.cc
+    src/render/shader_programs.cc
     src/render/gpu_timer.cc
     src/render/mesh.cc
     src/render/mesh_cache.cc
@@ -132,6 +168,7 @@ target_link_libraries(project-blue PRIVATE
     blue_physics
     blue_camera
     blue_input_mapper
+    blue_shader
     Vulkan::Vulkan
     SDL3::SDL3-static
     glm::glm
@@ -139,9 +176,12 @@ target_link_libraries(project-blue PRIVATE
     imgui
 )
 
-blue_compile_shaders(project-blue
-    shaders/mesh.vert
-    shaders/mesh.frag
+blue_copy_shader_sources(project-blue)
+
+# Debug builds compile the repo's shader sources directly, so edits apply live without
+# rebuilding; Release uses the copy next to the executable.
+target_compile_definitions(project-blue PRIVATE
+    $<$<CONFIG:Debug>:BLUE_DEV_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders">
 )
 
 option(BLUE_BUILD_TESTS "Build the unit tests" ON)

@@ -4,6 +4,7 @@
 
 #include <limits>
 
+#include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 namespace blue::scene {
@@ -89,6 +90,61 @@ TEST_CASE("ValidateRigidBody names the reason for an invalid body") {
   SUBCASE("triangle mesh needs a static body") {
     body.shape = ShapeType::kTriangleMesh;
     CHECK(ValidateRigidBody(body).has_value());
+  }
+}
+
+}  // namespace blue::scene
+
+namespace blue::scene {
+
+TEST_CASE("scene defaults to a normalized, shadow-casting sun") {
+  const Scene scene;
+  CHECK(glm::length(scene.sun.direction) ==
+        doctest::Approx(1.0f).epsilon(1e-5));
+  const glm::vec3 expected = glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f));
+  CHECK(scene.sun.direction.x == doctest::Approx(expected.x).epsilon(1e-5));
+  CHECK(scene.sun.direction.y == doctest::Approx(expected.y).epsilon(1e-5));
+  CHECK(scene.sun.direction.z == doctest::Approx(expected.z).epsilon(1e-5));
+  CHECK(scene.sun.intensity == 3.0f);
+  CHECK(scene.sun.casts_shadows);
+  CHECK_FALSE(ValidateSunLight(scene.sun).has_value());
+}
+
+TEST_CASE("ValidateSunLight accepts edge values and names invalid ones") {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  SunLight sun;
+
+  SUBCASE("valid edge values") {
+    sun.direction = {5.0f, 0.0f, 0.0f};  // Need not be normalized.
+    sun.color = glm::vec3(0.0f);
+    sun.intensity = 0.0f;
+    CHECK_FALSE(ValidateSunLight(sun).has_value());
+  }
+
+  SUBCASE("direction") {
+    sun.direction = glm::vec3(0.0f);
+    CHECK(ValidateSunLight(sun).has_value());
+    sun.direction = {1e-7f, 0.0f, 0.0f};
+    CHECK(ValidateSunLight(sun).has_value());
+    sun.direction = {nan, -1.0f, 0.0f};
+    CHECK(ValidateSunLight(sun).has_value());
+    sun.direction = {0.0f, inf, 0.0f};
+    CHECK(ValidateSunLight(sun).has_value());
+  }
+
+  SUBCASE("color") {
+    sun.color.x = -0.01f;
+    CHECK(ValidateSunLight(sun).has_value());
+    sun.color = {1.0f, 1.0f, nan};
+    CHECK(ValidateSunLight(sun).has_value());
+  }
+
+  SUBCASE("intensity") {
+    sun.intensity = -0.01f;
+    CHECK(ValidateSunLight(sun).has_value());
+    sun.intensity = inf;
+    CHECK(ValidateSunLight(sun).has_value());
   }
 }
 

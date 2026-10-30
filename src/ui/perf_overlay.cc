@@ -17,6 +17,7 @@ namespace blue::ui {
 namespace {
 
 constexpr uint32_t kImGuiDescriptorPoolSize = 8;
+constexpr ImVec4 kShaderErrorColor{1.0f, 0.3f, 0.3f, 1.0f};
 
 void CheckImGuiVkResult(VkResult result) { render::CheckVk(result); }
 
@@ -77,6 +78,14 @@ void DrawSceneInfo(const SceneOverlayInfo& scene_info) {
   TextView(scene_info.scene_path);
   if (!scene_info.status.empty()) {
     TextView(scene_info.status);
+  }
+  if (!scene_info.shader_error.empty()) {
+    // The full message is in the log; one line keeps the overlay compact.
+    const std::string_view first_line = scene_info.shader_error.substr(
+        0, scene_info.shader_error.find_first_of("\r\n"));
+    ImGui::PushStyleColor(ImGuiCol_Text, kShaderErrorColor);
+    TextView(first_line);
+    ImGui::PopStyleColor();
   }
   ImGui::TextDisabled(
       "WASD move  Tab fly/orbit  F push  I invert Y  [ ] sens  F1 overlay  "

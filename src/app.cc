@@ -20,13 +20,14 @@
 #include "platform/file_system.h"
 #include "scene/placement.h"
 #include "scene/scene_serializer.h"
+#include "shader/shader_compiler.h"
 
 namespace blue {
 
 namespace {
 
-constexpr int kInitialWidth = 1600;
-constexpr int kInitialHeight = 900;
+constexpr int kInitialWidth = 1920;
+constexpr int kInitialHeight = 1080;
 constexpr float kNearPlane = 0.1f;
 // Avoids jumps after stalls (window drag, breakpoints).
 constexpr float kMaxSimulationStep = 0.1f;
@@ -43,7 +44,23 @@ constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
 constexpr const char* kDefaultScenePath = "scenes/untitled.bscn";
 constexpr const char* kSettingsFileName = "input.cfg";
 
+#ifdef NDEBUG
+constexpr shader::CompileMode kShaderCompileMode =
+    shader::CompileMode::kRelease;
+#else
+constexpr shader::CompileMode kShaderCompileMode = shader::CompileMode::kDebug;
+#endif
+
+// How often the shader sources are checked for edits (wall time).
+constexpr std::chrono::milliseconds kShaderPollInterval{250};
+
 std::string ShaderDirectory() {
+#ifdef BLUE_DEV_SHADER_DIR
+  // Debug builds use the repository sources so that edits apply live.
+  if (platform::PathExists(BLUE_DEV_SHADER_DIR)) {
+    return BLUE_DEV_SHADER_DIR;
+  }
+#endif
   // Shaders are deployed next to the executable, so lookups do not depend on
   // the working directory.
   return core::JoinPath(platform::BasePath(), "shaders");
@@ -115,7 +132,7 @@ std::optional<CliOptions> ParseCommandLine(int argc, const char* const argv[]) {
 
 App::App(const CliOptions& options)
     : window_("Project Blue", kInitialWidth, kInitialHeight),
-      renderer_(window_, ShaderDirectory()),
+      renderer_(window_, ShaderDirectory(), kShaderCompileMode),
       mesh_cache_(renderer_),
       physics_world_(physics_runtime_),
       scene_physics_(physics_world_),
@@ -258,6 +275,7 @@ void App::ReloadCurrentScene() {
 int App::Run() {
   using Clock = std::chrono::steady_clock;
   auto previous = Clock::now();
+  auto next_shader_poll = previous + kShaderPollInterval;
 
   for (;;) {
     SDL_Event event;
@@ -295,6 +313,12 @@ int App::Run() {
     physics_world_.Update(frame_seconds);
     scene_physics_.SyncToScene(scene_);
 
+    // Between frames: no command buffer is being recorded.
+    if (now >= next_shader_poll) {
+      renderer_.ReloadChangedShaders();
+      next_shader_poll = now + kShaderPollInterval;
+    }
+
     const physics::PhysicsStats physics_stats = physics_world_.Stats();
     const render::RenderStats stats = renderer_.stats();
     const ui::SceneOverlayInfo scene_info{
@@ -309,6 +333,7 @@ int App::Run() {
         .triangles = stats.triangles,
         .scene_path = scene_path_,
         .status = status_,
+        .shader_error = renderer_.last_shader_error(),
     };
     ImDrawData* draw_data = overlay_.Build(
         frame_seconds * 1000.0f, renderer_.gpu_frame_ms(), scene_info);
