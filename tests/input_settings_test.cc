@@ -1,13 +1,17 @@
 #include "input/input_settings.h"
 
+#include <SDL3/SDL.h>
 #include <doctest/doctest.h>
 
 #include <cmath>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/path.h"
+#include "input/action.h"
+#include "input/bindings.h"
 #include "platform/file_system.h"
 #include "tests/scratch_directory.h"
 
@@ -36,6 +40,10 @@ class TempFile {
   std::string path_;
 };
 
+std::vector<Binding> ToVector(std::span<const Binding> bindings) {
+  return {bindings.begin(), bindings.end()};
+}
+
 }  // namespace
 
 TEST_CASE("missing settings file yields defaults") {
@@ -45,6 +53,8 @@ TEST_CASE("missing settings file yields defaults") {
 
   CHECK(settings.mouse_sensitivity == defaults.mouse_sensitivity);
   CHECK(settings.invert_y == defaults.invert_y);
+  CHECK(settings.fov_degrees == defaults.fov_degrees);
+  CHECK(settings.bindings == InputBindings::Defaults());
 }
 
 TEST_CASE("settings round trip through save and load") {
@@ -57,6 +67,68 @@ TEST_CASE("settings round trip through save and load") {
   const InputSettings loaded = LoadInputSettings(file.path());
   CHECK(loaded.mouse_sensitivity == saved.mouse_sensitivity);
   CHECK(loaded.invert_y);
+  CHECK(loaded.bindings == InputBindings::Defaults());
+}
+
+TEST_CASE("player settings and custom bindings round trip") {
+  const TempFile file("player.ini");
+  InputSettings saved;
+  saved.sprint_toggle = true;
+  saved.crouch_toggle = true;
+  saved.fov_degrees = 95.0f;
+  saved.sprint_fov_boost_degrees = 4.5f;
+  saved.head_bob_intensity = 0.25f;
+  saved.bindings.Set(Action::kJump, {Binding::MouseButton(5),
+                                     Binding::Key(SDL_SCANCODE_KP_0)});
+  saved.bindings.Set(Action::kCrouch, {Binding::Key(SDL_SCANCODE_C)});
+  saved.bindings.Set(Action::kToggleCascadeDebug, {});
+
+  REQUIRE(SaveInputSettings(saved, file.path()));
+  const InputSettings loaded = LoadInputSettings(file.path());
+  CHECK(loaded.sprint_toggle);
+  CHECK(loaded.crouch_toggle);
+  CHECK(loaded.fov_degrees == 95.0f);
+  CHECK(loaded.sprint_fov_boost_degrees == 4.5f);
+  CHECK(loaded.head_bob_intensity == 0.25f);
+  CHECK(loaded.bindings == saved.bindings);
+  CHECK(loaded.bindings.For(Action::kToggleCascadeDebug).empty());
+}
+
+TEST_CASE("bad binding lines keep the defaults, empty values unbind") {
+  const TempFile file("bindings.ini");
+  file.write(
+      "bind.jump = Hyperspace\n"
+      "bind.warp = W\n"
+      "bind.crouch = Mouse9, C\n"
+      "bind.push =\n"
+      "bind.sprint = mouse2\n");
+
+  const InputSettings settings = LoadInputSettings(file.path());
+  const InputBindings defaults;
+  CHECK(ToVector(settings.bindings.For(Action::kJump)) ==
+        ToVector(defaults.For(Action::kJump)));
+  CHECK(ToVector(settings.bindings.For(Action::kCrouch)) ==
+        ToVector(defaults.For(Action::kCrouch)));
+  CHECK(settings.bindings.For(Action::kPush).empty());
+  CHECK(ToVector(settings.bindings.For(Action::kSprint)) ==
+        std::vector<Binding>{Binding::MouseButton(2)});
+}
+
+TEST_CASE("player numbers are clamped to their ranges") {
+  const TempFile file("ranges.ini");
+  file.write(
+      "fov_degrees = 500\n"
+      "sprint_fov_boost_degrees = -3\n"
+      "head_bob_intensity = 7\n");
+  InputSettings settings = LoadInputSettings(file.path());
+  CHECK(settings.fov_degrees == kMaxFovDegrees);
+  CHECK(settings.sprint_fov_boost_degrees == 0.0f);
+  CHECK(settings.head_bob_intensity == 1.0f);
+
+  file.write("fov_degrees = 1\nhead_bob_intensity = -0.5\n");
+  settings = LoadInputSettings(file.path());
+  CHECK(settings.fov_degrees == kMinFovDegrees);
+  CHECK(settings.head_bob_intensity == 0.0f);
 }
 
 TEST_CASE(

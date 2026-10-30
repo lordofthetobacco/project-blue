@@ -7,16 +7,21 @@
 #include <cstring>
 #include <format>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/trigonometric.hpp>
 
+#include "camera/look.h"
 #include "camera/projection.h"
 #include "core/log.h"
 #include "core/path.h"
+#include "input/action.h"
+#include "input/bindings.h"
 #include "platform/file_system.h"
 #include "scene/placement.h"
 #include "scene/scene_serializer.h"
@@ -40,6 +45,9 @@ constexpr float kImportMass = 10.0f;       // kg
 
 constexpr float kPushReach = 100.0f;   // m
 constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
+// How far below the scene camera the floor is looked for when placing the
+// player; beyond that the feet go an eye height below the camera.
+constexpr float kSpawnProbeDistance = 3.0f;  // m
 
 constexpr const char* kDefaultScenePath = "scenes/untitled.bscn";
 constexpr const char* kSettingsFileName = "input.cfg";
@@ -79,16 +87,83 @@ std::string ShaderDirectory() {
   return core::JoinPath(pref_path, kSettingsFileName);
 }
 
-[[nodiscard]] std::string_view ModeLabel(camera::CameraMode mode) {
-  return mode == camera::CameraMode::kFly ? "Fly" : "Orbit";
+[[nodiscard]] std::string_view ModeLabel(ViewMode mode) {
+  switch (mode) {
+    case ViewMode::kPlayer:
+      return "Player";
+    case ViewMode::kFly:
+      return "Fly";
+    case ViewMode::kOrbit:
+      return "Orbit";
+  }
+  return "?";
 }
 
-[[nodiscard]] std::string_view CameraHint(camera::CameraMode mode,
-                                          bool mouse_captured) {
-  if (mode == camera::CameraMode::kOrbit) {
+[[nodiscard]] std::string_view CameraHint(ViewMode mode, bool mouse_captured) {
+  if (mode == ViewMode::kOrbit) {
     return "LMB rotate, RMB/MMB pan, wheel zoom";
   }
-  return mouse_captured ? "Esc to release" : "Click to look, Esc releases";
+  return mouse_captured ? "Esc frees the cursor" : "Click to look";
+}
+
+[[nodiscard]] camera::CameraMode CameraModeFor(ViewMode mode) {
+  return mode == ViewMode::kOrbit ? camera::CameraMode::kOrbit
+                                  : camera::CameraMode::kFly;
+}
+
+// Returns "<Key> <label>" for `action`, or "" when it is unbound.
+[[nodiscard]] std::string HelpEntry(const input::InputBindings& bindings,
+                                    input::Action action,
+                                    std::string_view label) {
+  const std::span<const input::Binding> list = bindings.For(action);
+  if (list.empty()) {
+    return "";
+  }
+  return input::FormatBinding(list.front()) + " " + std::string(label);
+}
+
+// Builds the overlay's key help line from the live bindings.
+[[nodiscard]] std::string BuildHelpText(const input::InputBindings& bindings) {
+  using input::Action;
+  const std::pair<Action, std::string_view> entries[] = {
+      {Action::kMoveForward, "move"},     {Action::kJump, "jump"},
+      {Action::kSprint, "sprint"},        {Action::kCrouch, "crouch"},
+      {Action::kCycleCamera, "camera"},   {Action::kPush, "push"},
+      {Action::kToggleCascadeDebug, "cascades"},
+      {Action::kToggleShadows, "shadows"},
+      {Action::kToggleInvertY, "invert Y"},
+      {Action::kSensitivityDown, "/"},    {Action::kSensitivityUp, "sens"},
+      {Action::kToggleOverlay, "overlay"},
+      {Action::kSaveScene, "save"},       {Action::kLoadScene, "load"},
+      {Action::kToggleVsync, "vsync"},    {Action::kEscape, "release/quit"},
+  };
+  std::string text;
+  for (const auto& [action, label] : entries) {
+    const std::string entry = HelpEntry(bindings, action, label);
+    if (entry.empty()) {
+      continue;
+    }
+    if (!text.empty()) {
+      text += "  ";
+    }
+    text += entry;
+  }
+  return text;
+}
+
+[[nodiscard]] std::string PlayerStateText(
+    const player::PlayerController& player) {
+  if (!player.spawned()) {
+    return "no character";
+  }
+  std::string text = player.on_ground() ? "grounded" : "airborne";
+  if (player.crouching()) {
+    text += ", crouching";
+  }
+  if (player.sprinting()) {
+    text += ", sprinting";
+  }
+  return text;
 }
 
 [[nodiscard]] std::string WindowTitle(const std::string& scene_path) {
@@ -140,10 +215,39 @@ App::App(const CliOptions& options)
       scene_path_(options.scene_path.value_or(kDefaultScenePath)),
       settings_path_(InputSettingsPath()) {
   settings_ = input::LoadInputSettings(settings_path_);
+  input_.set_bindings(settings_.bindings);
+  help_text_ = BuildHelpText(settings_.bindings);
   SDL_SetWindowTitle(window_.handle(), WindowTitle(scene_path_).c_str());
   InitializeScene(options);
   camera_.SetFromSceneCamera(scene_.camera);
   RebuildPhysics();
+  PlacePlayerAtSceneCamera();
+}
+
+void App::PlacePlayerAtSceneCamera() {
+  const scene::SceneCamera& camera = scene_.camera;
+  const camera::LookAngles look =
+      camera::LookTowards(camera.position, camera.target);
+  const std::optional<physics::RayHit> floor = physics_world_.CastRay(
+      camera.position, glm::vec3(0.0f, -1.0f, 0.0f), kSpawnProbeDistance);
+  const glm::vec3 feet =
+      floor ? floor->point
+            : camera.position -
+                  glm::vec3(0.0f, player_.tuning().eye_height_standing, 0.0f);
+
+  if (player_.spawned()) {
+    player_.Teleport(feet, look);
+    return;
+  }
+  const auto spawned = player_.Spawn(physics_world_, {}, feet, look);
+  if (!spawned.ok()) {
+    core::log::Error("Player spawn failed: {}",
+                     physics::ToString(spawned.error()));
+    status_ = std::string("Player spawn failed: ") +
+              physics::ToString(spawned.error());
+    view_mode_ = ViewMode::kFly;
+    camera_.set_mode(CameraModeFor(view_mode_));
+  }
 }
 
 void App::RebuildPhysics() {
@@ -160,12 +264,14 @@ void App::RebuildPhysics() {
       });
   core::log::Info("Physics: {} bodies created, {} failed", summary.created,
                   summary.failed);
+  player_.OnWorldRebuilt();
 }
 
 void App::PushObject() {
-  const glm::vec3 forward = camera_.Forward();
+  const ViewPose eye = CurrentView();
+  const glm::vec3 forward = eye.forward;
   const std::optional<physics::RayHit> hit =
-      physics_world_.CastRay(camera_.position(), forward, kPushReach);
+      physics_world_.CastRay(eye.position, forward, kPushReach);
   const std::optional<size_t> entity =
       hit && physics_world_.IsDynamic(hit->body)
           ? scene_physics_.EntityFor(hit->body)
@@ -245,7 +351,9 @@ void App::AddImports(const std::vector<std::string>& imports) {
 void App::SaveCurrentScene() {
   // The scene holds the current (interpolated) poses. Velocities are not part
   // of the file, so loaded bodies start at rest.
-  scene_.camera = camera_.ToSceneCamera();
+  scene_.camera = view_mode_ == ViewMode::kPlayer
+                      ? player_.view().ToSceneCamera(settings_.fov_degrees)
+                      : camera_.ToSceneCamera();
   const auto start = std::chrono::steady_clock::now();
   const auto result = scene::SaveScene(scene_, scene_path_);
   if (result.ok()) {
@@ -264,6 +372,7 @@ void App::ReloadCurrentScene() {
     scene_ = std::move(loaded).value();
     camera_.SetFromSceneCamera(scene_.camera);
     RebuildPhysics();
+    PlacePlayerAtSceneCamera();
     status_ = TimedStatus("Loaded", scene_path_, start);
     core::log::Info("{}", status_);
   } else {
@@ -301,17 +410,26 @@ int App::Run() {
     previous = now;
 
     const input::InputFrame input = input_.EndFrame();
-    for (const platform::InputAction action : input_.TakeActions()) {
-      HandleAction(action);
+    for (const input::Action action : input::AllActions()) {
+      if (input::IsEdgeTriggered(action) && input.actions.pressed(action)) {
+        HandleAction(action);
+      }
     }
-    camera_.set_mode(input_.mode());
-    camera_.Update(input, settings_,
-                   std::min(frame_seconds, kMaxSimulationStep));
+    const float step = std::min(frame_seconds, kMaxSimulationStep);
+    if (view_mode_ == ViewMode::kPlayer) {
+      player_.Update(input, settings_, step);
+    } else {
+      // The character stays put under gravity while a debug camera is used.
+      player_.Update({}, settings_, step);
+      camera_.Update(input, settings_, step);
+    }
 
     // The world clamps long frames itself. Poses must be synced before the
-    // draw items and the overlay read the scene.
+    // draw items and the overlay read the scene; the player's eye follows its
+    // interpolated character.
     physics_world_.Update(frame_seconds);
     scene_physics_.SyncToScene(scene_);
+    player_.UpdateView(settings_, step);
 
     // Between frames: no command buffer is being recorded.
     if (now >= next_shader_poll) {
@@ -319,6 +437,7 @@ int App::Run() {
       next_shader_poll = now + kShaderPollInterval;
     }
 
+    player_state_ = PlayerStateText(player_);
     const physics::PhysicsStats physics_stats = physics_world_.Stats();
     const render::RenderStats stats = renderer_.stats();
     const ui::SceneOverlayInfo scene_info{
@@ -332,24 +451,41 @@ int App::Run() {
                     .shadow_ms =
                         renderer_.gpu_scope_ms(render::GpuScope::kShadow),
                     .main_ms = renderer_.gpu_scope_ms(render::GpuScope::kMain)},
-        .show_crosshair = camera_.mode() == camera::CameraMode::kFly,
+        .show_crosshair = view_mode_ != ViewMode::kOrbit,
         .entity_count = scene_.entities.size(),
         .draw_calls = stats.draw_calls,
         .triangles = stats.triangles,
         .scene_path = scene_path_,
         .status = status_,
         .shader_error = renderer_.last_shader_error(),
+        .help = help_text_,
     };
-    ImDrawData* draw_data = overlay_.Build(
-        frame_seconds * 1000.0f, renderer_.gpu_frame_ms(), scene_info);
-    renderer_.DrawFrame(BuildSceneView(), draw_data);
+    const ui::BuildResult ui =
+        overlay_.Build(frame_seconds * 1000.0f, renderer_.gpu_frame_ms(),
+                       scene_info, settings_);
+    if (ui.settings_changed) {
+      SaveSettings();
+    }
+    renderer_.DrawFrame(BuildSceneView(), ui.draw_data);
   }
   return 0;
 }
 
 void App::HandleEvent(const SDL_Event& event) {
   overlay_.ProcessEvent(event);
-  input_.HandleEvent(event);
+
+  // Presses that ImGui is consuming (a slider drag, a click on a window) stay
+  // out of the game. Releases and window events always go through so that no
+  // key or button gets stuck.
+  const bool key_press = event.type == SDL_EVENT_KEY_DOWN;
+  const bool mouse_press = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                           event.type == SDL_EVENT_MOUSE_WHEEL;
+  const bool ui_keyboard = key_press && overlay_.WantsKeyboard();
+  const bool ui_mouse =
+      mouse_press && !mouse_captured_ && overlay_.WantsMouse();
+  if (!ui_keyboard && !ui_mouse) {
+    input_.HandleEvent(event);
+  }
 
   if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
     renderer_.RequestSwapchainRebuild();
@@ -363,40 +499,93 @@ void App::ApplyMouseCapture() {
   }
 }
 
-void App::HandleAction(platform::InputAction action) {
+void App::HandleAction(input::Action action) {
+  using input::Action;
   switch (action) {
-    case platform::InputAction::kToggleInvertY:
+    case Action::kCycleCamera:
+      CycleViewMode();
+      break;
+    case Action::kToggleInvertY:
       settings_.invert_y = !settings_.invert_y;
       SaveSettings();
       break;
-    case platform::InputAction::kSensitivityDown:
+    case Action::kSensitivityDown:
       ChangeSensitivity(1.0f / kSensitivityStep);
       break;
-    case platform::InputAction::kSensitivityUp:
+    case Action::kSensitivityUp:
       ChangeSensitivity(kSensitivityStep);
       break;
-    case platform::InputAction::kToggleOverlay:
+    case Action::kToggleOverlay:
       overlay_.ToggleVisible();
       break;
-    case platform::InputAction::kSaveScene:
+    case Action::kSaveScene:
       SaveCurrentScene();
       break;
-    case platform::InputAction::kLoadScene:
+    case Action::kLoadScene:
       ReloadCurrentScene();
       break;
-    case platform::InputAction::kToggleVsync:
+    case Action::kToggleVsync:
       renderer_.SetVsync(!renderer_.vsync());
       break;
-    case platform::InputAction::kPush:
+    case Action::kPush:
       PushObject();
       break;
-    case platform::InputAction::kToggleCascadeDebug:
+    case Action::kToggleCascadeDebug:
       cascade_debug_ = !cascade_debug_;
       break;
-    case platform::InputAction::kToggleShadows:
+    case Action::kToggleShadows:
       shadows_enabled_ = !shadows_enabled_;
       break;
+    case Action::kEscape:  // Handled inside the mapper (capture / quit).
+    case Action::kMoveForward:
+    case Action::kMoveBack:
+    case Action::kMoveLeft:
+    case Action::kMoveRight:
+    case Action::kFlyUp:
+    case Action::kFlyDown:
+    case Action::kJump:
+    case Action::kSprint:
+    case Action::kCrouch:
+    case Action::kCount:
+      break;
   }
+}
+
+void App::CycleViewMode() {
+  switch (view_mode_) {
+    case ViewMode::kPlayer: {
+      // The debug camera takes off from where the player is looking.
+      const player::PlayerView& view = player_.view();
+      camera_.SetPose(view.eye_position, view.look);
+      view_mode_ = ViewMode::kFly;
+      break;
+    }
+    case ViewMode::kFly:
+      view_mode_ = ViewMode::kOrbit;
+      input_.set_mouse_mode(platform::InputMapper::MouseMode::kDrag);
+      break;
+    case ViewMode::kOrbit:
+      view_mode_ = player_.spawned() ? ViewMode::kPlayer : ViewMode::kFly;
+      input_.set_mouse_mode(platform::InputMapper::MouseMode::kCapture);
+      break;
+  }
+  camera_.set_mode(CameraModeFor(view_mode_));
+}
+
+App::ViewPose App::CurrentView() const {
+  if (view_mode_ == ViewMode::kPlayer) {
+    const player::PlayerView& view = player_.view();
+    return {.position = view.eye_position,
+            .forward = view.Forward(),
+            .view = view.View(),
+            .look = view.look,
+            .vertical_fov_degrees = view.vertical_fov_degrees};
+  }
+  return {.position = camera_.position(),
+          .forward = camera_.Forward(),
+          .view = camera_.View(),
+          .look = camera_.look(),
+          .vertical_fov_degrees = camera_.vertical_fov_degrees()};
 }
 
 void App::ChangeSensitivity(float factor) {
@@ -413,15 +602,19 @@ void App::SaveSettings() {
 }
 
 ui::CameraOverlayInfo App::MakeCameraOverlayInfo() const {
+  const ViewPose eye = CurrentView();
+  const bool is_player = view_mode_ == ViewMode::kPlayer;
   return {
-      .mode = ModeLabel(camera_.mode()),
-      .position = camera_.position(),
-      .yaw_degrees = glm::degrees(camera_.yaw()),
-      .pitch_degrees = glm::degrees(camera_.pitch()),
-      .fly_speed = camera_.fly_speed(),
+      .mode = ModeLabel(view_mode_),
+      .position = eye.position,
+      .yaw_degrees = glm::degrees(eye.look.yaw),
+      .pitch_degrees = glm::degrees(eye.look.pitch),
+      .speed = is_player ? player_.horizontal_speed() : camera_.fly_speed(),
+      .fov_degrees = eye.vertical_fov_degrees,
       .sensitivity = settings_.mouse_sensitivity,
       .invert_y = settings_.invert_y,
-      .hint = CameraHint(camera_.mode(), mouse_captured_),
+      .state = is_player ? std::string_view(player_state_) : std::string_view(),
+      .hint = CameraHint(view_mode_, mouse_captured_),
   };
 }
 
@@ -439,11 +632,11 @@ render::SceneView App::BuildSceneView() {
     }
   }
 
+  const ViewPose eye = CurrentView();
   render::SceneView view;
-  view.camera.position = camera_.position();
-  view.camera.view = camera_.View();
-  view.camera.vertical_fov_radians =
-      glm::radians(camera_.vertical_fov_degrees());
+  view.camera.position = eye.position;
+  view.camera.view = eye.view;
+  view.camera.vertical_fov_radians = glm::radians(eye.vertical_fov_degrees);
   view.camera.near_plane = kNearPlane;
   view.camera.projection = camera::ReversedInfinitePerspective(
       view.camera.vertical_fov_radians, aspect, kNearPlane);

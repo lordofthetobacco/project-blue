@@ -10,14 +10,18 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/log.h"
+#include "input/action.h"
+#include "input/bindings.h"
 #include "platform/file_system.h"
 
 namespace blue::input {
 namespace {
 
 constexpr size_t kMaxSettingsFileSize = 1024 * 1024;
+constexpr std::string_view kBindPrefix = "bind.";
 
 // Returns `text` without leading and trailing whitespace.
 std::string_view Trim(std::string_view text) {
@@ -62,6 +66,43 @@ std::optional<bool> ParseBool(std::string_view text) {
   return std::nullopt;
 }
 
+// Stores the float in `value` into `target`, clamped to [min, max], or logs
+// why it cannot.
+void ApplyFloat(float& target, std::string_view key, std::string_view value,
+                float min, float max, const std::string& path) {
+  if (const std::optional<float> parsed = ParseFiniteFloat(value)) {
+    target = std::clamp(*parsed, min, max);
+  } else {
+    core::log::Warn("{}: invalid {} '{}'", path, key, value);
+  }
+}
+
+void ApplyBool(bool& target, std::string_view key, std::string_view value,
+               const std::string& path) {
+  if (const std::optional<bool> parsed = ParseBool(value)) {
+    target = *parsed;
+  } else {
+    core::log::Warn("{}: invalid {} '{}'", path, key, value);
+  }
+}
+
+// Applies one "bind.<action> = <list>" line.
+void ApplyBinding(InputBindings& bindings, std::string_view action_name,
+                  std::string_view value, const std::string& path) {
+  const std::optional<Action> action = ParseAction(action_name);
+  if (!action) {
+    core::log::Warn("{}: unknown action '{}'", path, action_name);
+    return;
+  }
+  std::optional<std::vector<Binding>> list = ParseBindingList(value);
+  if (!list) {
+    core::log::Warn("{}: invalid binding list for {} '{}'", path, action_name,
+                    value);
+    return;
+  }
+  bindings.Set(*action, std::move(*list));
+}
+
 // Applies one "key = value" `line` read from `path` to `settings`, logging
 // anything it cannot use.
 void ApplyLine(InputSettings& settings, std::string_view line,
@@ -75,19 +116,26 @@ void ApplyLine(InputSettings& settings, std::string_view line,
   const std::string_view key = Trim(line.substr(0, equals));
   const std::string_view value = Trim(line.substr(equals + 1));
 
-  if (key == "mouse_sensitivity") {
-    if (const std::optional<float> parsed = ParseFiniteFloat(value)) {
-      settings.mouse_sensitivity =
-          std::clamp(*parsed, kMinMouseSensitivity, kMaxMouseSensitivity);
-    } else {
-      core::log::Warn("{}: invalid mouse_sensitivity '{}'", path, value);
-    }
+  if (key.starts_with(kBindPrefix)) {
+    ApplyBinding(settings.bindings, key.substr(kBindPrefix.size()), value,
+                 path);
+  } else if (key == "mouse_sensitivity") {
+    ApplyFloat(settings.mouse_sensitivity, key, value, kMinMouseSensitivity,
+               kMaxMouseSensitivity, path);
   } else if (key == "invert_y") {
-    if (const std::optional<bool> parsed = ParseBool(value)) {
-      settings.invert_y = *parsed;
-    } else {
-      core::log::Warn("{}: invalid invert_y '{}'", path, value);
-    }
+    ApplyBool(settings.invert_y, key, value, path);
+  } else if (key == "sprint_toggle") {
+    ApplyBool(settings.sprint_toggle, key, value, path);
+  } else if (key == "crouch_toggle") {
+    ApplyBool(settings.crouch_toggle, key, value, path);
+  } else if (key == "fov_degrees") {
+    ApplyFloat(settings.fov_degrees, key, value, kMinFovDegrees,
+               kMaxFovDegrees, path);
+  } else if (key == "sprint_fov_boost_degrees") {
+    ApplyFloat(settings.sprint_fov_boost_degrees, key, value, 0.0f,
+               kMaxSprintFovBoostDegrees, path);
+  } else if (key == "head_bob_intensity") {
+    ApplyFloat(settings.head_bob_intensity, key, value, 0.0f, 1.0f, path);
   } else {
     core::log::Warn("{}: unknown key '{}'", path, key);
   }
@@ -126,9 +174,25 @@ InputSettings LoadInputSettings(const std::string& path) {
 }
 
 bool SaveInputSettings(const InputSettings& settings, const std::string& path) {
-  const std::string text = std::format(
-      "# Project Blue input settings\nmouse_sensitivity = {}\ninvert_y = {}\n",
-      settings.mouse_sensitivity, settings.invert_y);
+  std::string text = std::format(
+      "# Project Blue input settings\n"
+      "mouse_sensitivity = {}\n"
+      "invert_y = {}\n"
+      "sprint_toggle = {}\n"
+      "crouch_toggle = {}\n"
+      "fov_degrees = {}\n"
+      "sprint_fov_boost_degrees = {}\n"
+      "head_bob_intensity = {}\n"
+      "\n"
+      "# Key bindings: SDL key names or Mouse1..Mouse5, comma separated.\n"
+      "# An empty value unbinds the action.\n",
+      settings.mouse_sensitivity, settings.invert_y, settings.sprint_toggle,
+      settings.crouch_toggle, settings.fov_degrees,
+      settings.sprint_fov_boost_degrees, settings.head_bob_intensity);
+  for (const Action action : AllActions()) {
+    text += std::format("{}{} = {}\n", kBindPrefix, ActionName(action),
+                        FormatBindingList(settings.bindings.For(action)));
+  }
   const auto written =
       platform::WriteFileAtomic(path, std::as_bytes(std::span(text)));
   if (!written.ok()) {

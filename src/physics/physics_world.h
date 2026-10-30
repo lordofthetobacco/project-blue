@@ -120,6 +120,9 @@ class PhysicsWorld {
   PhysicsStats Stats() const;
 
  private:
+  // The character reaches the simulation behind the world through Impl.
+  friend class Character;
+
   class Impl;
   std::unique_ptr<Impl> impl_;
 };

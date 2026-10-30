@@ -48,9 +48,14 @@ void DrawCameraInfo(const CameraOverlayInfo& camera) {
               camera.position.z);
   ImGui::Text("  yaw %.1f  pitch %.1f deg", camera.yaw_degrees,
               camera.pitch_degrees);
-  ImGui::Text("  speed %.1f m/s  sens %.4f rad/count", camera.fly_speed,
-              camera.sensitivity);
-  ImGui::Text("  Invert Y: %s", camera.invert_y ? "on" : "off");
+  ImGui::Text("  speed %.1f m/s  fov %.0f deg", camera.speed,
+              camera.fov_degrees);
+  ImGui::Text("  sens %.4f rad/count  invert Y %s", camera.sensitivity,
+              camera.invert_y ? "on" : "off");
+  if (!camera.state.empty()) {
+    ImGui::Text("  %.*s", static_cast<int>(camera.state.size()),
+                camera.state.data());
+  }
   ImGui::TextDisabled("%.*s", static_cast<int>(camera.hint.size()),
                       camera.hint.data());
 }
@@ -104,10 +109,12 @@ void DrawSceneInfo(const SceneOverlayInfo& scene_info) {
     TextView(first_line);
     ImGui::PopStyleColor();
   }
-  ImGui::TextDisabled(
-      "WASD move  Tab fly/orbit  F push  C cascades  X shadows  I invert Y  [ "
-      "] sens  F1 overlay  "
-      "F5 save  F9 load  V vsync  Esc quit");
+  if (!scene_info.help.empty()) {
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+    ImGui::TextDisabled("%.*s", static_cast<int>(scene_info.help.size()),
+                        scene_info.help.data());
+    ImGui::PopTextWrapPos();
+  }
 }
 
 }  // namespace
@@ -197,9 +204,20 @@ void PerfOverlay::ProcessEvent(const SDL_Event& event) {
   ImGui_ImplSDL3_ProcessEvent(&event);
 }
 
-ImDrawData* PerfOverlay::Build(float cpu_frame_ms,
+bool PerfOverlay::WantsMouse() const {
+  return ImGui::GetCurrentContext() != nullptr &&
+         ImGui::GetIO().WantCaptureMouse;
+}
+
+bool PerfOverlay::WantsKeyboard() const {
+  return ImGui::GetCurrentContext() != nullptr &&
+         ImGui::GetIO().WantCaptureKeyboard;
+}
+
+BuildResult PerfOverlay::Build(float cpu_frame_ms,
                                std::optional<double> gpu_frame_ms,
-                               const SceneOverlayInfo& scene_info) {
+                               const SceneOverlayInfo& scene_info,
+                               input::InputSettings& settings) {
   cpu_history_.Push(cpu_frame_ms);
   if (gpu_frame_ms) {
     gpu_frame_ms_ = gpu_frame_ms;
@@ -209,6 +227,7 @@ ImDrawData* PerfOverlay::Build(float cpu_frame_ms,
   ImGui_ImplSDL3_NewFrame();
   ImGui::NewFrame();
 
+  BuildResult result;
   if (scene_info.show_crosshair) {
     DrawCrosshair();
   }
@@ -237,10 +256,55 @@ ImDrawData* PerfOverlay::Build(float cpu_frame_ms,
       DrawSceneInfo(scene_info);
     }
     ImGui::End();
+
+    result.settings_changed = DrawSettings(settings);
   }
 
   ImGui::Render();
-  return ImGui::GetDrawData();
+  result.draw_data = ImGui::GetDrawData();
+  return result;
+}
+
+bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const ImVec2 display = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowPos({display.x - style.WindowPadding.x,
+                           style.WindowPadding.y},
+                          ImGuiCond_Always, {1.0f, 0.0f});
+  ImGui::SetNextWindowBgAlpha(0.75f);
+  constexpr ImGuiWindowFlags kFlags =
+      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoCollapse |
+      ImGuiWindowFlags_NoMove;
+
+  bool changed = false;
+  if (ImGui::Begin("Settings", nullptr, kFlags)) {
+    ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
+    // Sliders report once the drag ends, so a drag costs one settings save.
+    ImGui::SliderFloat("Field of view", &settings.fov_degrees,
+                       input::kMinFovDegrees, input::kMaxFovDegrees, "%.0f");
+    changed = ImGui::IsItemDeactivatedAfterEdit() || changed;
+    ImGui::SliderFloat("Sprint FOV boost", &settings.sprint_fov_boost_degrees,
+                       0.0f, input::kMaxSprintFovBoostDegrees, "%.0f");
+    changed = ImGui::IsItemDeactivatedAfterEdit() || changed;
+    ImGui::SliderFloat("Head bob", &settings.head_bob_intensity, 0.0f, 1.0f,
+                       "%.2f");
+    changed = ImGui::IsItemDeactivatedAfterEdit() || changed;
+    ImGui::SliderFloat("Mouse sensitivity", &settings.mouse_sensitivity,
+                       input::kMinMouseSensitivity,
+                       input::kMaxMouseSensitivity, "%.4f",
+                       ImGuiSliderFlags_Logarithmic);
+    changed = ImGui::IsItemDeactivatedAfterEdit() || changed;
+    ImGui::PopItemWidth();
+    changed = ImGui::Checkbox("Invert Y", &settings.invert_y) || changed;
+    changed = ImGui::Checkbox("Sprint toggles", &settings.sprint_toggle) ||
+              changed;
+    changed = ImGui::Checkbox("Crouch toggles", &settings.crouch_toggle) ||
+              changed;
+    ImGui::TextDisabled("Esc frees the cursor to use this window");
+  }
+  ImGui::End();
+  return changed;
 }
 
 void PerfOverlay::DrawTimings(float cpu_frame_ms) const {

@@ -77,6 +77,7 @@ add_library(blue_physics STATIC
     src/physics/physics_runtime.cc
     src/physics/physics_world.cc
     src/physics/scene_physics.cc
+    src/physics/character.cc
     src/physics/internal/shape_builder.cc
 )
 
@@ -89,18 +90,33 @@ target_link_libraries(blue_physics
     PRIVATE Jolt
 )
 
+# Actions, rebindable key bindings and the persisted settings file. SDL only for key
+# names and scancodes; no window or event handling here.
+add_library(blue_input STATIC
+    src/input/action.cc
+    src/input/bindings.cc
+    src/input/input_settings.cc
+)
+
+target_include_directories(blue_input PUBLIC src)
+
+blue_target_defaults(blue_input)
+
+target_link_libraries(blue_input PUBLIC blue_core SDL3::SDL3-static glm::glm)
+
 add_library(blue_camera STATIC
     src/camera/camera_controller.cc
+    src/camera/look.cc
     src/camera/projection.cc
-    src/input/input_settings.cc
 )
 
 target_include_directories(blue_camera PUBLIC src)
 
 blue_target_defaults(blue_camera)
 
-target_link_libraries(blue_camera PUBLIC blue_core blue_scene glm::glm)
+target_link_libraries(blue_camera PUBLIC blue_core blue_input blue_scene glm::glm)
 
+# SDL events -> per-frame action state and mouse deltas.
 add_library(blue_input_mapper STATIC
     src/platform/input_mapper.cc
 )
@@ -109,7 +125,21 @@ target_include_directories(blue_input_mapper PUBLIC src)
 
 blue_target_defaults(blue_input_mapper)
 
-target_link_libraries(blue_input_mapper PUBLIC blue_camera SDL3::SDL3-static glm::glm)
+target_link_libraries(blue_input_mapper PUBLIC blue_input SDL3::SDL3-static glm::glm)
+
+# First-person player: input actions -> character movement, eye placement, head bob and
+# field of view. Jolt stays behind blue_physics' public headers.
+add_library(blue_player STATIC
+    src/player/fov_controller.cc
+    src/player/head_bob.cc
+    src/player/player_controller.cc
+)
+
+target_include_directories(blue_player PUBLIC src)
+
+blue_target_defaults(blue_player)
+
+target_link_libraries(blue_player PUBLIC blue_physics blue_input blue_camera glm::glm)
 
 # Runtime GLSL -> SPIR-V compilation (shaderc) and source change detection. No Vulkan device
 # needed. shaderc stays private: no shaderc type appears in the public headers. The imported
@@ -167,8 +197,10 @@ target_link_libraries(project-blue PRIVATE
     blue_scene
     blue_lighting
     blue_physics
+    blue_input
     blue_camera
     blue_input_mapper
+    blue_player
     blue_shader
     Vulkan::Vulkan
     SDL3::SDL3-static

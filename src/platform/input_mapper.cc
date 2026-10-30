@@ -4,6 +4,8 @@
 
 #include <utility>
 
+#include "input/action.h"
+
 namespace blue::platform {
 
 namespace {
@@ -16,6 +18,27 @@ constexpr uint64_t kActivationClickWindow = 200'000'000;
 }
 
 }  // namespace
+
+InputMapper::InputMapper(input::InputBindings bindings)
+    : bindings_(std::move(bindings)) {}
+
+void InputMapper::set_bindings(input::InputBindings bindings) {
+  bindings_ = std::move(bindings);
+  keys_down_.reset();
+  buttons_down_.reset();
+  actions_.Clear();
+}
+
+void InputMapper::set_mouse_mode(MouseMode mode) {
+  if (mode == mouse_mode_) {
+    return;
+  }
+  mouse_mode_ = mode;
+  if (mode == MouseMode::kDrag) {
+    mouse_captured_ = false;
+  }
+  motion_ = glm::vec2(0.0f);
+}
 
 void InputMapper::HandleEvent(const SDL_Event& event) {
   switch (event.type) {
@@ -76,79 +99,60 @@ input::InputFrame InputMapper::EndFrame() {
   if (!minimized_) {
     frame.mouse_delta = motion_;
     frame.wheel = wheel_;
-    if (mode_ == camera::CameraMode::kFly) {
-      frame.move = {Axis(keys_.right, keys_.left), Axis(keys_.up, keys_.down),
-                    Axis(keys_.forward, keys_.back)};
-      frame.sprint = keys_.sprint;
+    frame.actions = actions_;
+    if (mouse_mode_ == MouseMode::kCapture) {
+      using input::Action;
+      frame.move = {
+          Axis(actions_.held(Action::kMoveRight),
+               actions_.held(Action::kMoveLeft)),
+          Axis(actions_.held(Action::kFlyUp), actions_.held(Action::kFlyDown)),
+          Axis(actions_.held(Action::kMoveForward),
+               actions_.held(Action::kMoveBack))};
+      frame.sprint = actions_.held(Action::kSprint);
     }
     frame.look = LookActive();
     frame.pan = PanActive();
   }
   motion_ = glm::vec2(0.0f);
   wheel_ = 0.0f;
+  actions_.ClearEdges();
   return frame;
-}
-
-std::vector<InputAction> InputMapper::TakeActions() {
-  return std::exchange(actions_, {});
 }
 
 void InputMapper::HandleKey(const SDL_Event& event) {
   const bool down = event.type == SDL_EVENT_KEY_DOWN;
-  SetHeldKey(event.key.scancode, down);
-  if (!down || event.key.repeat) {
+  if (down && event.key.repeat) {
     return;
   }
+  const SDL_Scancode scancode = event.key.scancode;
+  if (scancode <= SDL_SCANCODE_UNKNOWN || scancode >= SDL_SCANCODE_COUNT) {
+    return;
+  }
+  keys_down_[scancode] = down;
 
-  switch (event.key.key) {
-    case SDLK_ESCAPE:
-      Escape();
-      break;
-    case SDLK_TAB:
-      ToggleMode();
-      break;
-    case SDLK_I:
-      actions_.push_back(InputAction::kToggleInvertY);
-      break;
-    case SDLK_LEFTBRACKET:
-      actions_.push_back(InputAction::kSensitivityDown);
-      break;
-    case SDLK_RIGHTBRACKET:
-      actions_.push_back(InputAction::kSensitivityUp);
-      break;
-    case SDLK_F1:
-      actions_.push_back(InputAction::kToggleOverlay);
-      break;
-    case SDLK_F5:
-      actions_.push_back(InputAction::kSaveScene);
-      break;
-    case SDLK_F9:
-      actions_.push_back(InputAction::kLoadScene);
-      break;
-    case SDLK_F:
-      actions_.push_back(InputAction::kPush);
-      break;
-    case SDLK_V:
-      actions_.push_back(InputAction::kToggleVsync);
-      break;
-    case SDLK_C:
-      actions_.push_back(InputAction::kToggleCascadeDebug);
-      break;
-    case SDLK_X:
-      actions_.push_back(InputAction::kToggleShadows);
-      break;
-    default:
-      break;
+  const bool escape_was_held = actions_.held(input::Action::kEscape);
+  ApplyBinding(input::Binding::Key(scancode));
+  if (!escape_was_held && actions_.held(input::Action::kEscape)) {
+    Escape();
   }
 }
 
 void InputMapper::HandleMouseButton(const SDL_Event& event) {
   const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-  SetHeldButton(event.button.button, down);
-  if (down && event.button.button == SDL_BUTTON_LEFT &&
-      mode_ == camera::CameraMode::kFly && !IsActivationClick(event)) {
-    CaptureMouse();
+  const int button = event.button.button;
+  if (button < input::kMinMouseButton || button > input::kMaxMouseButton) {
+    return;
   }
+  // In capture mode a click on the free cursor only captures it: the click
+  // is swallowed so that it does not also fire whatever is bound to Mouse1.
+  if (mouse_mode_ == MouseMode::kCapture && !mouse_captured_) {
+    if (down && button == SDL_BUTTON_LEFT && !IsActivationClick(event)) {
+      CaptureMouse();
+    }
+    return;
+  }
+  buttons_down_[static_cast<size_t>(button)] = down;
+  ApplyBinding(input::Binding::MouseButton(button));
 }
 
 void InputMapper::HandleMouseMotion(const SDL_Event& event) {
@@ -164,66 +168,34 @@ void InputMapper::HandleMouseMotion(const SDL_Event& event) {
   motion_ += glm::vec2(event.motion.xrel, event.motion.yrel);
 }
 
-void InputMapper::SetHeldKey(int scancode, bool down) {
-  switch (scancode) {
-    case SDL_SCANCODE_W:
-      keys_.forward = down;
-      break;
-    case SDL_SCANCODE_S:
-      keys_.back = down;
-      break;
-    case SDL_SCANCODE_A:
-      keys_.left = down;
-      break;
-    case SDL_SCANCODE_D:
-      keys_.right = down;
-      break;
-    case SDL_SCANCODE_SPACE:
-      keys_.up = down;
-      break;
-    case SDL_SCANCODE_LCTRL:
-      keys_.down = down;
-      break;
-    case SDL_SCANCODE_LSHIFT:
-      keys_.sprint = down;
-      break;
-    default:
-      break;
+void InputMapper::ApplyBinding(const input::Binding& binding) {
+  for (const input::Action action : input::AllActions()) {
+    if (!bindings_.IsBound(action, binding)) {
+      continue;
+    }
+    bool held = false;
+    for (const input::Binding& candidate : bindings_.For(action)) {
+      held = held || IsDown(candidate);
+    }
+    actions_.SetHeld(action, held);
   }
 }
 
-void InputMapper::SetHeldButton(int button, bool down) {
-  switch (button) {
-    case SDL_BUTTON_LEFT:
-      buttons_.left = down;
-      break;
-    case SDL_BUTTON_RIGHT:
-      buttons_.right = down;
-      break;
-    case SDL_BUTTON_MIDDLE:
-      buttons_.middle = down;
-      break;
-    default:
-      break;
+bool InputMapper::IsDown(const input::Binding& binding) const {
+  if (binding.kind == input::BindingKind::kMouseButton) {
+    return ButtonDown(binding.code);
   }
+  return binding.code > SDL_SCANCODE_UNKNOWN &&
+         binding.code < SDL_SCANCODE_COUNT &&
+         keys_down_[static_cast<size_t>(binding.code)];
 }
 
 void InputMapper::Escape() {
-  if (mode_ == camera::CameraMode::kFly && mouse_captured_) {
+  if (mouse_mode_ == MouseMode::kCapture && mouse_captured_) {
     mouse_captured_ = false;
   } else {
     quit_requested_ = true;
   }
-}
-
-void InputMapper::ToggleMode() {
-  if (mode_ == camera::CameraMode::kFly) {
-    mode_ = camera::CameraMode::kOrbit;
-    mouse_captured_ = false;
-  } else {
-    mode_ = camera::CameraMode::kFly;
-  }
-  motion_ = glm::vec2(0.0f);
 }
 
 void InputMapper::CaptureMouse() {
@@ -235,8 +207,9 @@ void InputMapper::CaptureMouse() {
 
 void InputMapper::ReleaseInput() {
   mouse_captured_ = false;
-  keys_ = {};
-  buttons_ = {};
+  keys_down_.reset();
+  buttons_down_.reset();
+  actions_.Clear();
 }
 
 bool InputMapper::IsActivationClick(const SDL_Event& event) const {
@@ -247,13 +220,20 @@ bool InputMapper::IsActivationClick(const SDL_Event& event) const {
          event.button.timestamp - focus_gained_at_ < kActivationClickWindow;
 }
 
+bool InputMapper::ButtonDown(int button) const {
+  return button >= input::kMinMouseButton &&
+         button <= input::kMaxMouseButton &&
+         buttons_down_[static_cast<size_t>(button)];
+}
+
 bool InputMapper::LookActive() const {
-  return mode_ == camera::CameraMode::kFly ? mouse_captured_ : buttons_.left;
+  return mouse_mode_ == MouseMode::kCapture ? mouse_captured_
+                                            : ButtonDown(SDL_BUTTON_LEFT);
 }
 
 bool InputMapper::PanActive() const {
-  return mode_ == camera::CameraMode::kOrbit &&
-         (buttons_.right || buttons_.middle);
+  return mouse_mode_ == MouseMode::kDrag &&
+         (ButtonDown(SDL_BUTTON_RIGHT) || ButtonDown(SDL_BUTTON_MIDDLE));
 }
 
 }  // namespace blue::platform

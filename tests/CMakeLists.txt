@@ -17,14 +17,21 @@ add_executable(blue_tests
     mesh_data_test.cc
     scene_round_trip_test.cc
     camera_controller_test.cc
+    action_test.cc
+    bindings_test.cc
     input_settings_test.cc
     input_mapper_test.cc
+    look_test.cc
+    head_bob_test.cc
+    fov_controller_test.cc
+    player_controller_test.cc
     projection_test.cc
     result_test.cc
     path_test.cc
     file_system_test.cc
     physics_world_test.cc
     scene_physics_test.cc
+    character_test.cc
     cascades_test.cc
     shader_compiler_test.cc
     shader_watcher_test.cc
@@ -37,8 +44,8 @@ target_compile_definitions(blue_tests PRIVATE
     BLUE_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
 )
 
-blue_target_defaults(blue_tests)
+blue_target_defaults(blue_tests ALLOW_EXCEPTIONS_AND_RTTI)
 
-target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_input_mapper blue_physics blue_lighting blue_shader doctest::doctest)
+target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_input blue_camera blue_input_mapper blue_physics blue_player blue_lighting blue_shader doctest::doctest)
 
 add_test(NAME blue_tests COMMAND blue_tests)

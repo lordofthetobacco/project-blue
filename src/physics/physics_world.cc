@@ -11,14 +11,10 @@
 // Jolt.h must be the first Jolt header included.
 // clang-format off
 #include <Jolt/Jolt.h>
-#include <Jolt/Core/JobSystemThreadPool.h>
-#include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Body/MassProperties.h>
-#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
-#include <Jolt/Physics/Collision/ObjectLayer.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
@@ -27,6 +23,9 @@
 // clang-format on
 
 #include "core/log.h"
+#include "physics/internal/jolt_math.h"
+#include "physics/internal/layers.h"
+#include "physics/internal/physics_world_impl.h"
 #include "physics/internal/shape_builder.h"
 #include "physics/physics_runtime.h"
 
@@ -57,70 +56,9 @@ constexpr int kBulkAddThreshold = 64;
 // Angular damping keeps Jolt's default so rolling objects eventually stop.
 constexpr float kLinearDamping = 0.0f;
 
-// Two object layers: static geometry and everything that moves.
-namespace layers {
-constexpr JPH::ObjectLayer kNonMoving = 0;
-constexpr JPH::ObjectLayer kMoving = 1;
-constexpr JPH::uint kCount = 2;
-}  // namespace layers
-
-// One broad phase layer per object layer.
-namespace broad_layers {
-constexpr JPH::BroadPhaseLayer kNonMoving(0);
-constexpr JPH::BroadPhaseLayer kMoving(1);
-}  // namespace broad_layers
-
-class BroadPhaseLayerMapping final : public JPH::BroadPhaseLayerInterface {
- public:
-  JPH::uint GetNumBroadPhaseLayers() const override { return layers::kCount; }
-
-  JPH::BroadPhaseLayer GetBroadPhaseLayer(
-      JPH::ObjectLayer layer) const override {
-    return layer == layers::kNonMoving ? broad_layers::kNonMoving
-                                       : broad_layers::kMoving;
-  }
-
-// Jolt only declares this hook when its profiler is compiled in.
-#if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
-  const char* GetBroadPhaseLayerName(
-      JPH::BroadPhaseLayer layer) const override {
-    return layer == broad_layers::kNonMoving ? "NON_MOVING" : "MOVING";
-  }
-#endif
-};
-
-class ObjectVsBroadPhaseFilter final
-    : public JPH::ObjectVsBroadPhaseLayerFilter {
- public:
-  bool ShouldCollide(JPH::ObjectLayer layer,
-                     JPH::BroadPhaseLayer broad_layer) const override {
-    // Static geometry only collides with moving objects.
-    return layer == layers::kMoving || broad_layer == broad_layers::kMoving;
-  }
-};
-
-class ObjectPairFilter final : public JPH::ObjectLayerPairFilter {
- public:
-  bool ShouldCollide(JPH::ObjectLayer layer1,
-                     JPH::ObjectLayer layer2) const override {
-    return layer1 == layers::kMoving || layer2 == layers::kMoving;
-  }
-};
-
-JPH::Vec3 ToJolt(glm::vec3 v) { return JPH::Vec3(v.x, v.y, v.z); }
-glm::vec3 FromJolt(JPH::Vec3 v) {
-  return glm::vec3(v.GetX(), v.GetY(), v.GetZ());
-}
-
-JPH::Quat ToJolt(const glm::quat& q) { return JPH::Quat(q.x, q.y, q.z, q.w); }
-glm::quat FromJolt(JPH::Quat q) {
-  return glm::quat(q.GetW(), q.GetX(), q.GetY(), q.GetZ());
-}
-
-JPH::BodyID ToJolt(BodyId id) { return JPH::BodyID(static_cast<uint32_t>(id)); }
-BodyId FromJolt(JPH::BodyID id) {
-  return BodyId{id.GetIndexAndSequenceNumber()};
-}
+using internal::FromJolt;
+using internal::ToJolt;
+namespace layers = internal::layers;
 
 // Returns the origin pose of the body (not its center of mass).
 Pose ReadPose(const JPH::BodyInterface& bodies, JPH::BodyID id) {
@@ -156,59 +94,43 @@ const char* ToString(PhysicsError error) {
   return "unknown physics error";
 }
 
-// Owns the Jolt objects. Members are declared in dependency order: the
-// physics system refers to the layer objects, and everything is destroyed in
-// reverse, so the system goes first.
-class PhysicsWorld::Impl {
- public:
-  Impl()
-      : temp_allocator_(kTempAllocatorBytes),
-        job_system_(
-            JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
-            std::max(
-                1, static_cast<int>(std::thread::hardware_concurrency()) - 1)) {
-    system_.Init(kMaxBodies, kNumBodyMutexes, kMaxBodyPairs,
-                 kMaxContactConstraints, layer_mapping_, object_vs_broad_,
-                 object_pair_);
+PhysicsWorld::Impl::Impl()
+    : temp_allocator_(kTempAllocatorBytes),
+      job_system_(
+          JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
+          std::max(1,
+                   static_cast<int>(std::thread::hardware_concurrency()) - 1)) {
+  system_.Init(kMaxBodies, kNumBodyMutexes, kMaxBodyPairs,
+               kMaxContactConstraints, layer_mapping_, object_vs_broad_,
+               object_pair_);
+}
+
+PhysicsWorld::Impl::~Impl() {
+  if (!participants_.empty()) {
+    core::log::Warn(
+        "PhysicsWorld destroyed with {} fixed-step participant(s) still "
+        "registered; destroy characters before their world",
+        participants_.size());
   }
+}
 
-  core::Result<BodyId, PhysicsError> CreateBody(const BodyDesc& desc);
-  void RemoveBody(BodyId id);
-  void RemoveAllBodies();
-  void Update(float frame_seconds);
-  Pose InterpolatedPose(BodyId id) const;
+void PhysicsWorld::Impl::AddParticipant(
+    internal::FixedStepParticipant* participant) {
+  if (participant == nullptr ||
+      std::ranges::find(participants_, participant) != participants_.end()) {
+    return;
+  }
+  participants_.push_back(participant);
+}
 
-  JPH::PhysicsSystem& system() { return system_; }
-  const JPH::PhysicsSystem& system() const { return system_; }
-  float last_step_ms() const { return last_step_ms_; }
+void PhysicsWorld::Impl::RemoveParticipant(
+    internal::FixedStepParticipant* participant) {
+  std::erase(participants_, participant);
+}
 
- private:
-  // Previous and current step pose of a dynamic body.
-  struct TrackedPose {
-    Pose previous;
-    Pose current;
-  };
-
-  // Returns the (cached) shape for `desc`, scale applied.
-  core::Result<JPH::ShapeRefC, PhysicsError> GetShape(const BodyDesc& desc);
-  // Runs one fixed step and refreshes the tracked poses.
-  void Step();
-
-  BroadPhaseLayerMapping layer_mapping_;
-  ObjectVsBroadPhaseFilter object_vs_broad_;
-  ObjectPairFilter object_pair_;
-  JPH::TempAllocatorImpl temp_allocator_;
-  JPH::JobSystemThreadPool job_system_;
-  JPH::PhysicsSystem system_;
-  // Unscaled shapes by shape_key + shape type, shared between bodies.
-  std::unordered_map<std::string, JPH::ShapeRefC> shape_cache_;
-  std::unordered_map<uint32_t, TrackedPose> tracked_;
-
-  double accumulator_ = 0.0;
-  float last_step_ms_ = 0.0f;
-  int bodies_added_since_optimize_ = 0;
-  bool has_stepped_ = false;
-};
+float PhysicsWorld::Impl::interpolation_alpha() const {
+  return static_cast<float>(std::clamp(accumulator_ / kFixedStep, 0.0, 1.0));
+}
 
 core::Result<JPH::ShapeRefC, PhysicsError> PhysicsWorld::Impl::GetShape(
     const BodyDesc& desc) {
@@ -311,6 +233,9 @@ void PhysicsWorld::Impl::Step() {
   for (auto& [key, tracked] : tracked_) {
     tracked.previous = tracked.current;
   }
+  for (internal::FixedStepParticipant* participant : participants_) {
+    participant->PreStep(static_cast<float>(kFixedStep));
+  }
   const JPH::EPhysicsUpdateError error = system_.Update(
       static_cast<float>(kFixedStep), 1, &temp_allocator_, &job_system_);
   if (error != JPH::EPhysicsUpdateError::None) {
@@ -360,8 +285,7 @@ void PhysicsWorld::Impl::Update(float frame_seconds) {
 Pose PhysicsWorld::Impl::InterpolatedPose(BodyId id) const {
   if (auto tracked = tracked_.find(static_cast<uint32_t>(id));
       tracked != tracked_.end()) {
-    const float alpha =
-        static_cast<float>(std::clamp(accumulator_ / kFixedStep, 0.0, 1.0));
+    const float alpha = interpolation_alpha();
     const Pose& from = tracked->second.previous;
     const Pose& to = tracked->second.current;
     return Pose{glm::mix(from.position, to.position, alpha),

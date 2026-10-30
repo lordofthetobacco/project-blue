@@ -5,6 +5,7 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
+#include "camera/look.h"
 #include "input/input_frame.h"
 #include "input/input_settings.h"
 #include "scene/scene.h"
@@ -51,6 +52,12 @@ class CameraController {
   [[nodiscard]] glm::vec3 Forward() const;
   [[nodiscard]] float yaw() const { return yaw_; }      // radians
   [[nodiscard]] float pitch() const { return pitch_; }  // radians
+  [[nodiscard]] LookAngles look() const {
+    return {.yaw = yaw_, .pitch = pitch_};
+  }
+  // Moves the camera to `position` looking along `look`; the orbit distance
+  // is kept.
+  void SetPose(glm::vec3 position, LookAngles look);
   [[nodiscard]] float fly_speed() const { return fly_speed_; }
   // Returns the world-to-view matrix.
   [[nodiscard]] glm::mat4 View() const;

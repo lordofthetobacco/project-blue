@@ -89,6 +89,7 @@ constexpr VkClearColorValue kClearColor{{0.015f, 0.018f, 0.022f, 1.0f}};
 
 constexpr auto kVertexBindings = VertexBindings();
 constexpr auto kVertexAttributes = VertexAttributes();
+constexpr auto kShadowVertexAttributes = PositionOnlyVertexAttributes();
 constexpr VkPushConstantRange kDrawConstantsRange{
     .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
     .offset = 0,
@@ -210,7 +211,7 @@ GraphicsPipelineDesc ShadowPipelineDesc(
   return {
       .vertex_spirv = vertex_spirv,
       .vertex_bindings = kVertexBindings,
-      .vertex_attributes = kVertexAttributes,
+      .vertex_attributes = kShadowVertexAttributes,
       .push_constants = {&kShadowConstantsRange, 1},
       .depth_format = Renderer::kShadowFormat,
       // Open meshes (teapot rim, ground) must cast from both sides.

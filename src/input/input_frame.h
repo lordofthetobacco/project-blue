@@ -4,6 +4,8 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
+#include "input/action_state.h"
+
 namespace blue::input {
 
 // One frame of already-interpreted input. Produced by the platform layer
@@ -17,8 +19,11 @@ struct InputFrame {
   // Held-key axes in [-1,1]: x right/left, y up/down, z forward/back.
   glm::vec3 move{0.0f};
   bool sprint = false;
-  bool look = false;  // Fly: mouse captured. Orbit: LMB held.
-  bool pan = false;   // Orbit: RMB or MMB held.
+  bool look = false;  // Capture mode: mouse captured. Drag mode: LMB held.
+  bool pan = false;   // Drag mode: RMB or MMB held.
+  // Held/pressed/released state of every bound action this frame. `move` and
+  // `sprint` are derived from it for the camera's convenience.
+  ActionState actions;
 };
 
 }  // namespace blue::input

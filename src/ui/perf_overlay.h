@@ -12,6 +12,7 @@
 
 #include <glm/vec3.hpp>
 
+#include "input/input_settings.h"
 #include "platform/window.h"
 #include "render/renderer.h"
 
@@ -50,9 +51,11 @@ struct CameraOverlayInfo {
   glm::vec3 position{0.0f};
   float yaw_degrees = 0.0f;
   float pitch_degrees = 0.0f;
-  float fly_speed = 0.0f;
+  float speed = 0.0f;  // Player: horizontal speed. Fly: configured speed.
+  float fov_degrees = 0.0f;
   float sensitivity = 0.0f;
   bool invert_y = false;
+  std::string_view state;  // Player stance, e.g. "grounded, sprinting".
   std::string_view hint;
 };
 
@@ -89,6 +92,15 @@ struct SceneOverlayInfo {
   // Compiler message of the shader that failed to reload; empty when all
   // shaders are fine. Only its first line is shown, in red.
   std::string_view shader_error;
+  // One line listing the current key bindings.
+  std::string_view help;
+};
+
+// What one Build() call produced.
+struct BuildResult {
+  ImDrawData* draw_data = nullptr;
+  // The user finished changing a value in the settings window this frame.
+  bool settings_changed = false;
 };
 
 // Dear ImGui performance overlay: FPS, CPU/GPU frame time, frame-time graph,
@@ -106,17 +118,26 @@ class PerfOverlay {
   void ProcessEvent(const SDL_Event& event);
   void ToggleVisible() { visible_ = !visible_; }
 
-  // Records this frame's timings and builds the UI: the stats window while
-  // visible, plus the crosshair if requested. Always returns the frame's draw
-  // data.
-  [[nodiscard]] ImDrawData* Build(float cpu_frame_ms,
+  // Records this frame's timings and builds the UI: the stats and settings
+  // windows while visible, plus the crosshair if requested. Edits in the
+  // settings window are written straight into `settings`. Always returns the
+  // frame's draw data.
+  [[nodiscard]] BuildResult Build(float cpu_frame_ms,
                                   std::optional<double> gpu_frame_ms,
-                                  const SceneOverlayInfo& scene_info);
+                                  const SceneOverlayInfo& scene_info,
+                                  input::InputSettings& settings);
+
+  // Whether ImGui is using the mouse / keyboard right now (hovering or
+  // dragging a widget). The app keeps such events away from the game.
+  [[nodiscard]] bool WantsMouse() const;
+  [[nodiscard]] bool WantsKeyboard() const;
 
  private:
   // Each Draw* helper emits one section of the overlay window.
   void DrawTimings(float cpu_frame_ms) const;
   void DrawDeviceInfo() const;
+  // Emits the settings window; returns true when an edit was completed.
+  [[nodiscard]] bool DrawSettings(input::InputSettings& settings) const;
 
   const render::Renderer& renderer_;
   FrameTimeHistory cpu_history_;

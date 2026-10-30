@@ -45,6 +45,15 @@ VertexAttributes() {
   }};
 }
 
+// Returns only the position attribute of VertexAttributes(), for depth-only
+// passes whose vertex shader reads location 0 alone. Same binding and stride,
+// so the pass draws from the same vertex buffers as the main pass but fetches
+// 12 instead of 36 bytes per vertex.
+[[nodiscard]] constexpr std::array<VkVertexInputAttributeDescription, 1>
+PositionOnlyVertexAttributes() {
+  return {{VertexAttributes()[0]}};
+}
+
 // Mesh resident in device-local memory. Move-only. Not thread-safe.
 class Mesh {
  public:
