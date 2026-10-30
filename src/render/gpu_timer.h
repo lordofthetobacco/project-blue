@@ -13,30 +13,48 @@
 
 namespace blue::render {
 
-// Measures GPU time of whole frames using timestamp queries. One query pair
-// per frame in flight; results are read back once that frame's fence has
-// signaled. Not thread-safe.
+// A named span of GPU work measured by GpuTimer.
+enum class GpuScope {
+  kTotal,   // The whole frame.
+  kShadow,  // The shadow pass; absent in frames that skip it.
+  kMain,    // The main pass, including the UI.
+};
+
+// Measures GPU time of named scopes using timestamp queries. One query pair
+// per scope and frame in flight; results are read back once that frame's
+// fence has signaled. Not thread-safe.
 class GpuTimer {
  public:
+  static constexpr size_t kScopeCount = 3;
+
   explicit GpuTimer(const VulkanContext& context);
   ~GpuTimer();
 
   GpuTimer(const GpuTimer&) = delete;
   GpuTimer& operator=(const GpuTimer&) = delete;
 
-  // Reads back the result of `frame`. Call after the frame's fence was waited
+  // Reads back the results of `frame`. Call after the frame's fence was waited
   // on, before recording it again.
   void Collect(size_t frame);
-  // Records the start timestamp of `frame` into `cmd`.
-  void Begin(VkCommandBuffer cmd, size_t frame);
-  // Records the end timestamp of `frame` into `cmd`.
-  void End(VkCommandBuffer cmd, size_t frame);
+  // Resets the queries of `frame`; must be recorded before any Begin() or
+  // End() of that frame, outside of a rendering pass.
+  void BeginFrame(VkCommandBuffer cmd, size_t frame);
+  // Records the start timestamp of `scope` of `frame` into `cmd`.
+  void Begin(VkCommandBuffer cmd, size_t frame, GpuScope scope);
+  // Records the end timestamp of `scope` of `frame` into `cmd`. Every Begin()
+  // needs a matching End() in the same frame.
+  void End(VkCommandBuffer cmd, size_t frame, GpuScope scope);
 
   [[nodiscard]] bool is_supported() const { return pool_ != VK_NULL_HANDLE; }
-  // Returns the most recent GPU frame time, or nullopt before the first
-  // result or when timestamps are unsupported.
+  // Returns the most recent GPU time of `scope`, or nullopt before the first
+  // result, when the scope did not run in the last collected frame, or when
+  // timestamps are unsupported.
+  [[nodiscard]] std::optional<double> last_ms(GpuScope scope) const {
+    return last_ms_[static_cast<size_t>(scope)];
+  }
+  // Returns the most recent GPU frame time; see last_ms().
   [[nodiscard]] std::optional<double> last_frame_ms() const {
-    return last_frame_ms_;
+    return last_ms(GpuScope::kTotal);
   }
 
  private:
@@ -44,8 +62,9 @@ class GpuTimer {
   VkQueryPool pool_ = VK_NULL_HANDLE;
   double ms_per_tick_ = 0.0;
   uint64_t valid_mask_ = 0;
-  std::array<bool, kFramesInFlight> pending_{};
-  std::optional<double> last_frame_ms_;
+  // A scope is pending from its End() until its result is collected.
+  std::array<std::array<bool, kScopeCount>, kFramesInFlight> pending_{};
+  std::array<std::optional<double>, kScopeCount> last_ms_;
 };
 
 }  // namespace blue::render

@@ -64,11 +64,21 @@ struct PhysicsOverlayInfo {
   glm::vec3 gravity{0.0f};
 };
 
+// Plain data the overlay shows about the sun shadows.
+struct ShadowOverlayInfo {
+  bool enabled = false;  // Shadows are actually being rendered.
+  bool cascade_debug = false;
+  // GPU time of the shadow and main passes; nullopt when not measured.
+  std::optional<double> shadow_ms;
+  std::optional<double> main_ms;
+};
+
 // Plain data the overlay shows about the loaded scene; the views must outlive
 // the PerfOverlay::Build() call.
 struct SceneOverlayInfo {
   CameraOverlayInfo camera;
   PhysicsOverlayInfo physics;
+  ShadowOverlayInfo shadows;
   // Draws a dot at the screen center, also while the stats window is hidden.
   bool show_crosshair = false;
   size_t entity_count = 0;

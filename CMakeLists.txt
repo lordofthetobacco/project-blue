@@ -165,6 +165,7 @@ target_link_libraries(project-blue PRIVATE
     blue_core
     blue_asset
     blue_scene
+    blue_lighting
     blue_physics
     blue_camera
     blue_input_mapper

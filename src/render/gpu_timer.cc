@@ -7,10 +7,17 @@ namespace blue::render {
 
 namespace {
 
-constexpr uint32_t kQueriesPerFrame = 2;
+constexpr uint32_t kQueriesPerScope = 2;
+constexpr uint32_t kQueriesPerFrame =
+    static_cast<uint32_t>(GpuTimer::kScopeCount) * kQueriesPerScope;
 
-uint32_t FirstQuery(size_t frame) {
+uint32_t FirstFrameQuery(size_t frame) {
   return static_cast<uint32_t>(frame) * kQueriesPerFrame;
+}
+
+uint32_t FirstScopeQuery(size_t frame, GpuScope scope) {
+  return FirstFrameQuery(frame) +
+         static_cast<uint32_t>(scope) * kQueriesPerScope;
 }
 
 }  // namespace
@@ -40,37 +47,54 @@ GpuTimer::GpuTimer(const VulkanContext& context) : device_(context.device()) {
 GpuTimer::~GpuTimer() { vkDestroyQueryPool(device_, pool_, nullptr); }
 
 void GpuTimer::Collect(size_t frame) {
-  if (!is_supported() || !pending_[frame]) {
-    return;
-  }
-
-  std::array<uint64_t, kQueriesPerFrame> ticks{};
-  const VkResult result = vkGetQueryPoolResults(
-      device_, pool_, FirstQuery(frame), kQueriesPerFrame, sizeof(ticks),
-      ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-  if (result == VK_SUCCESS) {
-    const uint64_t elapsed = (ticks[1] - ticks[0]) & valid_mask_;
-    last_frame_ms_ = static_cast<double>(elapsed) * ms_per_tick_;
-    pending_[frame] = false;
-  }
-}
-
-void GpuTimer::Begin(VkCommandBuffer cmd, size_t frame) {
   if (!is_supported()) {
     return;
   }
-  vkCmdResetQueryPool(cmd, pool_, FirstQuery(frame), kQueriesPerFrame);
-  vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, pool_,
-                       FirstQuery(frame));
+  std::array<bool, kScopeCount>& pending = pending_[frame];
+  if (!pending[static_cast<size_t>(GpuScope::kTotal)]) {
+    return;  // The frame was never recorded, or already collected.
+  }
+
+  for (size_t scope = 0; scope < kScopeCount; ++scope) {
+    if (!pending[scope]) {
+      last_ms_[scope] = std::nullopt;  // The scope did not run in this frame.
+      continue;
+    }
+    std::array<uint64_t, kQueriesPerScope> ticks{};
+    const VkResult result = vkGetQueryPoolResults(
+        device_, pool_, FirstScopeQuery(frame, static_cast<GpuScope>(scope)),
+        kQueriesPerScope, sizeof(ticks), ticks.data(), sizeof(uint64_t),
+        VK_QUERY_RESULT_64_BIT);
+    if (result == VK_SUCCESS) {
+      const uint64_t elapsed = (ticks[1] - ticks[0]) & valid_mask_;
+      last_ms_[scope] = static_cast<double>(elapsed) * ms_per_tick_;
+      pending[scope] = false;
+    }
+  }
 }
 
-void GpuTimer::End(VkCommandBuffer cmd, size_t frame) {
+void GpuTimer::BeginFrame(VkCommandBuffer cmd, size_t frame) {
+  if (!is_supported()) {
+    return;
+  }
+  vkCmdResetQueryPool(cmd, pool_, FirstFrameQuery(frame), kQueriesPerFrame);
+}
+
+void GpuTimer::Begin(VkCommandBuffer cmd, size_t frame, GpuScope scope) {
+  if (!is_supported()) {
+    return;
+  }
+  vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, pool_,
+                       FirstScopeQuery(frame, scope));
+}
+
+void GpuTimer::End(VkCommandBuffer cmd, size_t frame, GpuScope scope) {
   if (!is_supported()) {
     return;
   }
   vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, pool_,
-                       FirstQuery(frame) + 1);
-  pending_[frame] = true;
+                       FirstScopeQuery(frame, scope) + 1);
+  pending_[frame][static_cast<size_t>(scope)] = true;
 }
 
 }  // namespace blue::render

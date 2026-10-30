@@ -417,4 +417,21 @@ TEST_CASE("A click after focus loss does not capture until focus returns") {
   CHECK_FALSE(mapper.wants_mouse_captured());
 }
 
+TEST_CASE("C and X toggle cascade debug and shadows once, ignoring repeat") {
+  InputMapper mapper;
+  (void)mapper.TakeActions();
+
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_C, SDLK_C, true));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_C, SDLK_C, true, true));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_C, SDLK_C, false));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_X, SDLK_X, true));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_X, SDLK_X, true, true));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_X, SDLK_X, false));
+
+  const std::vector<InputAction> actions = mapper.TakeActions();
+  REQUIRE(actions.size() == 2);
+  CHECK(actions[0] == InputAction::kToggleCascadeDebug);
+  CHECK(actions[1] == InputAction::kToggleShadows);
+}
+
 }  // namespace blue::platform

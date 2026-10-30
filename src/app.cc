@@ -327,6 +327,11 @@ int App::Run() {
                     .active_bodies = physics_stats.active_bodies,
                     .step_ms = physics_stats.last_step_ms,
                     .gravity = scene_.gravity},
+        .shadows = {.enabled = shadows_enabled_ && scene_.sun.casts_shadows,
+                    .cascade_debug = cascade_debug_,
+                    .shadow_ms =
+                        renderer_.gpu_scope_ms(render::GpuScope::kShadow),
+                    .main_ms = renderer_.gpu_scope_ms(render::GpuScope::kMain)},
         .show_crosshair = camera_.mode() == camera::CameraMode::kFly,
         .entity_count = scene_.entities.size(),
         .draw_calls = stats.draw_calls,
@@ -385,6 +390,12 @@ void App::HandleAction(platform::InputAction action) {
     case platform::InputAction::kPush:
       PushObject();
       break;
+    case platform::InputAction::kToggleCascadeDebug:
+      cascade_debug_ = !cascade_debug_;
+      break;
+    case platform::InputAction::kToggleShadows:
+      shadows_enabled_ = !shadows_enabled_;
+      break;
   }
 }
 
@@ -431,12 +442,18 @@ render::SceneView App::BuildSceneView() {
   render::SceneView view;
   view.camera.position = camera_.position();
   view.camera.view = camera_.View();
+  view.camera.vertical_fov_radians =
+      glm::radians(camera_.vertical_fov_degrees());
+  view.camera.near_plane = kNearPlane;
   view.camera.projection = camera::ReversedInfinitePerspective(
-      glm::radians(camera_.vertical_fov_degrees()), aspect, kNearPlane);
+      view.camera.vertical_fov_radians, aspect, kNearPlane);
   view.light = {.position = scene_.light.position,
                 .color = scene_.light.color,
                 .intensity = scene_.light.intensity};
   view.ambient = scene_.ambient;
+  view.sun = scene_.sun;
+  view.shadows_enabled = shadows_enabled_;
+  view.cascade_debug = cascade_debug_;
   view.draws = draws_;
   return view;
 }

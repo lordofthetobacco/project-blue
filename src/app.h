@@ -89,6 +89,8 @@ class App {
   std::string settings_path_;
 
   bool mouse_captured_ = false;
+  bool shadows_enabled_ = true;
+  bool cascade_debug_ = false;
 };
 
 }  // namespace blue

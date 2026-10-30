@@ -24,6 +24,8 @@ enum class InputAction {
   kLoadScene,
   kToggleVsync,
   kPush,  // Push the object under the crosshair.
+  kToggleCascadeDebug,
+  kToggleShadows,
 };
 
 // Interprets SDL events as camera input. Pure logic over event data: it never

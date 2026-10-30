@@ -8,6 +8,7 @@
 #include <algorithm>
 
 #include "core/log.h"
+#include "lighting/cascades.h"
 #include "platform/window.h"
 #include "render/renderer.h"
 #include "render/vk_check.h"
@@ -61,6 +62,22 @@ void DrawPhysicsInfo(const PhysicsOverlayInfo& physics) {
               physics.gravity.x, physics.gravity.y, physics.gravity.z);
 }
 
+void DrawShadowInfo(const ShadowOverlayInfo& shadows) {
+  ImGui::Text("Shadows: %s  (%d x %dpx)", shadows.enabled ? "on" : "off",
+              lighting::kCascadeCount, lighting::kShadowMapSize);
+  if (shadows.shadow_ms) {
+    ImGui::Text("  shadow pass %7.3f ms", *shadows.shadow_ms);
+  } else {
+    ImGui::TextUnformatted("  shadow pass     n/a");
+  }
+  if (shadows.main_ms) {
+    ImGui::Text("  main pass   %7.3f ms", *shadows.main_ms);
+  } else {
+    ImGui::TextUnformatted("  main pass       n/a");
+  }
+  ImGui::Text("  cascade debug: %s", shadows.cascade_debug ? "on" : "off");
+}
+
 // Draws a small dot at the center of the screen behind all windows.
 void DrawCrosshair() {
   const ImVec2 size = ImGui::GetIO().DisplaySize;
@@ -88,7 +105,8 @@ void DrawSceneInfo(const SceneOverlayInfo& scene_info) {
     ImGui::PopStyleColor();
   }
   ImGui::TextDisabled(
-      "WASD move  Tab fly/orbit  F push  I invert Y  [ ] sens  F1 overlay  "
+      "WASD move  Tab fly/orbit  F push  C cascades  X shadows  I invert Y  [ "
+      "] sens  F1 overlay  "
       "F5 save  F9 load  V vsync  Esc quit");
 }
 
@@ -213,6 +231,8 @@ ImDrawData* PerfOverlay::Build(float cpu_frame_ms,
       DrawCameraInfo(scene_info.camera);
       ImGui::Separator();
       DrawPhysicsInfo(scene_info.physics);
+      ImGui::Separator();
+      DrawShadowInfo(scene_info.shadows);
       ImGui::Separator();
       DrawSceneInfo(scene_info);
     }

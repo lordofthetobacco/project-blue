@@ -131,6 +131,12 @@ void InputMapper::HandleKey(const SDL_Event& event) {
     case SDLK_V:
       actions_.push_back(InputAction::kToggleVsync);
       break;
+    case SDLK_C:
+      actions_.push_back(InputAction::kToggleCascadeDebug);
+      break;
+    case SDLK_X:
+      actions_.push_back(InputAction::kToggleShadows);
+      break;
     default:
       break;
   }
