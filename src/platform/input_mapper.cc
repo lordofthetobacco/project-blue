@@ -125,6 +125,9 @@ void InputMapper::HandleKey(const SDL_Event& event) {
     case SDLK_F9:
       actions_.push_back(InputAction::kLoadScene);
       break;
+    case SDLK_F:
+      actions_.push_back(InputAction::kPush);
+      break;
     case SDLK_V:
       actions_.push_back(InputAction::kToggleVsync);
       break;

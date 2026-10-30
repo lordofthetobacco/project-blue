@@ -6,8 +6,12 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <string>
+#include <string_view>
 
+#include <glm/geometric.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/trigonometric.hpp>
 
 #include "camera/projection.h"
@@ -30,6 +34,11 @@ constexpr float kSensitivityStep = 1.15f;
 
 constexpr float kImportTargetSize = 2.0f;
 constexpr float kImportSpacing = 2.5f;
+constexpr float kImportDropHeight = 1.5f;  // Imports start this high and fall.
+constexpr float kImportMass = 10.0f;       // kg
+
+constexpr float kPushReach = 100.0f;   // m
+constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
 
 constexpr const char* kDefaultScenePath = "scenes/untitled.bscn";
 constexpr const char* kSettingsFileName = "input.cfg";
@@ -108,6 +117,8 @@ App::App(const CliOptions& options)
     : window_("Project Blue", kInitialWidth, kInitialHeight),
       renderer_(window_, ShaderDirectory()),
       mesh_cache_(renderer_),
+      physics_world_(physics_runtime_),
+      scene_physics_(physics_world_),
       overlay_(window_, renderer_),
       scene_path_(options.scene_path.value_or(kDefaultScenePath)),
       settings_path_(InputSettingsPath()) {
@@ -115,6 +126,40 @@ App::App(const CliOptions& options)
   SDL_SetWindowTitle(window_.handle(), WindowTitle(scene_path_).c_str());
   InitializeScene(options);
   camera_.SetFromSceneCamera(scene_.camera);
+  RebuildPhysics();
+}
+
+void App::RebuildPhysics() {
+  const physics::RebuildSummary summary = scene_physics_.Rebuild(
+      scene_,
+      [this](std::string_view mesh_path) -> std::optional<physics::MeshView> {
+        const std::optional<render::CachedMesh> mesh =
+            mesh_cache_.Get(mesh_path);
+        if (!mesh) {
+          return std::nullopt;
+        }
+        return physics::MeshView{.bounds = mesh->bounds,
+                                 .mesh = mesh->cpu_mesh};
+      });
+  core::log::Info("Physics: {} bodies created, {} failed", summary.created,
+                  summary.failed);
+}
+
+void App::PushObject() {
+  const glm::vec3 forward = camera_.Forward();
+  const std::optional<physics::RayHit> hit =
+      physics_world_.CastRay(camera_.position(), forward, kPushReach);
+  const std::optional<size_t> entity =
+      hit && physics_world_.IsDynamic(hit->body)
+          ? scene_physics_.EntityFor(hit->body)
+          : std::nullopt;
+  if (!entity) {
+    status_ = "Push: nothing in reach";
+    return;
+  }
+  physics_world_.AddImpulseAtPoint(hit->body, forward * kPushImpulse,
+                                   hit->point);
+  status_ = "Pushed " + scene_.entities[*entity].name;
 }
 
 void App::InitializeScene(const CliOptions& options) {
@@ -130,14 +175,26 @@ void App::InitializeScene(const CliOptions& options) {
     status_ = std::string("Load failed: ") + scene::ToString(loaded.error());
   }
 
-  scene_.entities.push_back(
-      {.name = "ground", .mesh_path = "builtin:plane", .transform = {}});
+  scene_.entities.push_back({
+      .name = "ground",
+      .mesh_path = "builtin:plane",
+      .transform = {},
+      .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
+                               .shape = scene::ShapeType::kBox},
+  });
   if (options.imports.empty()) {
+    // Unit cube centred at the origin, dropped from 3 m at a tilt.
     scene::Transform cube;
-    // Unit cube centred at the origin; rest it on the ground.
-    cube.position.y = 0.5f;
-    scene_.entities.push_back(
-        {.name = "cube", .mesh_path = "builtin:cube", .transform = cube});
+    cube.position.y = 3.0f;
+    cube.rotation = glm::angleAxis(glm::radians(30.0f),
+                                   glm::normalize(glm::vec3(1.0f, 0.0f, 1.0f)));
+    scene_.entities.push_back({
+        .name = "cube",
+        .mesh_path = "builtin:cube",
+        .transform = cube,
+        .body = scene::RigidBody{.motion = scene::MotionType::kDynamic,
+                                 .shape = scene::ShapeType::kBox},
+    });
   } else {
     AddImports(options.imports);
   }
@@ -154,16 +211,23 @@ void App::AddImports(const std::vector<std::string>& imports) {
     }
     const glm::vec3 ground{
         (static_cast<float>(i) - centered_offset) * kImportSpacing, 0.0f, 0.0f};
+    scene::Transform transform = scene::FitOnGround(
+        mesh->bounds.min, mesh->bounds.max, kImportTargetSize, ground);
+    transform.position.y += kImportDropHeight;
     scene_.entities.push_back({
         .name = core::FileStem(imports[i]),
         .mesh_path = mesh_path,
-        .transform = scene::FitOnGround(mesh->bounds.min, mesh->bounds.max,
-                                        kImportTargetSize, ground),
+        .transform = transform,
+        .body = scene::RigidBody{.motion = scene::MotionType::kDynamic,
+                                 .shape = scene::ShapeType::kConvexHull,
+                                 .mass = kImportMass},
     });
   }
 }
 
 void App::SaveCurrentScene() {
+  // The scene holds the current (interpolated) poses. Velocities are not part
+  // of the file, so loaded bodies start at rest.
   scene_.camera = camera_.ToSceneCamera();
   const auto start = std::chrono::steady_clock::now();
   const auto result = scene::SaveScene(scene_, scene_path_);
@@ -182,6 +246,7 @@ void App::ReloadCurrentScene() {
   if (loaded.ok()) {
     scene_ = std::move(loaded).value();
     camera_.SetFromSceneCamera(scene_.camera);
+    RebuildPhysics();
     status_ = TimedStatus("Loaded", scene_path_, start);
     core::log::Info("{}", status_);
   } else {
@@ -225,9 +290,20 @@ int App::Run() {
     camera_.Update(input, settings_,
                    std::min(frame_seconds, kMaxSimulationStep));
 
+    // The world clamps long frames itself. Poses must be synced before the
+    // draw items and the overlay read the scene.
+    physics_world_.Update(frame_seconds);
+    scene_physics_.SyncToScene(scene_);
+
+    const physics::PhysicsStats physics_stats = physics_world_.Stats();
     const render::RenderStats stats = renderer_.stats();
     const ui::SceneOverlayInfo scene_info{
         .camera = MakeCameraOverlayInfo(),
+        .physics = {.bodies = physics_stats.bodies,
+                    .active_bodies = physics_stats.active_bodies,
+                    .step_ms = physics_stats.last_step_ms,
+                    .gravity = scene_.gravity},
+        .show_crosshair = camera_.mode() == camera::CameraMode::kFly,
         .entity_count = scene_.entities.size(),
         .draw_calls = stats.draw_calls,
         .triangles = stats.triangles,
@@ -280,6 +356,9 @@ void App::HandleAction(platform::InputAction action) {
       break;
     case platform::InputAction::kToggleVsync:
       renderer_.SetVsync(!renderer_.vsync());
+      break;
+    case platform::InputAction::kPush:
+      PushObject();
       break;
   }
 }

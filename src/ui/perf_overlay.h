@@ -56,10 +56,21 @@ struct CameraOverlayInfo {
   std::string_view hint;
 };
 
+// Plain data the overlay shows about the physics simulation.
+struct PhysicsOverlayInfo {
+  int bodies = 0;
+  int active_bodies = 0;
+  float step_ms = 0.0f;
+  glm::vec3 gravity{0.0f};
+};
+
 // Plain data the overlay shows about the loaded scene; the views must outlive
 // the PerfOverlay::Build() call.
 struct SceneOverlayInfo {
   CameraOverlayInfo camera;
+  PhysicsOverlayInfo physics;
+  // Draws a dot at the screen center, also while the stats window is hidden.
+  bool show_crosshair = false;
   size_t entity_count = 0;
   uint32_t draw_calls = 0;
   uint64_t triangles = 0;
@@ -82,8 +93,9 @@ class PerfOverlay {
   void ProcessEvent(const SDL_Event& event);
   void ToggleVisible() { visible_ = !visible_; }
 
-  // Records this frame's timings and builds the UI. Returns nullptr when
-  // hidden.
+  // Records this frame's timings and builds the UI: the stats window while
+  // visible, plus the crosshair if requested. Always returns the frame's draw
+  // data.
   [[nodiscard]] ImDrawData* Build(float cpu_frame_ms,
                                   std::optional<double> gpu_frame_ms,
                                   const SceneOverlayInfo& scene_info);

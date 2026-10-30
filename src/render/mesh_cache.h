@@ -3,10 +3,12 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "asset/mesh_data.h"
 #include "render/renderer.h"
@@ -16,12 +18,16 @@ namespace blue::render {
 struct CachedMesh {
   MeshId id;
   asset::Bounds bounds;
+  // The CPU copy of the mesh, e.g. for building physics shapes. Owned by the
+  // MeshCache that returned it and valid until that cache is destroyed.
+  const asset::MeshData* cpu_mesh = nullptr;
 };
 
 // Resolves scene::Entity::mesh_path to an uploaded mesh, importing each
 // source once. Failures are remembered so a broken path is reported once
-// rather than re-parsed every frame. Borrows `renderer`, which must outlive
-// the cache. Not thread-safe.
+// rather than re-parsed every frame. The CPU mesh data of every loaded mesh
+// is kept for the cache's lifetime at a stable address (CachedMesh::cpu_mesh).
+// Borrows `renderer`, which must outlive the cache. Not thread-safe.
 class MeshCache {
  public:
   explicit MeshCache(Renderer& renderer) : renderer_(renderer) {}
@@ -44,10 +50,15 @@ class MeshCache {
   using Entries = std::unordered_map<std::string, std::optional<CachedMesh>,
                                      StringHash, std::equal_to<>>;
 
+  // Keeps `data` for the cache's lifetime and uploads it.
+  [[nodiscard]] CachedMesh Store(asset::MeshData data);
   [[nodiscard]] std::optional<CachedMesh> Load(std::string_view mesh_path,
                                                const std::string& key);
 
   Renderer& renderer_;
+  // Owners of CachedMesh::cpu_mesh; declared before the maps that point into
+  // them.
+  std::vector<std::unique_ptr<asset::MeshData>> cpu_meshes_;
   // In both maps nullopt marks a failed load.
   // Normalized key: one entry per distinct source.
   Entries by_key_;

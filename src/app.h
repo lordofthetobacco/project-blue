@@ -9,6 +9,9 @@
 
 #include "camera/camera_controller.h"
 #include "input/input_settings.h"
+#include "physics/physics_runtime.h"
+#include "physics/physics_world.h"
+#include "physics/scene_physics.h"
 #include "platform/input_mapper.h"
 #include "platform/window.h"
 #include "render/mesh_cache.h"
@@ -56,13 +59,23 @@ class App {
   void AddImports(const std::vector<std::string>& imports);
   void SaveCurrentScene();
   void ReloadCurrentScene();
+  // Recreates the physics bodies of `scene_`; call after every scene change.
+  void RebuildPhysics();
+  // Pushes the dynamic body under the crosshair along the camera direction.
+  void PushObject();
   [[nodiscard]] render::SceneView BuildSceneView();
 
-  // Declaration order is destruction order in reverse: the overlay and
-  // renderer must go before the window they render into.
+  // Declaration order is construction order and, reversed, destruction order:
+  // the overlay and renderer must go before the window they render into, and
+  // scene_physics_ (which borrows the world) before the world, which needs the
+  // runtime. The mesh cache owns the CPU meshes shapes are built from, but
+  // bodies copy what they need, so it only has to outlive Rebuild calls.
   platform::Window window_;
   render::Renderer renderer_;
   render::MeshCache mesh_cache_;
+  physics::PhysicsRuntime physics_runtime_;
+  physics::PhysicsWorld physics_world_;
+  physics::ScenePhysics scene_physics_;
   ui::PerfOverlay overlay_;
 
   scene::Scene scene_;

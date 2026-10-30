@@ -7,9 +7,13 @@
 
 namespace blue::render {
 
-// Terminates the process through core::log::Fatal, naming the failing call
-// site, when `result` is not VK_SUCCESS. Wrap every Vulkan call that returns
-// a VkResult and cannot be recovered from.
+// Returns normally when `result` is VK_SUCCESS. Otherwise logs the result
+// name (string_VkResult) with the file, line and function of the call site,
+// then terminates the process through core::log::Fatal. Wrap every Vulkan call
+// that returns a VkResult and cannot be recovered from.
+//
+// `location` defaults to std::source_location::current(), which is evaluated
+// at the call site, so callers never pass it.
 void CheckVk(VkResult result,
              std::source_location location = std::source_location::current());
 

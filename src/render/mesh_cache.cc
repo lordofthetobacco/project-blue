@@ -46,26 +46,31 @@ std::optional<CachedMesh> MeshCache::Get(std::string_view mesh_path) {
 std::optional<CachedMesh> MeshCache::Load(std::string_view mesh_path,
                                           const std::string& key) {
   if (mesh_path.starts_with(scene::kBuiltinMeshPrefix)) {
-    asset::MeshData data;
     if (mesh_path == "builtin:cube") {
-      data = asset::MakeCube(kCubeColor);
-    } else if (mesh_path == "builtin:plane") {
-      data = asset::MakePlane(kBuiltinPlaneSize, kPlaneColor);
-    } else {
-      core::log::Error("Unknown builtin mesh '{}'", mesh_path);
-      return std::nullopt;
+      return Store(asset::MakeCube(kCubeColor));
     }
-    return CachedMesh{.id = renderer_.UploadMesh(data), .bounds = data.bounds};
+    if (mesh_path == "builtin:plane") {
+      return Store(asset::MakePlane(kBuiltinPlaneSize, kPlaneColor));
+    }
+    core::log::Error("Unknown builtin mesh '{}'", mesh_path);
+    return std::nullopt;
   }
 
-  const auto imported = asset::ImportModel(key);
+  auto imported = asset::ImportModel(key);
   if (!imported.ok()) {
     core::log::Error("Failed to import '{}': {}", mesh_path,
                      asset::ToString(imported.error()));
     return std::nullopt;
   }
-  return CachedMesh{.id = renderer_.UploadMesh(imported.value()),
-                    .bounds = imported.value().bounds};
+  return Store(std::move(imported).value());
+}
+
+CachedMesh MeshCache::Store(asset::MeshData data) {
+  cpu_meshes_.push_back(std::make_unique<asset::MeshData>(std::move(data)));
+  const asset::MeshData& stored = *cpu_meshes_.back();
+  return {.id = renderer_.UploadMesh(stored),
+          .bounds = stored.bounds,
+          .cpu_mesh = &stored};
 }
 
 }  // namespace blue::render

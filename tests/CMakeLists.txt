@@ -24,6 +24,7 @@ add_executable(blue_tests
     path_test.cc
     file_system_test.cc
     physics_world_test.cc
+    scene_physics_test.cc
 )
 
 target_include_directories(blue_tests PRIVATE ${CMAKE_SOURCE_DIR})

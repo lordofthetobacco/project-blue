@@ -200,6 +200,23 @@ TEST_CASE("Every bound key maps to its action") {
   CHECK(Contains(actions, InputAction::kToggleVsync));
 }
 
+TEST_CASE("F requests a push once, ignores key repeat, in both modes") {
+  InputMapper mapper;
+
+  SUBCASE("Fly") {}
+  SUBCASE("Orbit") { Press(mapper, SDL_SCANCODE_TAB, SDLK_TAB); }
+
+  (void)mapper.TakeActions();
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_F, SDLK_F, true));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_F, SDLK_F, true, true));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_F, SDLK_F, true, true));
+  mapper.HandleEvent(KeyEvent(SDL_SCANCODE_F, SDLK_F, false));
+
+  const std::vector<InputAction> actions = mapper.TakeActions();
+  REQUIRE(actions.size() == 1);
+  CHECK(actions.front() == InputAction::kPush);
+}
+
 TEST_CASE("Wheel notches are summed and respect flipped direction") {
   InputMapper mapper;
   mapper.HandleEvent(WheelEvent(1.0f));

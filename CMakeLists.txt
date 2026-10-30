@@ -65,6 +65,7 @@ target_link_libraries(blue_scene PUBLIC blue_core glm::glm)
 add_library(blue_physics STATIC
     src/physics/physics_runtime.cc
     src/physics/physics_world.cc
+    src/physics/scene_physics.cc
     src/physics/internal/shape_builder.cc
 )
 
@@ -128,6 +129,7 @@ target_link_libraries(project-blue PRIVATE
     blue_core
     blue_asset
     blue_scene
+    blue_physics
     blue_camera
     blue_input_mapper
     Vulkan::Vulkan
