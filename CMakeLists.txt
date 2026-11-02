@@ -16,6 +16,7 @@ find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
 
 include(Dependencies)
 include(ShaderSources)
+include(SampleAssets)
 include(ProjectOptions)
 
 # Path handling and file system access (src/core/path.cc is pure; file_system.cc sits on
@@ -106,6 +107,7 @@ target_link_libraries(blue_input PUBLIC blue_core SDL3::SDL3-static glm::glm)
 
 add_library(blue_camera STATIC
     src/camera/camera_controller.cc
+    src/camera/frustum.cc
     src/camera/look.cc
     src/camera/projection.cc
 )
@@ -210,11 +212,14 @@ target_link_libraries(project-blue PRIVATE
 )
 
 blue_copy_shader_sources(project-blue)
+blue_copy_samples(project-blue)
 
 # Debug builds compile the repo's shader sources directly, so edits apply live without
-# rebuilding; Release uses the copy next to the executable.
+# rebuilding, and load the sample models from the repo; Release uses the copies next to
+# the executable.
 target_compile_definitions(project-blue PRIVATE
     $<$<CONFIG:Debug>:BLUE_DEV_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders">
+    $<$<CONFIG:Debug>:BLUE_DEV_SAMPLES_DIR="${CMAKE_SOURCE_DIR}/samples">
 )
 
 option(BLUE_BUILD_TESTS "Build the unit tests" ON)

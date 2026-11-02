@@ -86,6 +86,9 @@ struct SceneOverlayInfo {
   bool show_crosshair = false;
   size_t entity_count = 0;
   uint32_t draw_calls = 0;
+  uint32_t culled_draws = 0;  // Skipped by frustum culling in the main pass.
+  uint32_t shadow_draw_calls = 0;
+  uint32_t shadow_culled_draws = 0;
   uint64_t triangles = 0;
   std::string_view scene_path;
   std::string_view status;

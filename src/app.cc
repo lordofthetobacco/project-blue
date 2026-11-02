@@ -49,6 +49,14 @@ constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
 // player; beyond that the feet go an eye height below the camera.
 constexpr float kSpawnProbeDistance = 3.0f;  // m
 
+// The default scene's ground: the builtin plane is 12 m square, scaled up so
+// the house and the player have room.
+constexpr float kGroundScale = 4.0f;  // 48 m square
+// The sample house (6.4 x 7.1 x 14.8 m, authored in metres, base at y = 0),
+// placed to the left of the default camera's view and clear of the cube.
+constexpr const char* kHouseModel = "house.obj";
+constexpr glm::vec3 kHousePosition{-9.0f, 0.0f, -3.0f};
+
 constexpr const char* kDefaultScenePath = "scenes/untitled.bscn";
 constexpr const char* kSettingsFileName = "input.cfg";
 
@@ -72,6 +80,19 @@ std::string ShaderDirectory() {
   // Shaders are deployed next to the executable, so lookups do not depend on
   // the working directory.
   return core::JoinPath(platform::BasePath(), "shaders");
+}
+
+// Returns the path of the sample model `file_name`: the repository copy in
+// Debug builds, otherwise the copy deployed next to the executable.
+[[nodiscard]] std::string SamplePath(std::string_view file_name) {
+#ifdef BLUE_DEV_SAMPLES_DIR
+  const std::string dev_path = core::JoinPath(BLUE_DEV_SAMPLES_DIR, file_name);
+  if (platform::PathExists(dev_path)) {
+    return dev_path;
+  }
+#endif
+  return core::JoinPath(core::JoinPath(platform::BasePath(), "samples"),
+                        file_name);
 }
 
 [[nodiscard]] std::string InputSettingsPath() {
@@ -126,16 +147,22 @@ std::string ShaderDirectory() {
 [[nodiscard]] std::string BuildHelpText(const input::InputBindings& bindings) {
   using input::Action;
   const std::pair<Action, std::string_view> entries[] = {
-      {Action::kMoveForward, "move"},     {Action::kJump, "jump"},
-      {Action::kSprint, "sprint"},        {Action::kCrouch, "crouch"},
-      {Action::kCycleCamera, "camera"},   {Action::kPush, "push"},
+      {Action::kMoveForward, "move"},
+      {Action::kJump, "jump"},
+      {Action::kSprint, "sprint"},
+      {Action::kCrouch, "crouch"},
+      {Action::kCycleCamera, "camera"},
+      {Action::kPush, "push"},
       {Action::kToggleCascadeDebug, "cascades"},
       {Action::kToggleShadows, "shadows"},
       {Action::kToggleInvertY, "invert Y"},
-      {Action::kSensitivityDown, "/"},    {Action::kSensitivityUp, "sens"},
+      {Action::kSensitivityDown, "/"},
+      {Action::kSensitivityUp, "sens"},
       {Action::kToggleOverlay, "overlay"},
-      {Action::kSaveScene, "save"},       {Action::kLoadScene, "load"},
-      {Action::kToggleVsync, "vsync"},    {Action::kEscape, "release/quit"},
+      {Action::kSaveScene, "save"},
+      {Action::kLoadScene, "load"},
+      {Action::kToggleVsync, "vsync"},
+      {Action::kEscape, "release/quit"},
   };
   std::string text;
   for (const auto& [action, label] : entries) {
@@ -298,13 +325,28 @@ void App::InitializeScene(const CliOptions& options) {
     status_ = std::string("Load failed: ") + scene::ToString(loaded.error());
   }
 
+  scene::Transform ground;
+  ground.scale = glm::vec3(kGroundScale, 1.0f, kGroundScale);
   scene_.entities.push_back({
       .name = "ground",
       .mesh_path = "builtin:plane",
-      .transform = {},
+      .transform = ground,
       .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
                                .shape = scene::ShapeType::kBox},
   });
+
+  // Static and collided against triangle by triangle, so the player can walk
+  // around it and through its openings.
+  scene::Transform house;
+  house.position = kHousePosition;
+  scene_.entities.push_back({
+      .name = "house",
+      .mesh_path = SamplePath(kHouseModel),
+      .transform = house,
+      .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
+                               .shape = scene::ShapeType::kTriangleMesh},
+  });
+
   if (options.imports.empty()) {
     // Unit cube centred at the origin, dropped from 3 m at a tilt.
     scene::Transform cube;
@@ -454,6 +496,9 @@ int App::Run() {
         .show_crosshair = view_mode_ != ViewMode::kOrbit,
         .entity_count = scene_.entities.size(),
         .draw_calls = stats.draw_calls,
+        .culled_draws = stats.culled_draws,
+        .shadow_draw_calls = stats.shadow_draw_calls,
+        .shadow_culled_draws = stats.shadow_culled_draws,
         .triangles = stats.triangles,
         .scene_path = scene_path_,
         .status = status_,
@@ -627,8 +672,9 @@ render::SceneView App::BuildSceneView() {
   for (const scene::Entity& entity : scene_.entities) {
     if (const std::optional<render::CachedMesh> mesh =
             mesh_cache_.Get(entity.mesh_path)) {
-      draws_.push_back(
-          {.mesh = mesh->id, .transform = entity.transform.Matrix()});
+      draws_.push_back({.mesh = mesh->id,
+                        .transform = entity.transform.Matrix(),
+                        .bounds = mesh->bounds});
     }
   }
 

@@ -18,6 +18,7 @@
 #include <glm/vec3.hpp>
 
 #include "asset/mesh_data.h"
+#include "camera/frustum.h"
 #include "lighting/cascades.h"
 #include "platform/window.h"
 #include "render/buffer.h"
@@ -55,11 +56,19 @@ enum class MeshId : uint32_t {};
 struct DrawItem {
   MeshId mesh;
   glm::mat4 transform;
+  // Local-space bounds of the mesh; culled against the camera and the shadow
+  // cascades after `transform`.
+  asset::Bounds bounds;
 };
 
+// Draw counts of the most recent frame. Culled items were submitted in the
+// SceneView but skipped because their bounds fell outside the view.
 struct RenderStats {
-  uint32_t draw_calls = 0;
-  uint64_t triangles = 0;
+  uint32_t draw_calls = 0;  // Main pass.
+  uint64_t triangles = 0;   // Main pass.
+  uint32_t culled_draws = 0;
+  uint32_t shadow_draw_calls = 0;  // Summed over the cascades.
+  uint32_t shadow_culled_draws = 0;
 };
 
 // Everything the renderer needs to draw one frame. `draws` is borrowed and
@@ -163,10 +172,13 @@ class Renderer {
 
   void RecordCommands(const Frame& frame, uint32_t image_index,
                       const SceneView& view, const Cascades& cascades,
-                      bool shadows, ImDrawData* ui);
-  // Renders every draw item into each cascade of the shadow map and leaves
-  // the map readable by fragment shaders. Must be recorded outside of a
-  // rendering pass, before the main pass.
+                      bool shadows, const camera::Frustum& camera_frustum,
+                      ImDrawData* ui);
+  // Computes the world-space bounds of every draw item into world_bounds_.
+  void ComputeWorldBounds(const SceneView& view);
+  // Renders the draw items that reach each cascade into its layer of the
+  // shadow map and leaves the map readable by fragment shaders. Must be
+  // recorded outside of a rendering pass, before the main pass.
   void RecordShadowPass(VkCommandBuffer cmd, const SceneView& view,
                         const Cascades& cascades);
   // Moves the shadow map out of its initial layout the first time, so it can
@@ -177,9 +189,10 @@ class Renderer {
   // Begins dynamic rendering into the swapchain image and depth image, and
   // sets the viewport and scissor.
   void BeginRendering(VkCommandBuffer cmd, uint32_t image_index) const;
-  // Records one draw per item of `view` and updates the statistics.
-  void DrawScene(VkCommandBuffer cmd, const Frame& frame,
-                 const SceneView& view);
+  // Records one draw per item of `view` inside `camera_frustum` and updates
+  // the statistics.
+  void DrawScene(VkCommandBuffer cmd, const Frame& frame, const SceneView& view,
+                 const camera::Frustum& camera_frustum);
 
   const platform::Window& window_;
   VulkanContext context_;
@@ -203,6 +216,9 @@ class Renderer {
   std::unique_ptr<Pipeline> mesh_pipeline_;
   std::unique_ptr<Pipeline> shadow_pipeline_;
   std::vector<Mesh> meshes_;
+  // World-space bounds of the current frame's draw items, parallel to
+  // SceneView::draws; kept as a member to reuse its allocation.
+  std::vector<camera::Aabb> world_bounds_;
   RenderStats stats_;
   GpuTimer gpu_timer_;
 };

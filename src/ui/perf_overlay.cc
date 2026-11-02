@@ -95,9 +95,12 @@ void DrawCrosshair() {
 }
 
 void DrawSceneInfo(const SceneOverlayInfo& scene_info) {
-  ImGui::Text("Entities %zu  |  %u draws  |  %llu tris",
+  ImGui::Text("Entities %zu  |  %u draws (%u culled)  |  %llu tris",
               scene_info.entity_count, scene_info.draw_calls,
+              scene_info.culled_draws,
               static_cast<unsigned long long>(scene_info.triangles));
+  ImGui::Text("Shadow draws %u (%u culled)", scene_info.shadow_draw_calls,
+              scene_info.shadow_culled_draws);
   TextView(scene_info.scene_path);
   if (!scene_info.status.empty()) {
     TextView(scene_info.status);

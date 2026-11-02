@@ -10,11 +10,13 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 #include <glm/mat4x4.hpp>
 #include <glm/matrix.hpp>
 #include <glm/vec4.hpp>
 
+#include "camera/frustum.h"
 #include "core/path.h"
 #include "lighting/cascades.h"
 #include "platform/window.h"
@@ -450,8 +452,14 @@ void Renderer::DrawFrame(const SceneView& view, ImDrawData* ui) {
         view.camera.near_plane, view.sun.direction);
   }
 
+  ComputeWorldBounds(view);
+  const camera::Frustum camera_frustum(view.camera.projection *
+                                       view.camera.view);
+  stats_ = {};
+
   UpdateUniforms(frame, view, cascades, shadows);
-  RecordCommands(frame, *image_index, view, cascades, shadows, ui);
+  RecordCommands(frame, *image_index, view, cascades, shadows, camera_frustum,
+                 ui);
   SubmitAndPresent(frame, *image_index);
 
   frame_index_ = (frame_index_ + 1) % kFramesInFlight;
@@ -550,9 +558,20 @@ void Renderer::SubmitAndPresent(const Frame& frame, uint32_t image_index) {
   }
 }
 
+void Renderer::ComputeWorldBounds(const SceneView& view) {
+  world_bounds_.clear();
+  world_bounds_.reserve(view.draws.size());
+  for (const DrawItem& item : view.draws) {
+    world_bounds_.push_back(camera::TransformAabb(
+        {.min = item.bounds.min, .max = item.bounds.max}, item.transform));
+  }
+}
+
 void Renderer::RecordCommands(const Frame& frame, uint32_t image_index,
                               const SceneView& view, const Cascades& cascades,
-                              bool shadows, ImDrawData* ui) {
+                              bool shadows,
+                              const camera::Frustum& camera_frustum,
+                              ImDrawData* ui) {
   const VkCommandBuffer cmd = frame.command_buffer;
 
   CheckVk(vkResetCommandPool(context_.device(), frame.command_pool, 0));
@@ -575,7 +594,7 @@ void Renderer::RecordCommands(const Frame& frame, uint32_t image_index,
   gpu_timer_.Begin(cmd, frame_index_, GpuScope::kMain);
   TransitionToAttachments(cmd, image_index);
   BeginRendering(cmd, image_index);
-  DrawScene(cmd, frame, view);
+  DrawScene(cmd, frame, view, camera_frustum);
   if (ui != nullptr) {
     ImGui_ImplVulkan_RenderDrawData(ui, cmd);
   }
@@ -655,7 +674,16 @@ void Renderer::RecordShadowPass(VkCommandBuffer cmd, const SceneView& view,
     vkCmdSetDepthBias(cmd, kShadowDepthBiasConstant, kShadowDepthBiasClamp,
                       kShadowDepthBiasSlope);
 
-    for (const DrawItem& item : view.draws) {
+    // The cascade's box already extends towards the sun (kCasterExtension),
+    // so anything outside it cannot shadow this slice.
+    const camera::Frustum cascade_frustum(cascades[layer].view_projection);
+    for (size_t i = 0; i < view.draws.size(); ++i) {
+      if (!cascade_frustum.Intersects(world_bounds_[i])) {
+        ++stats_.shadow_culled_draws;
+        continue;
+      }
+      const DrawItem& item = view.draws[i];
+      ++stats_.shadow_draw_calls;
       const ShadowConstants constants{
           .light_model_view_proj =
               cascades[layer].view_projection * item.transform,
@@ -741,15 +769,20 @@ void Renderer::BeginRendering(VkCommandBuffer cmd, uint32_t image_index) const {
 }
 
 void Renderer::DrawScene(VkCommandBuffer cmd, const Frame& frame,
-                         const SceneView& view) {
+                         const SceneView& view,
+                         const camera::Frustum& camera_frustum) {
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     mesh_pipeline_->handle());
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           mesh_pipeline_->layout(), 0, 1, &frame.descriptor_set,
                           0, nullptr);
 
-  stats_ = {};
-  for (const DrawItem& item : view.draws) {
+  for (size_t i = 0; i < view.draws.size(); ++i) {
+    if (!camera_frustum.Intersects(world_bounds_[i])) {
+      ++stats_.culled_draws;
+      continue;
+    }
+    const DrawItem& item = view.draws[i];
     const Mesh& mesh = meshes_[static_cast<size_t>(item.mesh)];
     const DrawConstants draw{
         .model = item.transform,

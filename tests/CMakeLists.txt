@@ -26,11 +26,13 @@ add_executable(blue_tests
     fov_controller_test.cc
     player_controller_test.cc
     projection_test.cc
+    frustum_test.cc
     result_test.cc
     path_test.cc
     file_system_test.cc
     physics_world_test.cc
     scene_physics_test.cc
+    house_sample_test.cc
     character_test.cc
     cascades_test.cc
     shader_compiler_test.cc
