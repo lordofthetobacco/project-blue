@@ -4,6 +4,7 @@
 #include <memory>
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
 #include "camera/look.h"
@@ -23,11 +24,18 @@ struct PlayerTuning {
   float walk_speed = 4.0f;    // m/s
   float sprint_speed = 7.0f;  // m/s
   float crouch_speed = 2.0f;  // m/s
+  float aim_speed = 2.5f;     // m/s while aiming down the sights
   float jump_speed = 5.0f;    // m/s upwards, about 1.3 m under 9.81 m/s^2
   float eye_height_standing = 1.65f;   // m above the feet
   float eye_height_crouching = 1.05f;  // m above the feet
   float stance_blend_rate = 10.0f;     // 1/s, eye height when crouching
   float fov_blend_rate = 8.0f;         // 1/s
+  // Fully aimed vertical FOV as a fraction of the base one: iron sights only
+  // magnify a little.
+  float aim_fov_scale = 0.8f;
+  // 1/s, exponential approach of the aim FOV; about 95% in 0.2 s, matching
+  // the rifle's raise to the shoulder.
+  float aim_blend_rate = 15.0f;
   HeadBobParams head_bob;
 };
 
@@ -72,17 +80,34 @@ class PlayerController {
   void OnWorldRebuilt();
 
   // Applies one frame of input: mouse look, stance (hold or toggle per
-  // `settings`), desired velocity and jump requests. Call before
+  // `settings`), aiming, desired velocity and jump requests. Call before
   // PhysicsWorld::Update. An empty frame keeps the player standing still.
+  //
+  // Holding kAim aims down the sights: it narrows the field of view, slows
+  // the player to `aim_speed`, cancels and blocks sprinting, and scales the
+  // mouse sensitivity with the zoom so the on-screen turn rate is unchanged.
   void Update(const input::InputFrame& input,
               const input::InputSettings& settings, float dt);
   // Composes the view from the simulated character. Call after
   // PhysicsWorld::Update.
   void UpdateView(const input::InputSettings& settings, float dt);
 
+  // Turns the look by a recoil kick: `pitch_radians` up, `yaw_radians` left
+  // (the LookAngles convention). The pitch stays within the look clamp. Shows
+  // in the view from the next UpdateView on and is not part of look_delta().
+  void AddLookKick(float pitch_radians, float yaw_radians);
+
   [[nodiscard]] const PlayerView& view() const { return view_; }
   [[nodiscard]] camera::LookAngles look() const { return look_; }
   [[nodiscard]] bool sprinting() const { return sprinting_; }
+  // The aim input was held during the last Update.
+  [[nodiscard]] bool aiming() const { return aiming_; }
+  // How far the aim zoom has blended in: 0 at the hip, 1 fully aimed.
+  [[nodiscard]] float aim_fraction() const { return aim_fraction_; }
+  // How far the mouse turned the look during the last Update, in radians:
+  // x = yaw (positive left), y = pitch (positive up). Zero without look
+  // input. For weapon sway.
+  [[nodiscard]] glm::vec2 look_delta() const { return look_delta_; }
   [[nodiscard]] bool crouching() const;
   [[nodiscard]] bool on_ground() const;
   [[nodiscard]] glm::vec3 velocity() const;
@@ -94,13 +119,19 @@ class PlayerController {
 
  private:
   void ResetView();
+  // Returns the factor that keeps the on-screen turn rate of a mouse count
+  // constant under the current aim zoom: 1 at the hip, below 1 when aimed.
+  [[nodiscard]] float SensitivityScale() const;
 
   std::unique_ptr<physics::Character> character_;
   PlayerTuning tuning_;
   camera::LookAngles look_;
+  glm::vec2 look_delta_{0.0f};
   bool sprint_latched_ = false;  // toggle mode: sprint requested
   bool crouch_latched_ = false;  // toggle mode: crouch requested
   bool sprinting_ = false;
+  bool aiming_ = false;
+  float aim_fraction_ = 0.0f;  // Smoothed aiming_, drives the FOV zoom.
   float eye_height_ = 1.65f;
   HeadBob head_bob_;
   FovController fov_;

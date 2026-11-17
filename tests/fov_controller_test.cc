@@ -67,6 +67,19 @@ TEST_CASE("The target is clamped to the settings range") {
         input::kMaxFovDegrees + input::kMaxSprintFovBoostDegrees);
 }
 
+TEST_CASE("Zoom scales the result without disturbing the smoothed value") {
+  FovController fov;
+  FovInput aimed = Input(false, 70.0f);
+  aimed.zoom = 0.8f;
+  CHECK(fov.Update(aimed) == doctest::Approx(56.0f));
+  CHECK(fov.current() == 70.0f);
+  // The zoom applies after the clamp, so it can go below the settings range.
+  fov.Reset();
+  FovInput narrow = Input(false, input::kMinFovDegrees);
+  narrow.zoom = 0.5f;
+  CHECK(fov.Update(narrow) == doctest::Approx(input::kMinFovDegrees * 0.5f));
+}
+
 TEST_CASE("Reset makes the next update snap again") {
   FovController fov;
   (void)fov.Update(Input(false, 70.0f));

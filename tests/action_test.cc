@@ -42,4 +42,15 @@ TEST_CASE("Movement and stance actions are held, the rest edge-triggered") {
   CHECK(IsEdgeTriggered(Action::kToggleShadows));
 }
 
+TEST_CASE("Trigger and aim are held, reload and fire mode edge-triggered") {
+  CHECK_FALSE(IsEdgeTriggered(Action::kFire));
+  CHECK_FALSE(IsEdgeTriggered(Action::kAim));
+  CHECK(IsEdgeTriggered(Action::kReload));
+  CHECK(IsEdgeTriggered(Action::kToggleFireMode));
+  CHECK(ParseAction("fire") == Action::kFire);
+  CHECK(ParseAction("aim") == Action::kAim);
+  CHECK(ParseAction("reload") == Action::kReload);
+  CHECK(ParseAction("toggle_fire_mode") == Action::kToggleFireMode);
+}
+
 }  // namespace blue::input

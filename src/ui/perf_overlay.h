@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <string>
 #include <string_view>
 
 #include <glm/vec3.hpp>
@@ -15,6 +17,7 @@
 #include "input/input_settings.h"
 #include "platform/window.h"
 #include "render/renderer.h"
+#include "weapon/target_log.h"
 
 namespace blue::ui {
 
@@ -76,12 +79,38 @@ struct ShadowOverlayInfo {
   std::optional<double> main_ms;
 };
 
+// Plain data the overlay shows about the player's rifle; the views must
+// outlive the PerfOverlay::Build() call.
+struct WeaponOverlayInfo {
+  int rounds_in_magazine = 0;
+  bool magazine_inserted = true;
+  bool round_chambered = false;
+  bool bolt_locked_back = false;
+  bool reloading = false;
+  float reload_fraction = 0.0f;          // [0, 1]
+  std::string_view fire_mode;            // e.g. "SEMI"
+  std::span<const int> spare_magazines;  // Round count of each spare.
+  int projectiles = 0;                   // Bullets in flight.
+  int impacts = 0;                       // Hits since the last scene reload.
+};
+
+// What the hit log window shows; everything is borrowed for the
+// PerfOverlay::Build() call. The window is hidden while `log` is null.
+struct HitLogOverlayInfo {
+  const weapon::TargetLog* log = nullptr;
+  // Name of each target index of `log`; indices past the end show as "?".
+  std::span<const std::string> target_names;
+  int shots_fired = 0;
+};
+
 // Plain data the overlay shows about the loaded scene; the views must outlive
 // the PerfOverlay::Build() call.
 struct SceneOverlayInfo {
   CameraOverlayInfo camera;
   PhysicsOverlayInfo physics;
   ShadowOverlayInfo shadows;
+  WeaponOverlayInfo weapon;
+  HitLogOverlayInfo hit_log;
   // Draws a dot at the screen center, also while the stats window is hidden.
   bool show_crosshair = false;
   size_t entity_count = 0;
@@ -104,6 +133,8 @@ struct BuildResult {
   ImDrawData* draw_data = nullptr;
   // The user finished changing a value in the settings window this frame.
   bool settings_changed = false;
+  // The user pressed Clear in the hit log window this frame.
+  bool clear_hit_log = false;
 };
 
 // Dear ImGui performance overlay: FPS, CPU/GPU frame time, frame-time graph,
@@ -153,6 +184,8 @@ class PerfOverlay {
   void DrawDeviceInfo() const;
   // Emits the settings window; returns true when an edit was completed.
   [[nodiscard]] bool DrawSettings(input::InputSettings& settings) const;
+  // Emits the hit log window; returns true when Clear was pressed.
+  [[nodiscard]] bool DrawHitLog(const HitLogOverlayInfo& info) const;
 
   const platform::Window& window_;
   const render::Renderer& renderer_;

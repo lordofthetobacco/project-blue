@@ -15,11 +15,11 @@ float FovController::Update(const FovInput& input) {
   if (!initialized_) {
     current_ = target;
     initialized_ = true;
-    return current_;
+  } else {
+    const float dt = std::max(input.dt, 0.0f);
+    current_ += (target - current_) * (1.0f - std::exp(-input.blend_rate * dt));
   }
-  const float dt = std::max(input.dt, 0.0f);
-  current_ += (target - current_) * (1.0f - std::exp(-input.blend_rate * dt));
-  return current_;
+  return current_ * input.zoom;
 }
 
 }  // namespace blue::player

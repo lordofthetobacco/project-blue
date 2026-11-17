@@ -6,13 +6,22 @@
 #include <vulkan/vk_enum_string_helper.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <format>
+#include <span>
+#include <string>
+#include <string_view>
+
+#include <glm/vec2.hpp>
 
 #include "core/log.h"
 #include "lighting/cascades.h"
 #include "platform/window.h"
 #include "render/renderer.h"
 #include "render/vk_check.h"
+#include "weapon/target_log.h"
 
 namespace blue::ui {
 
@@ -82,6 +91,73 @@ void DrawShadowInfo(const ShadowOverlayInfo& shadows) {
     ImGui::TextUnformatted("  main pass       n/a");
   }
   ImGui::Text("  cascade debug: %s", shadows.cascade_debug ? "on" : "off");
+}
+
+// Shows the ammunition state, e.g. "Rifle: 30+1  SEMI  mags 30/30/30/30".
+void DrawWeaponInfo(const WeaponOverlayInfo& weapon) {
+  // Spare magazine counts, formatted into a fixed buffer: no allocation.
+  std::array<char, 96> spares{};
+  size_t used = 0;
+  for (const int rounds : weapon.spare_magazines) {
+    const size_t room = spares.size() - 1 - used;
+    const auto written = std::format_to_n(spares.data() + used, room, "{}{}",
+                                          used == 0 ? "" : "/", rounds);
+    used += std::min(static_cast<size_t>(written.size), room);
+  }
+  const std::string_view spare_text =
+      used == 0 ? std::string_view("none")
+                : std::string_view(spares.data(), used);
+
+  ImGui::Text("Rifle: %d+%d  %.*s  mags %.*s", weapon.rounds_in_magazine,
+              weapon.round_chambered ? 1 : 0,
+              static_cast<int>(weapon.fire_mode.size()),
+              weapon.fire_mode.data(), static_cast<int>(spare_text.size()),
+              spare_text.data());
+  if (weapon.reloading) {
+    ImGui::Text("  reloading %.0f%%%s", weapon.reload_fraction * 100.0f,
+                weapon.magazine_inserted ? "" : "  (magazine out)");
+  } else if (weapon.bolt_locked_back) {
+    ImGui::TextUnformatted("  bolt open: empty");
+  } else if (!weapon.round_chambered) {
+    ImGui::TextUnformatted("  chamber empty");
+  }
+  ImGui::Text("  bullets in flight %d  hits %d", weapon.projectiles,
+              weapon.impacts);
+}
+
+// A hit-log line as wide as the widest ordinary first line of DrawHit, for
+// sizing the log so nothing is cut off.
+constexpr const char* kWidestHitLine =
+    "#9999 target 600 m     R +999.9 U +999.9 cm  (+99.99 +99.99 mrad, "
+    "+999.9 +999.9 MOA)";
+// Hit-log lines shown before the region scrolls; each hit takes two.
+constexpr float kHitLogVisibleLines = 16.0f;
+
+// Shows one hit on two lines: shot, target and offset in cm and as angles at
+// the target's range; then miss distance, flight time, impact speed and
+// energy.
+void DrawHit(const weapon::TargetHit& hit,
+             std::span<const std::string> target_names) {
+  constexpr float kMilliradiansPerRadian = 1000.0f;
+  constexpr float kMoaPerRadian = 3437.747f;  // 60 * 180 / pi
+  const size_t index = static_cast<size_t>(hit.target);
+  const char* name = hit.target >= 0 && index < target_names.size()
+                         ? target_names[index].c_str()
+                         : "?";
+  const glm::vec2 angle =
+      hit.range_m > 0.0f ? hit.offset_m / hit.range_m : glm::vec2(0.0f);
+  const glm::vec2 offset_cm = hit.offset_m * 100.0f;
+  const glm::vec2 mrad = angle * kMilliradiansPerRadian;
+  const glm::vec2 moa = angle * kMoaPerRadian;
+  ImGui::Text(
+      "#%-4d %-14s R %+6.1f U %+6.1f cm  (%+5.2f %+5.2f mrad, %+5.1f %+5.1f "
+      "MOA)",
+      hit.shot_number, name, offset_cm.x, offset_cm.y, mrad.x, mrad.y, moa.x,
+      moa.y);
+  ImGui::TextDisabled("      miss %5.1f cm  %4.0f ms  %4.0f m/s  %5.0f J%s",
+                      hit.miss_m * 100.0f, hit.flight_time * 1000.0f,
+                      hit.impact_speed, hit.energy_j,
+                      hit.on_plate ? "" : "  edge");
 }
 
 // Draws a small dot at the center of the screen behind all windows.
@@ -249,6 +325,8 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
       ImGui::Separator();
       DrawCameraInfo(scene_info.camera);
       ImGui::Separator();
+      DrawWeaponInfo(scene_info.weapon);
+      ImGui::Separator();
       DrawPhysicsInfo(scene_info.physics);
       ImGui::Separator();
       DrawShadowInfo(scene_info.shadows);
@@ -258,6 +336,9 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
     ImGui::End();
 
     result.settings_changed = DrawSettings(settings);
+    if (scene_info.hit_log.log != nullptr) {
+      result.clear_hit_log = DrawHitLog(scene_info.hit_log);
+    }
   }
 
   ImGui::Render();
@@ -304,6 +385,60 @@ bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
   }
   ImGui::End();
   return changed;
+}
+
+bool PerfOverlay::DrawHitLog(const HitLogOverlayInfo& info) const {
+  const weapon::TargetLog& log = *info.log;
+  const ImGuiStyle& style = ImGui::GetStyle();
+  const ImVec2 display = ImGui::GetIO().DisplaySize;
+  ImGui::SetNextWindowPos(
+      {style.WindowPadding.x, display.y - style.WindowPadding.y},
+      ImGuiCond_Always, {0.0f, 1.0f});
+  ImGui::SetNextWindowBgAlpha(0.6f);
+  constexpr ImGuiWindowFlags kFlags =
+      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoCollapse |
+      ImGuiWindowFlags_NoMove;
+
+  bool clear = false;
+  if (ImGui::Begin("Hit log", nullptr, kFlags)) {
+    ImGui::Text("Shots %d  hits %d", info.shots_fired, log.total_hits());
+    ImGui::SameLine();
+    clear = ImGui::SmallButton("Clear");
+
+    // Hits per target, four to a line.
+    for (int i = 0; i < log.target_count(); ++i) {
+      const size_t index = static_cast<size_t>(i);
+      if (index >= info.target_names.size()) {
+        break;
+      }
+      if (i % 4 != 0) {
+        ImGui::SameLine();
+      }
+      const std::string& name = info.target_names[index];
+      ImGui::Text("%-14s %3d", name.c_str(), log.hits_on(i));
+    }
+    ImGui::Separator();
+
+    // Newest first, in a scrolling region wide enough for a whole hit line
+    // (plus the scrollbar) at any UI scale.
+    const float width = ImGui::CalcTextSize(kWidestHitLine).x +
+                        style.ScrollbarSize + 2.0f * style.WindowPadding.x;
+    const float height =
+        ImGui::GetTextLineHeightWithSpacing() * kHitLogVisibleLines;
+    if (ImGui::BeginChild("hits", {width, height})) {
+      for (int i = 0; i < log.size(); ++i) {
+        DrawHit(log.hit(i), info.target_names);
+      }
+      if (log.size() == 0) {
+        ImGui::TextDisabled("No hits yet");
+      }
+    }
+    ImGui::EndChild();
+    ImGui::TextDisabled("Offsets: right/up of the plate centre");
+  }
+  ImGui::End();
+  return clear;
 }
 
 void PerfOverlay::UpdateScale() {

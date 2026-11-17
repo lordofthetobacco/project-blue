@@ -70,6 +70,23 @@ TEST_CASE("settings round trip through save and load") {
   CHECK(loaded.bindings == InputBindings::Defaults());
 }
 
+TEST_CASE("an older settings file without weapon bindings gets the defaults") {
+  const TempFile file("old.ini");
+  file.write(
+      "mouse_sensitivity = 0.002\n"
+      "bind.jump = Space\n"
+      "bind.push = G\n");
+  const InputSettings settings = LoadInputSettings(file.path());
+  const InputBindings defaults;
+  for (const Action action : {Action::kFire, Action::kAim, Action::kReload,
+                              Action::kToggleFireMode}) {
+    CHECK(ToVector(settings.bindings.For(action)) ==
+          ToVector(defaults.For(action)));
+  }
+  CHECK(ToVector(settings.bindings.For(Action::kPush)) ==
+        std::vector<Binding>{Binding::Key(SDL_SCANCODE_G)});
+}
+
 TEST_CASE("player settings and custom bindings round trip") {
   const TempFile file("player.ini");
   InputSettings saved;

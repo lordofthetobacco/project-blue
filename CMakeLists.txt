@@ -143,6 +143,22 @@ blue_target_defaults(blue_player)
 
 target_link_libraries(blue_player PUBLIC blue_physics blue_input blue_camera glm::glm)
 
+# Rifle gameplay: firing mechanism, ballistic bullets swept against the physics
+# world, model calibration and the first-person viewmodel pose. No rendering.
+add_library(blue_weapon STATIC
+    src/weapon/firearm.cc
+    src/weapon/projectile_system.cc
+    src/weapon/rifle_geometry.cc
+    src/weapon/target_log.cc
+    src/weapon/viewmodel.cc
+)
+
+target_include_directories(blue_weapon PUBLIC src)
+
+blue_target_defaults(blue_weapon)
+
+target_link_libraries(blue_weapon PUBLIC blue_physics blue_camera glm::glm)
+
 # Runtime GLSL -> SPIR-V compilation (shaderc) and source change detection. No Vulkan device
 # needed. shaderc stays private: no shaderc type appears in the public headers. The imported
 # target links shaderc_combinedd.lib in Debug and shaderc_combined.lib otherwise, matching the
@@ -203,6 +219,7 @@ target_link_libraries(project-blue PRIVATE
     blue_camera
     blue_input_mapper
     blue_player
+    blue_weapon
     blue_shader
     Vulkan::Vulkan
     SDL3::SDL3-static

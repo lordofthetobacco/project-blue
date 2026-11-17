@@ -71,6 +71,25 @@ struct RenderStats {
   uint32_t shadow_culled_draws = 0;
 };
 
+// A collimated reflex sight, drawn over the opaque scene. The lens window is
+// a disc in world space; its dot is an image at infinity along `axis`, so a
+// pixel of the window shows the dot when the direction from the camera
+// through it is within the dot's angular radius of `axis`. The window is
+// depth tested (whatever is in front hides it) but writes no depth.
+struct ReticleSight {
+  // Maps the unit disc (x, y in [-1, 1], z = 0) onto the lens window in
+  // world space.
+  glm::mat4 lens{1.0f};
+  glm::vec3 axis{0.0f, 0.0f, -1.0f};  // world, unit, pointing downrange
+  // Nominal dot size: 3 MOA diameter.
+  float dot_angular_radius = 4.36e-4f;      // radians
+  glm::vec3 dot_color{4.0f, 0.12f, 0.06f};  // linear, intensity included
+  // The dot never gets smaller than this many pixels across, so it stays
+  // visible when the nominal size is below a pixel.
+  float min_dot_pixels = 2.0f;
+  glm::vec3 tint{0.004f, 0.006f, 0.005f};  // light added over the window
+};
+
 // Everything the renderer needs to draw one frame. `draws` is borrowed and
 // only needs to stay valid for the Renderer::DrawFrame call.
 struct SceneView {
@@ -83,6 +102,8 @@ struct SceneView {
   // Tints each pixel by the shadow cascade it samples.
   bool cascade_debug = false;
   std::span<const DrawItem> draws;
+  // Drawn after the draw items when present.
+  std::optional<ReticleSight> sight;
 };
 
 // Draws scenes with a forward mesh pipeline and presents them to a window.
@@ -158,6 +179,8 @@ class Renderer {
   void AddMeshProgram(const std::string& shader_dir);
   // Registers the shadow vertex shader and creates the depth-only pipeline.
   void AddShadowProgram(const std::string& shader_dir);
+  // Registers the reflex sight shaders and creates their additive pipeline.
+  void AddReticleProgram(const std::string& shader_dir);
   [[nodiscard]] bool RebuildSwapchain();
 
   // Acquires the next swapchain image for `frame`. Returns nullopt, marking
@@ -193,6 +216,10 @@ class Renderer {
   // the statistics.
   void DrawScene(VkCommandBuffer cmd, const Frame& frame, const SceneView& view,
                  const camera::Frustum& camera_frustum);
+  // Records the reflex sight of `view`, if any. Call after DrawScene, inside
+  // the same rendering pass, so the scene's depth hides the window.
+  void DrawReticle(VkCommandBuffer cmd, const Frame& frame,
+                   const SceneView& view);
 
   const platform::Window& window_;
   VulkanContext context_;
@@ -215,6 +242,7 @@ class Renderer {
   // Replaced when its shaders are reloaded; never null after construction.
   std::unique_ptr<Pipeline> mesh_pipeline_;
   std::unique_ptr<Pipeline> shadow_pipeline_;
+  std::unique_ptr<Pipeline> reticle_pipeline_;
   std::vector<Mesh> meshes_;
   // World-space bounds of the current frame's draw items, parallel to
   // SceneView::draws; kept as a member to reuse its allocation.

@@ -7,6 +7,8 @@
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/trigonometric.hpp>
+#include <glm/vec2.hpp>
 
 #include "input/action.h"
 
@@ -14,6 +16,9 @@ namespace blue::player {
 namespace {
 
 using input::Action;
+
+// Same limit as camera::ApplyMouseLook, which does not export it.
+constexpr float kMaxPitch = glm::radians(89.0f);
 
 [[nodiscard]] float Axis(bool positive, bool negative) {
   return (positive ? 1.0f : 0.0f) - (negative ? 1.0f : 0.0f);
@@ -54,6 +59,8 @@ core::Result<void, physics::PhysicsError> PlayerController::Spawn(
 void PlayerController::Despawn() {
   character_.reset();
   sprinting_ = false;
+  aiming_ = false;
+  look_delta_ = glm::vec2(0.0f);
 }
 
 void PlayerController::Teleport(glm::vec3 feet, camera::LookAngles look) {
@@ -77,9 +84,17 @@ void PlayerController::Update(const input::InputFrame& input,
     return;
   }
   const input::ActionState& actions = input.actions;
+  aiming_ = actions.held(Action::kAim);
 
+  look_delta_ = glm::vec2(0.0f);
   if (input.look) {
-    look_ = camera::ApplyMouseLook(look_, input.mouse_delta, settings);
+    // The look is linear in the delta, so scaling the delta scales the
+    // sensitivity without copying the settings.
+    const camera::LookAngles turned = camera::ApplyMouseLook(
+        look_, input.mouse_delta * SensitivityScale(), settings);
+    look_delta_ = {camera::WrapYaw(turned.yaw - look_.yaw),
+                   turned.pitch - look_.pitch};
+    look_ = turned;
   }
 
   const float move_x =
@@ -107,16 +122,21 @@ void PlayerController::Update(const input::InputFrame& input,
     if (actions.pressed(Action::kSprint)) {
       sprint_latched_ = !sprint_latched_;
     }
-    if (!moving) {
-      sprint_latched_ = false;  // Letting go of the keys ends a sprint.
+    if (!moving || aiming_) {
+      // Letting go of the keys or raising the sights ends a sprint.
+      sprint_latched_ = false;
     }
     sprint_requested = sprint_latched_;
   }
-  sprinting_ = sprint_requested && moving && !crouching;
+  sprinting_ = sprint_requested && moving && !crouching && !aiming_;
 
-  const float speed = crouching    ? tuning_.crouch_speed
-                      : sprinting_ ? tuning_.sprint_speed
-                                   : tuning_.walk_speed;
+  float speed = sprinting_ ? tuning_.sprint_speed : tuning_.walk_speed;
+  if (aiming_) {
+    speed = std::min(speed, tuning_.aim_speed);
+  }
+  if (crouching) {
+    speed = std::min(speed, tuning_.crouch_speed);
+  }
   glm::vec3 direction = camera::FlatForwardFrom(look_.yaw) * move_z +
                         camera::FlatRightFrom(look_.yaw) * move_x;
   const float length = glm::length(direction);
@@ -151,12 +171,16 @@ void PlayerController::UpdateView(const input::InputSettings& settings,
       .intensity = settings.head_bob_intensity,
       .dt = dt,
   });
+  const float aim_target = aiming_ ? 1.0f : 0.0f;
+  aim_fraction_ += (aim_target - aim_fraction_) *
+                   (1.0f - std::exp(-tuning_.aim_blend_rate * dt));
   const float fov = fov_.Update({
       .base_degrees = settings.fov_degrees,
       .sprint_boost_degrees = settings.sprint_fov_boost_degrees,
       .sprinting = sprinting_,
       .blend_rate = tuning_.fov_blend_rate,
       .dt = dt,
+      .zoom = 1.0f + (tuning_.aim_fov_scale - 1.0f) * aim_fraction_,
   });
 
   const glm::vec3 right = camera::FlatRightFrom(look_.yaw);
@@ -168,6 +192,25 @@ void PlayerController::UpdateView(const input::InputSettings& settings,
       .roll = bob.roll_radians,
       .vertical_fov_degrees = fov,
   };
+}
+
+void PlayerController::AddLookKick(float pitch_radians, float yaw_radians) {
+  look_.pitch = std::clamp(look_.pitch + pitch_radians, -kMaxPitch, kMaxPitch);
+  look_.yaw = camera::WrapYaw(look_.yaw + yaw_radians);
+}
+
+float PlayerController::SensitivityScale() const {
+  // A mouse count turns the view by a fixed angle, but how far that moves the
+  // picture on screen goes with 1 / tan(fov / 2); scale the angle by the
+  // ratio of the half-angle tangents to keep the on-screen motion constant.
+  // Both angles are those of the last UpdateView; before the first one the
+  // controller has no field of view yet.
+  const float tan_unzoomed = std::tan(glm::radians(fov_.current()) * 0.5f);
+  if (!(tan_unzoomed > 0.0f)) {
+    return 1.0f;
+  }
+  return std::tan(glm::radians(view_.vertical_fov_degrees) * 0.5f) /
+         tan_unzoomed;
 }
 
 bool PlayerController::crouching() const {
@@ -195,6 +238,9 @@ void PlayerController::ResetView() {
   sprint_latched_ = false;
   crouch_latched_ = false;
   sprinting_ = false;
+  aiming_ = false;
+  aim_fraction_ = 0.0f;
+  look_delta_ = glm::vec2(0.0f);
   eye_height_ = tuning_.eye_height_standing;
   head_bob_.Reset();
   fov_.Reset();

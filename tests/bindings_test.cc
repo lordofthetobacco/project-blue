@@ -4,8 +4,11 @@
 #include <doctest/doctest.h>
 
 #include <optional>
+#include <ostream>
 #include <string>
 #include <vector>
+
+#include "input/action.h"
 
 namespace blue::input {
 
@@ -81,6 +84,35 @@ TEST_CASE("Default bindings cover every action with the legacy keys") {
   CHECK(bindings.IsBound(Action::kPush, Binding::Key(SDL_SCANCODE_F)));
   CHECK(bindings.IsBound(Action::kSaveScene, Binding::Key(SDL_SCANCODE_F5)));
   CHECK_FALSE(bindings.IsBound(Action::kPush, Binding::Key(SDL_SCANCODE_G)));
+}
+
+TEST_CASE("Weapon actions default to the mouse buttons, R and B") {
+  const InputBindings bindings;
+  CHECK(bindings.IsBound(Action::kFire, Binding::MouseButton(SDL_BUTTON_LEFT)));
+  CHECK(bindings.IsBound(Action::kAim, Binding::MouseButton(SDL_BUTTON_RIGHT)));
+  CHECK(bindings.IsBound(Action::kReload, Binding::Key(SDL_SCANCODE_R)));
+  CHECK(
+      bindings.IsBound(Action::kToggleFireMode, Binding::Key(SDL_SCANCODE_B)));
+}
+
+TEST_CASE("No two default actions share an input except the mode pairs") {
+  // Space (jump / fly up) and Left Ctrl (crouch / fly down) are deliberately
+  // shared between the player and the fly camera; nothing else may be.
+  const InputBindings bindings;
+  for (const Action a : AllActions()) {
+    for (const Action b : AllActions()) {
+      if (a >= b) {
+        continue;
+      }
+      const bool allowed_pair = (a == Action::kFlyUp && b == Action::kJump) ||
+                                (a == Action::kFlyDown && b == Action::kCrouch);
+      for (const Binding& binding : bindings.For(a)) {
+        CHECK_MESSAGE((!bindings.IsBound(b, binding) || allowed_pair),
+                      ActionName(a), " and ", ActionName(b), " share ",
+                      FormatBinding(binding));
+      }
+    }
+  }
 }
 
 TEST_CASE("Set replaces the bindings of one action only") {

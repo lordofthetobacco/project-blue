@@ -9,6 +9,9 @@ struct FovInput {
   bool sprinting = false;
   float blend_rate = 8.0f;  // 1/s, exponential approach to the target
   float dt = 0.0f;          // seconds
+  // Multiplies the smoothed result, e.g. 0.8 when aiming down the sights.
+  // Applied after the blend and the clamp: the caller smooths it itself.
+  float zoom = 1.0f;
 };
 
 // Smoothly follows a target vertical field of view that widens while
@@ -16,11 +19,13 @@ struct FovInput {
 // not animate in. Copyable.
 class FovController {
  public:
-  // Returns the field of view to render with this frame, in degrees.
+  // Returns the field of view to render with this frame, in degrees: the
+  // smoothed target times `input.zoom`.
   [[nodiscard]] float Update(const FovInput& input);
   // Makes the next Update snap instead of blend.
   void Reset() { initialized_ = false; }
 
+  // The smoothed field of view before the zoom, in degrees.
   [[nodiscard]] float current() const { return current_; }
 
  private:

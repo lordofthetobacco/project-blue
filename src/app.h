@@ -3,9 +3,14 @@
 
 #include <SDL3/SDL_events.h>
 
+#include <array>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include <glm/mat4x4.hpp>
+#include <glm/vec3.hpp>
 
 #include "camera/camera_controller.h"
 #include "input/action.h"
@@ -20,6 +25,10 @@
 #include "render/renderer.h"
 #include "scene/scene.h"
 #include "ui/perf_overlay.h"
+#include "weapon/firearm.h"
+#include "weapon/projectile_system.h"
+#include "weapon/target_log.h"
+#include "weapon/viewmodel.h"
 
 namespace blue {
 
@@ -67,6 +76,16 @@ class App {
     float vertical_fov_degrees = 60.0f;
   };
 
+  // A target plate of the scene, found by name after every scene change.
+  struct RangeTargetEntry {
+    size_t entity = 0;  // Index into scene_.entities.
+    weapon::Target target;
+  };
+
+  static constexpr size_t kMaxImpactMarks = 64;
+  static constexpr int kMaxTargets = 16;
+  static constexpr int kHitLogCapacity = 64;
+
   void HandleEvent(const SDL_Event& event);
   void ApplyMouseCapture();
   void HandleAction(input::Action action);
@@ -81,12 +100,37 @@ class App {
   [[nodiscard]] ui::CameraOverlayInfo MakeCameraOverlayInfo() const;
   void InitializeScene(const CliOptions& options);
   void AddImports(const std::vector<std::string>& imports);
+  // Adds the shooting range's static target plates to the default scene.
+  void AddRangeTargets();
   void SaveCurrentScene();
   void ReloadCurrentScene();
   // Recreates the physics bodies of `scene_`; call after every scene change.
   void RebuildPhysics();
-  // Pushes the dynamic body under the crosshair along the camera direction.
+  // Pushes the dynamic body in the middle of the view along the camera
+  // direction.
   void PushObject();
+  // Runs the rifle for one frame after the player's view is final: trigger,
+  // viewmodel pose, bullet spawns and recoil. Player view mode only.
+  void UpdateWeapon(const input::InputFrame& input, float step);
+  // Fires one bullet from the muzzle, `age` seconds before the end of the
+  // frame, or lands it on whatever blocks the line from the eye to the
+  // muzzle (a rifle poking through a wall must not shoot through it).
+  void FireBullet(float age);
+  // Counts a bullet hit, logs it when the body is a target and, on a static
+  // body, leaves an impact mark. Does not push the body.
+  void RecordHit(const weapon::Impact& impact);
+  // Removes every bullet, impact mark and logged hit.
+  void ClearBullets();
+  // Rebuilds targets_ from the entities named as targets; call after every
+  // scene change. Ranges are measured from the scene camera.
+  void FindTargets();
+  // Appends the rifle, the bullet streaks and the impact marks to draws_.
+  void AppendWeaponDraws();
+  [[nodiscard]] ui::WeaponOverlayInfo MakeWeaponOverlayInfo() const;
+  [[nodiscard]] ui::HitLogOverlayInfo MakeHitLogOverlayInfo() const;
+  // Returns the reflex sight as posed this frame, nullopt outside the
+  // player view.
+  [[nodiscard]] std::optional<render::ReticleSight> CurrentSight() const;
   [[nodiscard]] render::SceneView BuildSceneView();
 
   // Declaration order is construction order and, reversed, destruction order:
@@ -116,6 +160,27 @@ class App {
   std::string help_text_;     // Key bindings line of the overlay.
   std::string player_state_;  // Overlay stance text, rebuilt per frame.
   ViewMode view_mode_ = ViewMode::kPlayer;
+
+  // The player's rifle. Bullets are not part of the scene: they are neither
+  // saved nor loaded and are dropped on every scene reload.
+  weapon::Firearm firearm_;
+  weapon::Viewmodel viewmodel_;
+  weapon::ProjectileSystem projectiles_;
+  std::string rifle_mesh_path_;  // Resolved once; looked up every frame.
+  // Ring buffer of the transforms of the most recent bullet holes on static
+  // surfaces, each a small tile of the builtin cube: the first
+  // `impact_mark_count_` entries are valid, `next_impact_mark_` is the slot the
+  // next mark overwrites.
+  std::array<glm::mat4, kMaxImpactMarks> impact_marks_{};
+  size_t impact_mark_count_ = 0;
+  size_t next_impact_mark_ = 0;
+  int impacts_total_ = 0;  // Bullet hits since the last scene reload.
+  int shots_fired_ = 0;    // Since the last scene reload; numbers the shots.
+  // At most kMaxTargets, in scene order; target i of target_log_ is
+  // targets_[i]. Rebuilt (and reallocated) only on scene changes.
+  std::vector<RangeTargetEntry> targets_;
+  std::vector<std::string> target_names_;  // Parallel to targets_.
+  weapon::TargetLog target_log_{kHitLogCapacity, kMaxTargets};
 
   bool mouse_captured_ = false;
   bool shadows_enabled_ = true;

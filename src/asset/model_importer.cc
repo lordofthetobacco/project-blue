@@ -92,8 +92,11 @@ core::Result<MeshData, ImportError> ImportModel(const std::string& path,
   size_t vertex_count = 0;
   size_t index_count = 0;
   for (const aiMesh* mesh : std::span(scene->mMeshes, scene->mNumMeshes)) {
-    if (mesh->mPrimitiveTypes != aiPrimitiveType_TRIANGLE ||
-        mesh->mNumFaces == 0) {
+    // Triangulating quads and n-gons only tags the mesh with the n-gon
+    // encoding flag; its faces are still triangles.
+    const unsigned primitive_types =
+        mesh->mPrimitiveTypes & ~aiPrimitiveType_NGONEncodingFlag;
+    if (primitive_types != aiPrimitiveType_TRIANGLE || mesh->mNumFaces == 0) {
       continue;
     }
     if (mesh->mNormals == nullptr) {

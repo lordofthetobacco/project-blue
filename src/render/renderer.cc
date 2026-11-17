@@ -87,6 +87,22 @@ struct ShadowConstants {
 };
 static_assert(sizeof(ShadowConstants) == 64);
 
+// Must match ReticleConstants in shaders/reticle.glsl.
+struct ReticleConstants {
+  glm::mat4 lens;
+  glm::vec4 axis;       // xyz: axis, w: dot angular radius
+  glm::vec4 dot_color;  // rgb: colour, w: minimum dot diameter in pixels
+  glm::vec4 tint;
+};
+static_assert(offsetof(ReticleConstants, axis) == 64);
+static_assert(offsetof(ReticleConstants, dot_color) == 80);
+static_assert(offsetof(ReticleConstants, tint) == 96);
+static_assert(sizeof(ReticleConstants) <= 128,
+              "Push constants must fit the guaranteed minimum of 128 bytes");
+
+// The sight quad is generated in the vertex shader from two triangles.
+constexpr uint32_t kReticleVertexCount = 6;
+
 constexpr VkClearColorValue kClearColor{{0.015f, 0.018f, 0.022f, 1.0f}};
 
 constexpr auto kVertexBindings = VertexBindings();
@@ -101,6 +117,11 @@ constexpr VkPushConstantRange kShadowConstantsRange{
     .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
     .offset = 0,
     .size = sizeof(ShadowConstants),
+};
+constexpr VkPushConstantRange kReticleConstantsRange{
+    .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+    .offset = 0,
+    .size = sizeof(ReticleConstants),
 };
 
 VkDescriptorSetLayout CreateFrameSetLayout(VkDevice device) {
@@ -207,6 +228,27 @@ GraphicsPipelineDesc MeshPipelineDesc(
   };
 }
 
+// Pipeline of the reflex sight: no vertex input, additive, depth tested
+// against the scene (equal passes too, for a window lying on the model's own
+// glass) without writing depth, and visible from both sides.
+GraphicsPipelineDesc ReticlePipelineDesc(
+    std::span<const uint32_t> vertex_spirv,
+    std::span<const uint32_t> fragment_spirv,
+    const VkDescriptorSetLayout& frame_set_layout, VkFormat color_format) {
+  return {
+      .vertex_spirv = vertex_spirv,
+      .fragment_spirv = fragment_spirv,
+      .set_layouts = {&frame_set_layout, 1},
+      .push_constants = {&kReticleConstantsRange, 1},
+      .color_format = color_format,
+      .depth_format = Renderer::kDepthFormat,
+      .cull_mode = VK_CULL_MODE_NONE,
+      .depth_compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL,
+      .depth_write = false,
+      .additive_blend = true,
+  };
+}
+
 // Depth-only pipeline of the shadow cascades: no fragment stage, no color.
 GraphicsPipelineDesc ShadowPipelineDesc(
     std::span<const uint32_t> vertex_spirv) {
@@ -279,7 +321,21 @@ Renderer::Renderer(const platform::Window& window,
       gpu_timer_(context_) {
   AddMeshProgram(shader_dir);
   AddShadowProgram(shader_dir);
+  AddReticleProgram(shader_dir);
   CreateFrames();
+}
+
+void Renderer::AddReticleProgram(const std::string& shader_dir) {
+  shader_programs_.Add(
+      core::JoinPath(shader_dir, "reticle.vert"),
+      core::JoinPath(shader_dir, "reticle.frag"),
+      [this](std::span<const uint32_t> vertex,
+             std::span<const uint32_t> fragment) {
+        reticle_pipeline_ = std::make_unique<Pipeline>(
+            context_.device(),
+            ReticlePipelineDesc(vertex, fragment, frame_set_layout_,
+                                swapchain_.format()));
+      });
 }
 
 void Renderer::AddMeshProgram(const std::string& shader_dir) {
@@ -595,6 +651,7 @@ void Renderer::RecordCommands(const Frame& frame, uint32_t image_index,
   TransitionToAttachments(cmd, image_index);
   BeginRendering(cmd, image_index);
   DrawScene(cmd, frame, view, camera_frustum);
+  DrawReticle(cmd, frame, view);
   if (ui != nullptr) {
     ImGui_ImplVulkan_RenderDrawData(ui, cmd);
   }
@@ -794,6 +851,32 @@ void Renderer::DrawScene(VkCommandBuffer cmd, const Frame& frame,
     ++stats_.draw_calls;
     stats_.triangles += mesh.index_count() / 3;
   }
+}
+
+void Renderer::DrawReticle(VkCommandBuffer cmd, const Frame& frame,
+                           const SceneView& view) {
+  if (!view.sight) {
+    return;
+  }
+  const ReticleSight& sight = *view.sight;
+  const ReticleConstants constants{
+      .lens = sight.lens,
+      .axis = glm::vec4(sight.axis, sight.dot_angular_radius),
+      .dot_color = glm::vec4(sight.dot_color, sight.min_dot_pixels),
+      .tint = glm::vec4(sight.tint, 0.0f),
+  };
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    reticle_pipeline_->handle());
+  // Its layout's push constants differ from the mesh pipeline's, so the set
+  // must be bound again.
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          reticle_pipeline_->layout(), 0, 1,
+                          &frame.descriptor_set, 0, nullptr);
+  vkCmdPushConstants(cmd, reticle_pipeline_->layout(),
+                     kReticleConstantsRange.stageFlags, 0, sizeof(constants),
+                     &constants);
+  vkCmdDraw(cmd, kReticleVertexCount, 1, 0, 0);
+  ++stats_.draw_calls;
 }
 
 }  // namespace blue::render

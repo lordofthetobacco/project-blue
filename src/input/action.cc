@@ -13,10 +13,12 @@ constexpr std::array<std::string_view, kActionCount> kActionNames{
     "move_forward",   "move_back",        "move_left",
     "move_right",     "fly_up",           "fly_down",
     "jump",           "sprint",           "crouch",
+    "fire",           "aim",
     "cycle_camera",   "escape",           "toggle_invert_y",
     "sensitivity_down", "sensitivity_up", "toggle_overlay",
     "save_scene",     "load_scene",       "toggle_vsync",
     "push",           "toggle_cascade_debug", "toggle_shadows",
+    "reload",         "toggle_fire_mode",
 };
 
 }  // namespace

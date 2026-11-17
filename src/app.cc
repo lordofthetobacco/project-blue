@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <format>
 #include <optional>
@@ -13,8 +15,13 @@
 #include <utility>
 
 #include <glm/geometric.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/mat4x4.hpp>
 #include <glm/trigonometric.hpp>
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include "camera/look.h"
 #include "camera/projection.h"
@@ -26,6 +33,11 @@
 #include "scene/placement.h"
 #include "scene/scene_serializer.h"
 #include "shader/shader_compiler.h"
+#include "weapon/firearm.h"
+#include "weapon/projectile_system.h"
+#include "weapon/rifle_geometry.h"
+#include "weapon/target_log.h"
+#include "weapon/viewmodel.h"
 
 namespace blue {
 
@@ -33,7 +45,10 @@ namespace {
 
 constexpr int kInitialWidth = 1920;
 constexpr int kInitialHeight = 1080;
-constexpr float kNearPlane = 0.1f;
+// The first-person rifle comes close to the eye (the stock passes beside the
+// cheek when aimed). The projection is reversed-Z and infinite on a float
+// depth buffer, so a close near plane costs no depth precision worth noticing.
+constexpr float kNearPlane = 0.02f;
 // Avoids jumps after stalls (window drag, breakpoints).
 constexpr float kMaxSimulationStep = 0.1f;
 constexpr float kSensitivityStep = 1.15f;
@@ -49,13 +64,51 @@ constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
 // player; beyond that the feet go an eye height below the camera.
 constexpr float kSpawnProbeDistance = 3.0f;  // m
 
-// The default scene's ground: the builtin plane is 12 m square, scaled up so
-// the house and the player have room.
-constexpr float kGroundScale = 4.0f;  // 48 m square
+// The default scene's ground: the builtin plane (12 m square) stretched into
+// a 48 m wide strip that runs from behind the spawn to 700 m down range
+// (-Z), so bullet drop can be watched all the way to the farthest target.
+constexpr float kBuiltinPlaneSize = 12.0f;  // m, see render::MeshCache
+constexpr float kGroundWidth = 48.0f;       // m along X
+constexpr float kGroundBackZ = 24.0f;       // m, edge behind the spawn
+constexpr float kGroundFrontZ = -700.0f;    // m, far edge down range
+// The default player position and view: at the firing line, looking level
+// down range. The house is to the left, the cube just ahead on the left.
+constexpr glm::vec3 kFiringPosition{2.2f, 1.6f, 2.8f};
+constexpr glm::vec3 kDownRange{0.0f, 0.0f, -1.0f};
+
+// Flat steel plates down range, measured from kFiringPosition: 0.5 m squares
+// up close, 0.5 x 1.0 m torso plates farther out. Each sits a little to one
+// side so that none hides another from the firing line.
+struct RangeTarget {
+  float range;     // m down range
+  float offset;    // m to the right of the firing line
+  glm::vec2 size;  // m, width and height
+};
+constexpr RangeTarget kRangeTargets[] = {
+    {25.0f, -1.5f, {0.5f, 0.5f}},  {50.0f, 1.5f, {0.5f, 0.5f}},
+    {100.0f, -2.5f, {0.5f, 1.0f}}, {200.0f, 2.0f, {0.5f, 1.0f}},
+    {300.0f, -5.0f, {0.5f, 1.0f}}, {400.0f, 6.0f, {0.5f, 1.0f}},
+    {600.0f, 0.0f, {0.5f, 1.0f}},
+};
+constexpr float kTargetHeight = 1.5f;      // m, centre above the ground
+constexpr float kTargetThickness = 0.05f;  // m
+// Entities whose name starts with this are targets: the hit log finds them by
+// name, so they survive a save and reload of the scene.
+constexpr std::string_view kTargetNamePrefix = "target ";
 // The sample house (6.4 x 7.1 x 14.8 m, authored in metres, base at y = 0),
 // placed to the left of the default camera's view and clear of the cube.
 constexpr const char* kHouseModel = "house.obj";
 constexpr glm::vec3 kHousePosition{-9.0f, 0.0f, -3.0f};
+
+constexpr const char* kRifleModel = "m16.obj";
+constexpr const char* kBulletMesh = "builtin:cube";
+// A bullet is drawn as a thin box trailing it by the distance it covers in
+// this time (about 4 m at the muzzle), never reaching back past the muzzle.
+constexpr float kTracerSeconds = 0.004f;
+constexpr float kTracerThickness = 0.02f;       // m
+constexpr float kImpactMarkSize = 0.05f;        // m, side of the square mark
+constexpr float kImpactMarkDepth = 0.004f;      // m, how far it stands out
+constexpr float kLensLiftTowardsEye = 0.0005f;  // m, see CurrentSight()
 
 constexpr const char* kDefaultScenePath = "scenes/untitled.bscn";
 constexpr const char* kSettingsFileName = "input.cfg";
@@ -151,6 +204,10 @@ std::string ShaderDirectory() {
       {Action::kJump, "jump"},
       {Action::kSprint, "sprint"},
       {Action::kCrouch, "crouch"},
+      {Action::kFire, "fire"},
+      {Action::kAim, "aim"},
+      {Action::kReload, "reload"},
+      {Action::kToggleFireMode, "fire mode"},
       {Action::kCycleCamera, "camera"},
       {Action::kPush, "push"},
       {Action::kToggleCascadeDebug, "cascades"},
@@ -190,7 +247,32 @@ std::string ShaderDirectory() {
   if (player.sprinting()) {
     text += ", sprinting";
   }
+  if (player.aiming()) {
+    text += ", aiming";
+  }
   return text;
+}
+
+// Returns the viewmodel tuning that zeroes the sights for `spec`'s bullets.
+[[nodiscard]] weapon::ViewmodelTuning RifleViewmodelTuning(
+    const weapon::FirearmSpec& spec) {
+  weapon::ViewmodelTuning tuning;
+  tuning.muzzle_velocity = spec.muzzle_velocity;
+  return tuning;
+}
+
+// Returns the transform that turns the builtin unit cube into a box centred
+// at `center` with its local z along the unit `axis` and `size` metres along
+// (x, y, z). The box's roll about `axis` is arbitrary.
+[[nodiscard]] glm::mat4 BoxAlong(glm::vec3 center, glm::vec3 axis,
+                                 glm::vec3 size) {
+  const glm::vec3 helper = std::abs(axis.y) < 0.99f
+                               ? glm::vec3(0.0f, 1.0f, 0.0f)
+                               : glm::vec3(1.0f, 0.0f, 0.0f);
+  const glm::vec3 right = glm::normalize(glm::cross(helper, axis));
+  const glm::vec3 up = glm::cross(axis, right);
+  return {glm::vec4(right * size.x, 0.0f), glm::vec4(up * size.y, 0.0f),
+          glm::vec4(axis * size.z, 0.0f), glm::vec4(center, 1.0f)};
 }
 
 [[nodiscard]] std::string WindowTitle(const std::string& scene_path) {
@@ -240,7 +322,9 @@ App::App(const CliOptions& options)
       scene_physics_(physics_world_),
       overlay_(window_, renderer_),
       scene_path_(options.scene_path.value_or(kDefaultScenePath)),
-      settings_path_(InputSettingsPath()) {
+      settings_path_(InputSettingsPath()),
+      viewmodel_(weapon::M16Geometry(), RifleViewmodelTuning(firearm_.spec())),
+      rifle_mesh_path_(SamplePath(kRifleModel)) {
   settings_ = input::LoadInputSettings(settings_path_);
   input_.set_bindings(settings_.bindings);
   help_text_ = BuildHelpText(settings_.bindings);
@@ -248,6 +332,7 @@ App::App(const CliOptions& options)
   InitializeScene(options);
   camera_.SetFromSceneCamera(scene_.camera);
   RebuildPhysics();
+  FindTargets();
   PlacePlayerAtSceneCamera();
 }
 
@@ -312,6 +397,145 @@ void App::PushObject() {
   status_ = "Pushed " + scene_.entities[*entity].name;
 }
 
+void App::UpdateWeapon(const input::InputFrame& input, float step) {
+  using input::Action;
+  const weapon::FirearmEvents events = firearm_.Update(
+      {.trigger_held = input.actions.held(Action::kFire),
+       .reload_pressed = input.actions.pressed(Action::kReload),
+       .fire_mode_pressed = input.actions.pressed(Action::kToggleFireMode),
+       .can_fire = !player_.sprinting()},
+      step);
+
+  const player::PlayerView& view = player_.view();
+  viewmodel_.Update({
+      .eye_position = view.eye_position,
+      .look = view.look,
+      .roll = view.roll,
+      .aim_held = player_.aiming(),
+      .sprinting = player_.sprinting(),
+      .on_ground = player_.on_ground(),
+      .velocity = player_.velocity(),
+      .look_delta = player_.look_delta(),
+      .shots = events.shots,
+      .reload_fraction = firearm_.reload_fraction(),
+      .reloading = firearm_.reloading(),
+      .dt = step,
+  });
+
+  for (int i = 0; i < events.shots; ++i) {
+    FireBullet(events.shot_age[static_cast<size_t>(i)]);
+  }
+  // Shows in the view from the next frame on, like mouse look.
+  const glm::vec2 kick = viewmodel_.TakeLookKick();
+  player_.AddLookKick(kick.x, kick.y);
+}
+
+void App::FireBullet(float age) {
+  const weapon::FirearmSpec& spec = firearm_.spec();
+  const glm::vec3 muzzle = viewmodel_.muzzle_position();
+  // The bullet leaves the bore along the posed barrel and keeps the
+  // shooter's own motion.
+  const glm::vec3 velocity =
+      viewmodel_.muzzle_direction() * spec.muzzle_velocity + player_.velocity();
+
+  // The rifle is not a physics body and can poke through a wall the player
+  // stands against: then the bullet hits where the line from the eye to the
+  // muzzle enters the wall instead of starting on the far side.
+  const int shot_number = ++shots_fired_;
+  const glm::vec3 eye = player_.view().eye_position;
+  const glm::vec3 eye_to_muzzle = muzzle - eye;
+  const float reach = glm::length(eye_to_muzzle);
+  if (reach > 0.0f) {
+    if (const std::optional<physics::RayHit> hit =
+            physics_world_.CastRay(eye, eye_to_muzzle, reach)) {
+      physics_world_.AddImpulseAtPoint(hit->body, velocity * spec.bullet_mass,
+                                       hit->point);
+      RecordHit({.point = hit->point,
+                 .normal = hit->normal,
+                 .velocity = velocity,
+                 .mass = spec.bullet_mass,
+                 .body = hit->body,
+                 .flight_time = 0.0f,
+                 .distance = 0.0f,
+                 .shot_number = shot_number});
+      return;
+    }
+  }
+  projectiles_.Spawn(muzzle, velocity, spec.bullet_mass, spec.bullet_drag, age,
+                     shot_number);
+}
+
+void App::RecordHit(const weapon::Impact& impact) {
+  ++impacts_total_;
+  if (const std::optional<size_t> entity =
+          scene_physics_.EntityFor(impact.body)) {
+    for (size_t i = 0; i < targets_.size(); ++i) {
+      if (targets_[i].entity == *entity) {
+        // The range is the shooter's actual distance, wherever they fired
+        // from.
+        weapon::Target target = targets_[i].target;
+        if (player_.spawned()) {
+          target.range_m =
+              glm::length(target.center - player_.view().eye_position);
+        }
+        (void)target_log_.Record(static_cast<int>(i), target, impact);
+        break;
+      }
+    }
+  }
+  if (physics_world_.IsDynamic(impact.body)) {
+    return;  // A mark would not move with the body.
+  }
+  impact_marks_[next_impact_mark_] = BoxAlong(
+      impact.point + impact.normal * (kImpactMarkDepth * 0.5f), impact.normal,
+      {kImpactMarkSize, kImpactMarkSize, kImpactMarkDepth});
+  next_impact_mark_ = (next_impact_mark_ + 1) % kMaxImpactMarks;
+  impact_mark_count_ = std::min(impact_mark_count_ + 1, kMaxImpactMarks);
+}
+
+void App::ClearBullets() {
+  projectiles_.Clear();
+  impact_mark_count_ = 0;
+  next_impact_mark_ = 0;
+  impacts_total_ = 0;
+  shots_fired_ = 0;
+  target_log_.Clear();
+}
+
+void App::FindTargets() {
+  targets_.clear();
+  target_names_.clear();
+  const glm::vec3 firing_position = scene_.camera.position;
+  for (size_t i = 0; i < scene_.entities.size(); ++i) {
+    const scene::Entity& entity = scene_.entities[i];
+    if (!entity.name.starts_with(kTargetNamePrefix)) {
+      continue;
+    }
+    if (targets_.size() >= static_cast<size_t>(kMaxTargets)) {
+      core::log::Warn("More than {} targets; '{}' is not logged", kMaxTargets,
+                      entity.name);
+      continue;
+    }
+    // A plate is the builtin unit cube scaled thin along its local z; its
+    // face normal is whichever of +-z faces the firing position.
+    const scene::Transform& transform = entity.transform;
+    glm::vec3 normal = transform.rotation * glm::vec3(0.0f, 0.0f, 1.0f);
+    if (glm::dot(normal, firing_position - transform.position) < 0.0f) {
+      normal = -normal;
+    }
+    targets_.push_back({
+        .entity = i,
+        .target = {.center = transform.position,
+                   .normal = normal,
+                   .up = transform.rotation * glm::vec3(0.0f, 1.0f, 0.0f),
+                   .half_extents = 0.5f * glm::vec2(transform.scale),
+                   .range_m =
+                       glm::length(transform.position - firing_position)},
+    });
+    target_names_.push_back(entity.name);
+  }
+}
+
 void App::InitializeScene(const CliOptions& options) {
   if (options.scene_path && platform::PathExists(scene_path_)) {
     auto loaded = scene::LoadScene(scene_path_);
@@ -325,8 +549,16 @@ void App::InitializeScene(const CliOptions& options) {
     status_ = std::string("Load failed: ") + scene::ToString(loaded.error());
   }
 
+  scene_.camera.position = kFiringPosition;
+  scene_.camera.target = kFiringPosition + kDownRange;
+
+  // One plane rather than several: overlapping coplanar planes would flicker.
+  // Its static box is 0.1 m thick (see physics::internal::BuildBox), 48 x 724
+  // m: fine for Jolt, and float spacing at 700 m is under 0.1 mm.
   scene::Transform ground;
-  ground.scale = glm::vec3(kGroundScale, 1.0f, kGroundScale);
+  ground.position.z = 0.5f * (kGroundBackZ + kGroundFrontZ);
+  ground.scale = glm::vec3(kGroundWidth / kBuiltinPlaneSize, 1.0f,
+                           (kGroundBackZ - kGroundFrontZ) / kBuiltinPlaneSize);
   scene_.entities.push_back({
       .name = "ground",
       .mesh_path = "builtin:plane",
@@ -347,6 +579,8 @@ void App::InitializeScene(const CliOptions& options) {
                                .shape = scene::ShapeType::kTriangleMesh},
   });
 
+  AddRangeTargets();
+
   if (options.imports.empty()) {
     // Unit cube centred at the origin, dropped from 3 m at a tilt.
     scene::Transform cube;
@@ -362,6 +596,27 @@ void App::InitializeScene(const CliOptions& options) {
     });
   } else {
     AddImports(options.imports);
+  }
+}
+
+void App::AddRangeTargets() {
+  const glm::vec3 right =
+      glm::normalize(glm::cross(kDownRange, camera::kWorldUp));
+  for (const RangeTarget& target : kRangeTargets) {
+    scene::Transform transform;
+    transform.position =
+        kFiringPosition + kDownRange * target.range + right * target.offset;
+    transform.position.y = kTargetHeight;
+    // The cube's faces are axis aligned, so with kDownRange along -Z the
+    // thin axis already faces the firing line.
+    transform.scale = glm::vec3(target.size, kTargetThickness);
+    scene_.entities.push_back({
+        .name = std::format("{}{:.0f} m", kTargetNamePrefix, target.range),
+        .mesh_path = "builtin:cube",
+        .transform = transform,
+        .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
+                                 .shape = scene::ShapeType::kBox},
+    });
   }
 }
 
@@ -414,6 +669,8 @@ void App::ReloadCurrentScene() {
     scene_ = std::move(loaded).value();
     camera_.SetFromSceneCamera(scene_.camera);
     RebuildPhysics();
+    ClearBullets();  // Their impacts would name bodies that are gone.
+    FindTargets();
     PlacePlayerAtSceneCamera();
     status_ = TimedStatus("Loaded", scene_path_, start);
     core::log::Info("{}", status_);
@@ -459,7 +716,12 @@ int App::Run() {
     }
     const float step = std::min(frame_seconds, kMaxSimulationStep);
     if (view_mode_ == ViewMode::kPlayer) {
-      player_.Update(input, settings_, step);
+      // Both hands are busy during a reload: no aiming down the sights.
+      input::InputFrame player_input = input;
+      if (firearm_.reloading()) {
+        player_input.actions.SetHeld(input::Action::kAim, false);
+      }
+      player_.Update(player_input, settings_, step);
     } else {
       // The character stays put under gravity while a debug camera is used.
       player_.Update({}, settings_, step);
@@ -472,6 +734,20 @@ int App::Run() {
     physics_world_.Update(frame_seconds);
     scene_physics_.SyncToScene(scene_);
     player_.UpdateView(settings_, step);
+
+    // The rifle follows the final eye of this frame. Bullets spawned now fly
+    // first by their shot age, then everything is swept against the world
+    // as just stepped.
+    if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
+      UpdateWeapon(input, step);
+    } else {
+      // Debug cameras neither fire nor aim; a running reload still finishes.
+      (void)firearm_.Update({}, step);
+    }
+    projectiles_.Update(physics_world_, scene_.gravity, step);
+    for (const weapon::Impact& impact : projectiles_.impacts()) {
+      RecordHit(impact);
+    }
 
     // Between frames: no command buffer is being recorded.
     if (now >= next_shader_poll) {
@@ -493,7 +769,11 @@ int App::Run() {
                     .shadow_ms =
                         renderer_.gpu_scope_ms(render::GpuScope::kShadow),
                     .main_ms = renderer_.gpu_scope_ms(render::GpuScope::kMain)},
-        .show_crosshair = view_mode_ != ViewMode::kOrbit,
+        .weapon = MakeWeaponOverlayInfo(),
+        .hit_log = MakeHitLogOverlayInfo(),
+        // The player aims with the rifle's sights only; the dot is a tool of
+        // the fly camera, which pushes objects with it.
+        .show_crosshair = view_mode_ == ViewMode::kFly,
         .entity_count = scene_.entities.size(),
         .draw_calls = stats.draw_calls,
         .culled_draws = stats.culled_draws,
@@ -510,6 +790,11 @@ int App::Run() {
                        scene_info, settings_);
     if (ui.settings_changed) {
       SaveSettings();
+    }
+    if (ui.clear_hit_log) {
+      // Starts a new string of shots; the marks on the plates stay.
+      target_log_.Clear();
+      shots_fired_ = 0;
     }
     renderer_.DrawFrame(BuildSceneView(), ui.draw_data);
   }
@@ -591,6 +876,10 @@ void App::HandleAction(input::Action action) {
     case Action::kJump:
     case Action::kSprint:
     case Action::kCrouch:
+    case Action::kFire:  // The weapon reads these from the frame directly.
+    case Action::kAim:
+    case Action::kReload:
+    case Action::kToggleFireMode:
     case Action::kCount:
       break;
   }
@@ -663,6 +952,80 @@ ui::CameraOverlayInfo App::MakeCameraOverlayInfo() const {
   };
 }
 
+ui::HitLogOverlayInfo App::MakeHitLogOverlayInfo() const {
+  return {
+      .log = &target_log_,
+      .target_names = target_names_,
+      .shots_fired = shots_fired_,
+  };
+}
+
+std::optional<render::ReticleSight> App::CurrentSight() const {
+  if (view_mode_ != ViewMode::kPlayer || !player_.spawned()) {
+    return std::nullopt;
+  }
+  // The model has no glass: the window is drawn in the hood's front opening,
+  // lifted a hair towards the eye so it never fights the hood's own faces.
+  const glm::vec3 axis = viewmodel_.optic_axis();
+  const glm::mat4 lift =
+      glm::translate(glm::mat4(1.0f), -axis * kLensLiftTowardsEye);
+  render::ReticleSight sight;
+  sight.lens = lift * viewmodel_.lens_matrix();
+  sight.axis = axis;
+  return sight;
+}
+
+ui::WeaponOverlayInfo App::MakeWeaponOverlayInfo() const {
+  return {
+      .rounds_in_magazine = firearm_.rounds_in_magazine(),
+      .magazine_inserted = firearm_.magazine_inserted(),
+      .round_chambered = firearm_.round_chambered(),
+      .bolt_locked_back = firearm_.bolt_locked_back(),
+      .reloading = firearm_.reloading(),
+      .reload_fraction = firearm_.reload_fraction(),
+      .fire_mode =
+          firearm_.fire_mode() == weapon::FireMode::kAuto ? "AUTO" : "SEMI",
+      .spare_magazines = firearm_.spare_magazines(),
+      .projectiles = static_cast<int>(projectiles_.projectiles().size()),
+      .impacts = impacts_total_,
+  };
+}
+
+void App::AppendWeaponDraws() {
+  if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
+    if (const std::optional<render::CachedMesh> rifle =
+            mesh_cache_.Get(rifle_mesh_path_)) {
+      draws_.push_back({.mesh = rifle->id,
+                        .transform = viewmodel_.model_matrix(),
+                        .bounds = rifle->bounds});
+    }
+  }
+
+  const std::optional<render::CachedMesh> cube = mesh_cache_.Get(kBulletMesh);
+  if (!cube) {
+    return;
+  }
+  for (const weapon::Projectile& bullet : projectiles_.projectiles()) {
+    const float speed = glm::length(bullet.velocity);
+    const float length = std::min(speed * kTracerSeconds, bullet.distance);
+    if (!(speed > 0.0f) || !(length > 0.0f)) {
+      continue;
+    }
+    const glm::vec3 direction = bullet.velocity / speed;
+    draws_.push_back(
+        {.mesh = cube->id,
+         .transform =
+             BoxAlong(bullet.position - direction * (length * 0.5f), direction,
+                      {kTracerThickness, kTracerThickness, length}),
+         .bounds = cube->bounds});
+  }
+  for (size_t i = 0; i < impact_mark_count_; ++i) {
+    draws_.push_back({.mesh = cube->id,
+                      .transform = impact_marks_[i],
+                      .bounds = cube->bounds});
+  }
+}
+
 render::SceneView App::BuildSceneView() {
   const VkExtent2D extent = renderer_.swapchain().extent();
   const float aspect = static_cast<float>(extent.width) /
@@ -677,6 +1040,7 @@ render::SceneView App::BuildSceneView() {
                         .bounds = mesh->bounds});
     }
   }
+  AppendWeaponDraws();
 
   const ViewPose eye = CurrentView();
   render::SceneView view;
@@ -694,6 +1058,7 @@ render::SceneView App::BuildSceneView() {
   view.shadows_enabled = shadows_enabled_;
   view.cascade_debug = cascade_debug_;
   view.draws = draws_;
+  view.sight = CurrentSight();
   return view;
 }
 

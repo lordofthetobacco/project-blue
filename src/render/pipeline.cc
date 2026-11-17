@@ -96,11 +96,17 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
   const VkPipelineDepthStencilStateCreateInfo depth_stencil{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
       .depthTestEnable = has_depth,
-      .depthWriteEnable = has_depth,
+      .depthWriteEnable = has_depth && desc.depth_write,
       .depthCompareOp = desc.depth_compare_op,
   };
   const VkPipelineColorBlendAttachmentState blend_attachment{
-      .blendEnable = VK_FALSE,
+      .blendEnable = desc.additive_blend,
+      .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .colorBlendOp = VK_BLEND_OP_ADD,
+      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
   };

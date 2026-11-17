@@ -54,6 +54,25 @@ TEST_CASE("ImportModel reports a missing file") {
   CHECK((result.error() == ImportError::kFileNotFound));
 }
 
+TEST_CASE("ImportModel triangulates quads and n-gons") {
+  const testing::ScratchDirectory dir("polygon_model");
+  const std::string path = dir.Child("blue_polygon_model.obj");
+  // A unit quad and a regular hexagon (both in z = 0), as Blender exports.
+  const std::string_view obj =
+      "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+      "v 3 0 0\nv 3.5 0.87 0\nv 3 1.73 0\nv 2 1.73 0\nv 1.5 0.87 0\nv 2 0 0\n"
+      "vn 0 0 1\n"
+      "f 1//1 2//1 3//1 4//1\n"
+      "f 5//1 6//1 7//1 8//1 9//1 10//1\n";
+  REQUIRE(platform::WriteFileAtomic(path, std::as_bytes(std::span(obj))).ok());
+
+  const auto result = ImportModel(path);
+
+  REQUIRE(result.ok());
+  // 2 + 4 triangles.
+  CHECK(result.value().indices.size() == 18);
+}
+
 TEST_CASE("ImportModel rejects a garbage file without crashing") {
   const testing::ScratchDirectory dir("garbage_model");
   const std::string path = dir.Child("blue_garbage_model.obj");

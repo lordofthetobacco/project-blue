@@ -26,6 +26,12 @@ struct GraphicsPipelineDesc {
   VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT;
   VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   VkCompareOp depth_compare_op = VK_COMPARE_OP_GREATER;
+  // False keeps the depth test but leaves the depth buffer untouched, e.g.
+  // for overlays drawn after the opaque scene.
+  bool depth_write = true;
+  // Adds the fragment color to the attachment (src + dst, alpha unchanged)
+  // instead of replacing it.
+  bool additive_blend = false;
   // Clamps instead of clips fragments outside the near/far planes (needs the
   // depthClamp device feature).
   bool depth_clamp = false;

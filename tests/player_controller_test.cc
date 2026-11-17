@@ -7,7 +7,10 @@
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/trigonometric.hpp>
+#include <glm/vec2.hpp>
 
+#include "camera/look.h"
 #include "input/action.h"
 #include "input/input_frame.h"
 #include "input/input_settings.h"
@@ -302,6 +305,112 @@ TEST_CASE("The player survives a world rebuild and a teleport") {
   f.Tick({}, 60);
   CHECK(f.player().on_ground());
   CHECK(f.player().feet_position().x == doctest::Approx(5.0f).epsilon(0.01));
+}
+
+TEST_CASE("Aiming slows the player and blocks sprinting") {
+  Fixture f;
+  f.Tick(Held({Action::kMoveForward, Action::kSprint, Action::kAim}), 60);
+  CHECK(f.player().aiming());
+  CHECK_FALSE(f.player().sprinting());
+  CHECK(f.player().horizontal_speed() ==
+        doctest::Approx(f.player().tuning().aim_speed).epsilon(0.05));
+
+  // Releasing the sights with sprint still held resumes the sprint.
+  f.Tick(StillHeld({Action::kMoveForward, Action::kSprint}), 60);
+  CHECK_FALSE(f.player().aiming());
+  CHECK(f.player().sprinting());
+}
+
+TEST_CASE("Aiming cancels a toggled sprint") {
+  Fixture f;
+  f.settings().sprint_toggle = true;
+  f.Tick(Held({Action::kMoveForward, Action::kSprint}));
+  f.Tick(StillHeld({Action::kMoveForward}), 10);
+  REQUIRE(f.player().sprinting());
+
+  f.Tick(Held({Action::kMoveForward, Action::kAim}));
+  CHECK_FALSE(f.player().sprinting());
+  f.Tick(StillHeld({Action::kMoveForward}), 10);
+  CHECK_FALSE(f.player().sprinting());
+}
+
+TEST_CASE("Aiming crouched keeps the slower crouch speed") {
+  Fixture f;
+  f.Tick(Held({Action::kMoveForward, Action::kCrouch, Action::kAim}), 60);
+  CHECK(f.player().horizontal_speed() ==
+        doctest::Approx(f.player().tuning().crouch_speed).epsilon(0.05));
+}
+
+TEST_CASE("Aiming narrows the field of view smoothly and returns") {
+  Fixture f;
+  f.settings().fov_degrees = 70.0f;
+  f.Tick({});
+  REQUIRE(f.player().view().vertical_fov_degrees == doctest::Approx(70.0f));
+
+  f.Tick(Held({Action::kAim}));
+  const float first = f.player().view().vertical_fov_degrees;
+  CHECK(first < 70.0f);
+  CHECK(first > 60.0f);                   // Blends in rather than snapping.
+  f.Tick(StillHeld({Action::kAim}), 30);  // 0.5 s
+  const float aimed = 70.0f * f.player().tuning().aim_fov_scale;
+  CHECK(f.player().view().vertical_fov_degrees ==
+        doctest::Approx(aimed).epsilon(0.01));
+  CHECK(f.player().aim_fraction() == doctest::Approx(1.0f).epsilon(0.01));
+
+  f.Tick({}, 30);
+  CHECK(f.player().view().vertical_fov_degrees ==
+        doctest::Approx(70.0f).epsilon(0.01));
+  CHECK(f.player().aim_fraction() < 0.01f);
+}
+
+TEST_CASE("Aimed mouse look turns slower by the FOV tangent ratio") {
+  Fixture f;
+  f.settings().fov_degrees = 70.0f;
+  f.settings().mouse_sensitivity = 0.001f;
+  f.Tick(StillHeld({Action::kAim}), 60);  // Fully aimed.
+
+  input::InputFrame frame = StillHeld({Action::kAim});
+  frame.look = true;
+  frame.mouse_delta = {-10.0f, 0.0f};  // Turn left.
+  f.Tick(frame);
+  const float aimed = 70.0f * f.player().tuning().aim_fov_scale;
+  const float ratio = std::tan(glm::radians(aimed) * 0.5f) /
+                      std::tan(glm::radians(70.0f) * 0.5f);
+  CHECK(f.player().look().yaw == doctest::Approx(0.01f * ratio).epsilon(0.01));
+  CHECK(f.player().look_delta().x ==
+        doctest::Approx(0.01f * ratio).epsilon(0.01));
+  CHECK(f.player().look_delta().y == 0.0f);
+}
+
+TEST_CASE("Look delta reports the mouse turn of the frame only") {
+  Fixture f;
+  f.settings().mouse_sensitivity = 0.01f;
+  input::InputFrame frame;
+  frame.look = true;
+  frame.mouse_delta = {10.0f, -5.0f};  // Right and up.
+  f.Tick(frame);
+  CHECK(f.player().look_delta().x == doctest::Approx(-0.1f));
+  CHECK(f.player().look_delta().y == doctest::Approx(0.05f));
+
+  f.player().AddLookKick(0.02f, 0.01f);
+  CHECK(f.player().look_delta().x == doctest::Approx(-0.1f));
+  f.Tick({});
+  CHECK(f.player().look_delta() == glm::vec2(0.0f));
+}
+
+TEST_CASE("A look kick turns the view up and left within the pitch clamp") {
+  Fixture f;
+  const camera::LookAngles before = f.player().look();
+  f.player().AddLookKick(0.01f, 0.005f);
+  CHECK(f.player().look().pitch == doctest::Approx(before.pitch + 0.01f));
+  CHECK(f.player().look().yaw == doctest::Approx(before.yaw + 0.005f));
+  f.Tick({});
+  CHECK(f.player().view().look == f.player().look());
+
+  f.player().AddLookKick(10.0f, 0.0f);
+  CHECK(f.player().look().pitch == doctest::Approx(glm::radians(89.0f)));
+  f.player().AddLookKick(-20.0f, 0.0f);
+  CHECK(f.player().look().pitch == doctest::Approx(-glm::radians(89.0f)));
 }
 
 }  // namespace blue::player

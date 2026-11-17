@@ -131,6 +131,10 @@ InputBindings::InputBindings() {
   Set(Action::kJump, key(SDL_SCANCODE_SPACE));
   Set(Action::kSprint, key(SDL_SCANCODE_LSHIFT));
   Set(Action::kCrouch, key(SDL_SCANCODE_LCTRL));
+  // In capture mode the click that captures the mouse is swallowed by the
+  // InputMapper, so it never fires a shot.
+  Set(Action::kFire, {Binding::MouseButton(SDL_BUTTON_LEFT)});
+  Set(Action::kAim, {Binding::MouseButton(SDL_BUTTON_RIGHT)});
   Set(Action::kCycleCamera, key(SDL_SCANCODE_TAB));
   Set(Action::kEscape, key(SDL_SCANCODE_ESCAPE));
   Set(Action::kToggleInvertY, key(SDL_SCANCODE_I));
@@ -143,6 +147,8 @@ InputBindings::InputBindings() {
   Set(Action::kPush, key(SDL_SCANCODE_F));
   Set(Action::kToggleCascadeDebug, key(SDL_SCANCODE_C));
   Set(Action::kToggleShadows, key(SDL_SCANCODE_X));
+  Set(Action::kReload, key(SDL_SCANCODE_R));
+  Set(Action::kToggleFireMode, key(SDL_SCANCODE_B));
 }
 
 bool InputBindings::IsBound(Action action, const Binding& binding) const {

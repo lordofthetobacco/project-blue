@@ -27,6 +27,8 @@ enum class Action : uint8_t {
   kJump,     // Player only.
   kSprint,   // Player only.
   kCrouch,   // Player only.
+  kFire,     // Player only: the trigger.
+  kAim,      // Player only: aim down the sights.
   // Edge-triggered.
   kCycleCamera,  // Player -> Fly -> Orbit -> Player.
   kEscape,       // Releases the mouse, or quits when it is already free.
@@ -37,9 +39,11 @@ enum class Action : uint8_t {
   kSaveScene,
   kLoadScene,
   kToggleVsync,
-  kPush,  // Push the object under the crosshair.
+  kPush,  // Push the object in the middle of the view.
   kToggleCascadeDebug,
   kToggleShadows,
+  kReload,          // Player only.
+  kToggleFireMode,  // Player only: semi <-> auto.
   kCount,
 };
 

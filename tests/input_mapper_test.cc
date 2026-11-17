@@ -3,6 +3,8 @@
 #include <SDL3/SDL.h>
 #include <doctest/doctest.h>
 
+#include <ostream>
+#include <string_view>
 #include <vector>
 
 #include "input/action.h"
@@ -214,8 +216,13 @@ TEST_CASE("Every default binding maps to its action") {
   const input::InputBindings& bindings = mapper.bindings();
   for (const Action action : input::AllActions()) {
     for (const Binding& binding : bindings.For(action)) {
-      REQUIRE(binding.kind == input::BindingKind::kKey);
-      Press(mapper, static_cast<SDL_Scancode>(binding.code));
+      if (binding.kind == input::BindingKind::kKey) {
+        Press(mapper, static_cast<SDL_Scancode>(binding.code));
+      } else {
+        const auto button = static_cast<Uint8>(binding.code);
+        mapper.HandleEvent(ButtonEvent(button, true));
+        mapper.HandleEvent(ButtonEvent(button, false));
+      }
       const input::InputFrame frame = mapper.EndFrame();
       CHECK_MESSAGE(frame.actions.pressed(action),
                     "action ", input::ActionName(action));
@@ -260,6 +267,52 @@ TEST_CASE("The capturing click is swallowed, later clicks feed Mouse1") {
   frame = mapper.EndFrame();
   CHECK(frame.actions.pressed(Action::kPush));
   CHECK(frame.actions.held(Action::kPush));
+}
+
+TEST_CASE("The capturing click does not fire; held buttons fire and aim") {
+  InputMapper mapper;  // Default bindings: Mouse1 fires, Mouse2 aims.
+  mapper.HandleEvent(WindowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED));
+
+  // A right click on the free cursor neither captures nor aims.
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_RIGHT, true));
+  input::InputFrame frame = mapper.EndFrame();
+  CHECK_FALSE(mapper.wants_mouse_captured());
+  CHECK_FALSE(frame.actions.held(Action::kAim));
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_RIGHT, false));
+
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_LEFT, true));
+  frame = mapper.EndFrame();
+  CHECK(mapper.wants_mouse_captured());
+  CHECK_FALSE(frame.actions.held(Action::kFire));
+  CHECK_FALSE(frame.actions.pressed(Action::kFire));
+  // Releasing the capturing click is not a trigger release either.
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_LEFT, false));
+  CHECK_FALSE(mapper.EndFrame().actions.released(Action::kFire));
+
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_RIGHT, true));
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_LEFT, true));
+  frame = mapper.EndFrame();
+  CHECK(frame.actions.held(Action::kAim));
+  CHECK(frame.actions.held(Action::kFire));
+  // Still held on the next frame, without a new press edge.
+  frame = mapper.EndFrame();
+  CHECK(frame.actions.held(Action::kAim));
+  CHECK(frame.actions.held(Action::kFire));
+  CHECK_FALSE(frame.actions.pressed(Action::kFire));
+
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_LEFT, false));
+  frame = mapper.EndFrame();
+  CHECK(frame.actions.released(Action::kFire));
+  CHECK(frame.actions.held(Action::kAim));
+}
+
+TEST_CASE("Losing focus releases a held trigger") {
+  InputMapper mapper;
+  CaptureAndSettle(mapper);
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_LEFT, true));
+  CHECK(mapper.EndFrame().actions.held(Action::kFire));
+  mapper.HandleEvent(WindowEvent(SDL_EVENT_WINDOW_FOCUS_LOST));
+  CHECK_FALSE(mapper.EndFrame().actions.held(Action::kFire));
 }
 
 TEST_CASE("Wheel notches are summed and respect flipped direction") {
