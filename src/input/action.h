@@ -44,6 +44,8 @@ enum class Action : uint8_t {
   kToggleShadows,
   kReload,          // Player only.
   kToggleFireMode,  // Player only: semi <-> auto.
+  kEquipPistol,     // Player only: take out the pistol.
+  kEquipRifle,      // Player only: take out the rifle.
   kCount,
 };
 

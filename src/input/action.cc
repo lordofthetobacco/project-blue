@@ -18,7 +18,8 @@ constexpr std::array<std::string_view, kActionCount> kActionNames{
     "sensitivity_down", "sensitivity_up", "toggle_overlay",
     "save_scene",     "load_scene",       "toggle_vsync",
     "push",           "toggle_cascade_debug", "toggle_shadows",
-    "reload",         "toggle_fire_mode",
+    "reload",         "toggle_fire_mode", "equip_pistol",
+    "equip_rifle",
 };
 
 }  // namespace

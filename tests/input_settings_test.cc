@@ -78,8 +78,9 @@ TEST_CASE("an older settings file without weapon bindings gets the defaults") {
       "bind.push = G\n");
   const InputSettings settings = LoadInputSettings(file.path());
   const InputBindings defaults;
-  for (const Action action : {Action::kFire, Action::kAim, Action::kReload,
-                              Action::kToggleFireMode}) {
+  for (const Action action :
+       {Action::kFire, Action::kAim, Action::kReload, Action::kToggleFireMode,
+        Action::kEquipPistol, Action::kEquipRifle}) {
     CHECK(ToVector(settings.bindings.For(action)) ==
           ToVector(defaults.For(action)));
   }

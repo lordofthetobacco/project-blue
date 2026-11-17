@@ -95,6 +95,14 @@ TEST_CASE("Weapon actions default to the mouse buttons, R and B") {
       bindings.IsBound(Action::kToggleFireMode, Binding::Key(SDL_SCANCODE_B)));
 }
 
+TEST_CASE("Weapon slots default to keys 2 (pistol) and 3 (rifle)") {
+  const InputBindings bindings;
+  CHECK(bindings.IsBound(Action::kEquipPistol, Binding::Key(SDL_SCANCODE_2)));
+  CHECK(bindings.IsBound(Action::kEquipRifle, Binding::Key(SDL_SCANCODE_3)));
+  CHECK(bindings.For(Action::kEquipPistol).size() == 1);
+  CHECK(bindings.For(Action::kEquipRifle).size() == 1);
+}
+
 TEST_CASE("No two default actions share an input except the mode pairs") {
   // Space (jump / fly up) and Left Ctrl (crouch / fly down) are deliberately
   // shared between the player and the fly camera; nothing else may be.

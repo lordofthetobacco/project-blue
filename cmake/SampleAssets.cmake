@@ -7,6 +7,14 @@ function(blue_copy_samples target)
     file(GLOB sample_files CONFIGURE_DEPENDS
         "${source_dir}/*.obj"
         "${source_dir}/*.mtl")
+    # The glTF pistol keeps its subdirectory, so the same relative path works in every
+    # configuration.
+    file(GLOB glock_files CONFIGURE_DEPENDS "${source_dir}/glock/*.glb")
+    set(glock_copy "")
+    if(glock_files)
+        set(glock_copy COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                ${glock_files} "$<TARGET_FILE_DIR:${target}>/samples/glock")
+    endif()
 
     set(stamp "${CMAKE_CURRENT_BINARY_DIR}/${target}_samples.stamp")
     add_custom_command(
@@ -14,8 +22,11 @@ function(blue_copy_samples target)
         COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:${target}>/samples"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 ${sample_files} "$<TARGET_FILE_DIR:${target}>/samples"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "$<TARGET_FILE_DIR:${target}>/samples/glock"
+        ${glock_copy}
         COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
-        DEPENDS ${sample_files}
+        DEPENDS ${sample_files} ${glock_files}
         COMMENT "Copying sample models"
         VERBATIM)
 

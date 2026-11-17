@@ -149,6 +149,8 @@ InputBindings::InputBindings() {
   Set(Action::kToggleShadows, key(SDL_SCANCODE_X));
   Set(Action::kReload, key(SDL_SCANCODE_R));
   Set(Action::kToggleFireMode, key(SDL_SCANCODE_B));
+  Set(Action::kEquipPistol, key(SDL_SCANCODE_2));
+  Set(Action::kEquipRifle, key(SDL_SCANCODE_3));
 }
 
 bool InputBindings::IsBound(Action action, const Binding& binding) const {

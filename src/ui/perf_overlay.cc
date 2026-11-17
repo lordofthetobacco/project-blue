@@ -93,7 +93,8 @@ void DrawShadowInfo(const ShadowOverlayInfo& shadows) {
   ImGui::Text("  cascade debug: %s", shadows.cascade_debug ? "on" : "off");
 }
 
-// Shows the ammunition state, e.g. "Rifle: 30+1  SEMI  mags 30/30/30/30".
+// Shows the weapon in hand and its ammunition state, e.g.
+// "M16A2: 30+1  SEMI  mags 30/30/30/30".
 void DrawWeaponInfo(const WeaponOverlayInfo& weapon) {
   // Spare magazine counts, formatted into a fixed buffer: no allocation.
   std::array<char, 96> spares{};
@@ -108,16 +109,21 @@ void DrawWeaponInfo(const WeaponOverlayInfo& weapon) {
       used == 0 ? std::string_view("none")
                 : std::string_view(spares.data(), used);
 
-  ImGui::Text("Rifle: %d+%d  %.*s  mags %.*s", weapon.rounds_in_magazine,
-              weapon.round_chambered ? 1 : 0,
+  ImGui::Text("%.*s: %d+%d  %.*s  mags %.*s",
+              static_cast<int>(weapon.name.size()), weapon.name.data(),
+              weapon.rounds_in_magazine, weapon.round_chambered ? 1 : 0,
               static_cast<int>(weapon.fire_mode.size()),
               weapon.fire_mode.data(), static_cast<int>(spare_text.size()),
               spare_text.data());
-  if (weapon.reloading) {
+  if (!weapon.switching_to.empty()) {
+    ImGui::Text("  switching to %.*s",
+                static_cast<int>(weapon.switching_to.size()),
+                weapon.switching_to.data());
+  } else if (weapon.reloading) {
     ImGui::Text("  reloading %.0f%%%s", weapon.reload_fraction * 100.0f,
                 weapon.magazine_inserted ? "" : "  (magazine out)");
   } else if (weapon.bolt_locked_back) {
-    ImGui::TextUnformatted("  bolt open: empty");
+    ImGui::TextUnformatted("  locked open: empty");
   } else if (!weapon.round_chambered) {
     ImGui::TextUnformatted("  chamber empty");
   }

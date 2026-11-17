@@ -48,7 +48,7 @@ float Smooth(float t) { return t * t * (3.0f - 2.0f * t); }
 
 WeaponPose Mix(const WeaponPose& a, const WeaponPose& b, float t) {
   return {
-      .optic_offset = a.optic_offset + (b.optic_offset - a.optic_offset) * t,
+      .sight_offset = a.sight_offset + (b.sight_offset - a.sight_offset) * t,
       .rotation_radians =
           a.rotation_radians + (b.rotation_radians - a.rotation_radians) * t,
   };
@@ -101,13 +101,14 @@ float ZeroTangent(float height, float range, float speed, float gravity) {
 
 }  // namespace
 
-Viewmodel::Viewmodel(const RifleGeometry& geometry,
+Viewmodel::Viewmodel(const WeaponGeometry& geometry,
                      const ViewmodelTuning& tuning)
     : geometry_(geometry),
       tuning_(tuning),
       rng_state_(tuning.seed != 0 ? tuning.seed : kDefaultSeed) {
-  // Orthonormal frame of the optic axis in model space; right is model -X.
-  const glm::vec3 sight = geometry_.optic_axis;
+  // Orthonormal frame of the sight axis in model space (right = axis x up:
+  // model -X for a +Z bore, -Z for a -X bore).
+  const glm::vec3 sight = geometry_.sight_axis;
   const glm::vec3 forward = glm::length(sight) > 0.0f
                                 ? glm::normalize(sight)
                                 : glm::vec3(0.0f, 0.0f, 1.0f);
@@ -121,10 +122,10 @@ Viewmodel::Viewmodel(const RifleGeometry& geometry,
                                glm::vec3(0.0f, 0.0f, -1.0f));
   aligned_ = glm::quat_cast(camera_frame * glm::transpose(model_frame));
 
-  // Where the muzzle sits relative to the optic axis when aimed.
+  // Where the muzzle sits relative to the sight line when aimed.
   const glm::vec3 muzzle =
       aligned_ *
-      ((geometry_.muzzle - geometry_.optic_eye_side) * geometry_.scale);
+      ((geometry_.muzzle - geometry_.sight_eye_point) * geometry_.scale);
   const float height = -muzzle.y;
   const float ahead = tuning_.eye_relief - muzzle.z;
   zero_angle_ =
@@ -137,7 +138,9 @@ Viewmodel::Viewmodel(const RifleGeometry& geometry,
 
 void Viewmodel::Update(const ViewmodelInput& input) {
   const float dt = std::max(input.dt, 0.0f);
-  const bool can_aim = input.aim_held && !input.sprinting && !input.reloading;
+  const float raise = std::clamp(input.raise_fraction, 0.0f, 1.0f);
+  const bool can_aim =
+      input.aim_held && !input.sprinting && !input.reloading && raise >= 1.0f;
   const float aim_rate =
       kBlendTimeConstants / std::max(tuning_.aim_time, 1.0e-3f);
   aim_ = Approach(aim_, can_aim ? 1.0f : 0.0f, aim_rate, dt);
@@ -149,7 +152,7 @@ void Viewmodel::Update(const ViewmodelInput& input) {
   const float motion_scale =
       1.0f + (tuning_.aim_motion_scale - 1.0f) * aim_weight;
 
-  // Sway: the rifle lags behind the turn, then springs back.
+  // Sway: the weapon lags behind the turn, then springs back.
   sway_ = glm::clamp(sway_ - input.look_delta * tuning_.sway_gain,
                      glm::vec2(-tuning_.max_sway), glm::vec2(tuning_.max_sway));
   StepSpring(tuning_.sway_frequency, dt, sway_.x, sway_velocity_.x);
@@ -187,7 +190,7 @@ void Viewmodel::Update(const ViewmodelInput& input) {
   StepSpring(tuning_.recoil_frequency, dt, recoil_pitch_,
              recoil_pitch_velocity_);
 
-  // Compose: hip <-> aimed, then sprint and reload poses on top.
+  // Compose: hip <-> aimed, then sprint, reload and holster poses on top.
   const WeaponPose aimed{{0.0f, 0.0f, -tuning_.eye_relief}, {0.0f, 0.0f, 0.0f}};
   WeaponPose pose = Mix(tuning_.hip, aimed, aim_weight);
   pose = Mix(pose, tuning_.sprint, Smooth(sprint_));
@@ -198,11 +201,12 @@ void Viewmodel::Update(const ViewmodelInput& input) {
           std::sin(glm::pi<float>() *
                    std::clamp(input.reload_fraction, 0.0f, 1.0f));
   pose = Mix(pose, reload, Smooth(reload_));
+  pose = Mix(pose, tuning_.holster, 1.0f - raise);
   const glm::vec3 rotation =
       pose.rotation_radians + glm::vec3(sway_.y * motion_scale + recoil_pitch_,
                                         sway_.x * motion_scale, 0.0f);
   const glm::vec3 eye_side =
-      pose.optic_offset + bob + glm::vec3(0.0f, 0.0f, recoil_back_);
+      pose.sight_offset + bob + glm::vec3(0.0f, 0.0f, recoil_back_);
   const glm::quat pose_rotation = PoseRotation(rotation);
   const glm::quat camera_rotation = pose_rotation * aligned_;
 
@@ -212,7 +216,7 @@ void Viewmodel::Update(const ViewmodelInput& input) {
       glm::translate(glm::mat4(1.0f), eye_side) *
       glm::mat4_cast(camera_rotation) *
       glm::scale(glm::mat4(1.0f), glm::vec3(geometry_.scale)) *
-      glm::translate(glm::mat4(1.0f), -geometry_.optic_eye_side);
+      glm::translate(glm::mat4(1.0f), -geometry_.sight_eye_point);
   model_ = camera_to_world * model_to_camera;
   muzzle_position_ = glm::vec3(model_ * glm::vec4(geometry_.muzzle, 1.0f));
   grip_position_ = glm::vec3(model_ * glm::vec4(geometry_.grip, 1.0f));
@@ -220,7 +224,7 @@ void Viewmodel::Update(const ViewmodelInput& input) {
   muzzle_direction_ = glm::normalize(camera_to_world_rotation *
                                      (camera_rotation * bore_direction_model_));
 
-  // `aligned_` maps the optic frame onto the camera axes, so the posed lens
+  // `aligned_` maps the sight frame onto the camera axes, so the posed lens
   // axes are the pose rotation applied to them.
   lens_center_ = glm::vec3(model_ * glm::vec4(geometry_.optic_lens, 1.0f));
   lens_right_ = glm::normalize(camera_to_world_rotation *
@@ -229,6 +233,21 @@ void Viewmodel::Update(const ViewmodelInput& input) {
                             (pose_rotation * glm::vec3(0.0f, 1.0f, 0.0f)));
   optic_axis_ = glm::normalize(camera_to_world_rotation *
                                (pose_rotation * glm::vec3(0.0f, 0.0f, -1.0f)));
+}
+
+void Viewmodel::Reset() {
+  aim_ = 0.0f;
+  sprint_ = 0.0f;
+  reload_ = 0.0f;
+  sway_ = glm::vec2(0.0f);
+  sway_velocity_ = glm::vec2(0.0f);
+  bob_phase_ = 0.0f;
+  bob_weight_ = 0.0f;
+  recoil_back_ = 0.0f;
+  recoil_back_velocity_ = 0.0f;
+  recoil_pitch_ = 0.0f;
+  recoil_pitch_velocity_ = 0.0f;
+  look_kick_ = glm::vec2(0.0f);
 }
 
 glm::mat4 Viewmodel::lens_matrix() const {

@@ -79,9 +79,12 @@ struct ShadowOverlayInfo {
   std::optional<double> main_ms;
 };
 
-// Plain data the overlay shows about the player's rifle; the views must
+// Plain data the overlay shows about the weapon in hand; the views must
 // outlive the PerfOverlay::Build() call.
 struct WeaponOverlayInfo {
+  std::string_view name;  // The weapon in hand, e.g. "Glock 17".
+  // Where a weapon switch in progress is heading; empty when not switching.
+  std::string_view switching_to;
   int rounds_in_magazine = 0;
   bool magazine_inserted = true;
   bool round_chambered = false;

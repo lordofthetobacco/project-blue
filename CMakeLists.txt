@@ -33,7 +33,24 @@ blue_target_defaults(blue_core)
 
 target_link_libraries(blue_core PUBLIC SDL3::SDL3-static)
 
+# Rigid node animation: transform hierarchy, keyframe clips (glTF sampling rules)
+# and a playback cursor. glm only, no allocation per frame.
+add_library(blue_animation STATIC
+    src/animation/clip.cc
+    src/animation/clip_player.cc
+    src/animation/hierarchy.cc
+    src/animation/transform.cc
+)
+
+target_include_directories(blue_animation PUBLIC src)
+
+blue_target_defaults(blue_animation)
+
+target_link_libraries(blue_animation PUBLIC glm::glm)
+
 add_library(blue_asset STATIC
+    src/asset/animated_model.cc
+    src/asset/internal/material_color.cc
     src/asset/mesh_data.cc
     src/asset/model_importer.cc
 )
@@ -43,7 +60,7 @@ target_include_directories(blue_asset PUBLIC src)
 blue_target_defaults(blue_asset)
 
 target_link_libraries(blue_asset
-    PUBLIC blue_core glm::glm
+    PUBLIC blue_core blue_animation glm::glm
     PRIVATE assimp::assimp
 )
 
@@ -143,21 +160,24 @@ blue_target_defaults(blue_player)
 
 target_link_libraries(blue_player PUBLIC blue_physics blue_input blue_camera glm::glm)
 
-# Rifle gameplay: firing mechanism, ballistic bullets swept against the physics
+# Weapon gameplay: loadout switching, firing mechanism, fire-animation driver, ballistic bullets swept against the physics
 # world, model calibration and the first-person viewmodel pose. No rendering.
 add_library(blue_weapon STATIC
     src/weapon/firearm.cc
+    src/weapon/loadout.cc
     src/weapon/projectile_system.cc
-    src/weapon/rifle_geometry.cc
     src/weapon/target_log.cc
     src/weapon/viewmodel.cc
+    src/weapon/weapon_animator.cc
+    src/weapon/weapon_geometry.cc
+    src/weapon/weapon_specs.cc
 )
 
 target_include_directories(blue_weapon PUBLIC src)
 
 blue_target_defaults(blue_weapon)
 
-target_link_libraries(blue_weapon PUBLIC blue_physics blue_camera glm::glm)
+target_link_libraries(blue_weapon PUBLIC blue_physics blue_camera blue_animation glm::glm)
 
 # Runtime GLSL -> SPIR-V compilation (shaderc) and source change detection. No Vulkan device
 # needed. shaderc stays private: no shaderc type appears in the public headers. The imported
@@ -196,6 +216,7 @@ add_executable(project-blue
     src/render/gpu_timer.cc
     src/render/mesh.cc
     src/render/mesh_cache.cc
+    src/render/model_cache.cc
     src/render/renderer.cc
     src/render/vma.cc
     src/render/vk_check.cc
@@ -212,6 +233,7 @@ blue_target_defaults(project-blue)
 target_link_libraries(project-blue PRIVATE
     blue_core
     blue_asset
+    blue_animation
     blue_scene
     blue_lighting
     blue_physics

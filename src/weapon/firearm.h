@@ -3,6 +3,7 @@
 
 #include <array>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace blue::weapon {
@@ -13,9 +14,13 @@ enum class FireMode { kSemi, kAuto };
 // this covers a 1.1 s frame; further shots due in that frame are dropped.
 inline constexpr int kMaxShotsPerUpdate = 16;
 
-// Static description of a magazine-fed, closed-bolt rifle. Defaults describe
-// an M16A2-like rifle firing 5.56x45 mm M855.
+// Static description of a magazine-fed, closed-bolt firearm (rifle or pistol;
+// a pistol's slide locked back counts as the bolt). Defaults describe an
+// M16A2-like rifle firing 5.56x45 mm M855.
 struct FirearmSpec {
+  // Shown to the player. Must refer to storage outliving the spec (a
+  // literal).
+  std::string_view display_name = "M16A2";
   int magazine_capacity = 30;
   float rounds_per_minute = 800.0f;      // cyclic rate, > 0
   float tactical_reload_seconds = 2.2f;  // reload with a round still chambered
@@ -28,6 +33,9 @@ struct FirearmSpec {
   float bullet_drag = 1.2e-3f;
   int spare_magazines = 4;  // carried in addition to the inserted one, full
   FireMode fire_mode = FireMode::kSemi;  // selector position at start
+  // False: semi-automatic only. The weapon starts and stays in kSemi
+  // whatever `fire_mode` says; the selector toggle is ignored (no event).
+  bool select_fire = true;
 };
 
 // One frame of player intent.
@@ -54,13 +62,13 @@ struct FirearmEvents {
   bool fire_mode_changed = false;
 };
 
-// Ammunition mechanism of the rifle: chamber, bolt, magazine, spares, fire
+// Ammunition mechanism of a firearm: chamber, bolt, magazine, spares, fire
 // selector and reload timing. No positions, rendering or audio; callers react
 // to FirearmEvents.
 //
 // Rules: a shot needs a chambered round. After a shot the bolt strips the next
 // round from the magazine into the chamber or, with an empty magazine, locks
-// back with the chamber empty, so a fresh rifle fires capacity + 1 rounds.
+// back with the chamber empty, so a fresh weapon fires capacity + 1 rounds.
 // Semi fires once per trigger pull; auto fires at the cyclic rate from a time
 // accumulator (the first shot of a pull is immediate, a long frame can fire
 // several shots). A reload is refused when the magazine is full with a round
@@ -82,6 +90,17 @@ class Firearm {
   // Advances the mechanism by `dt` seconds (negative counts as 0) under
   // `input` and returns what happened.
   FirearmEvents Update(const FirearmInput& input, float dt);
+
+  // Aborts a running reload (the weapon is put away mid-reload) and returns
+  // whether one was running. No events. Steps already performed stay done,
+  // the rest are dropped, and the magazine in hand goes back to the spares:
+  // - before the old magazine is pulled: nothing has changed;
+  // - after the pull, before the new one is seated: the weapon is left with
+  //   no magazine (a chambered round can still be fired);
+  // - after seating, before the bolt release of an empty reload: the new
+  //   magazine stays in and the bolt stays locked back.
+  // A later reload starts from that state like any other.
+  bool CancelReload();
 
   [[nodiscard]] int rounds_in_magazine() const { return magazine_; }
   [[nodiscard]] bool magazine_inserted() const { return magazine_inserted_; }

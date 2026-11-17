@@ -1,6 +1,5 @@
 #include "asset/model_importer.h"
 
-#include <assimp/material.h>
 #include <assimp/mesh.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
@@ -16,6 +15,7 @@
 #include <assimp/Importer.hpp>
 #include <glm/common.hpp>
 
+#include "asset/internal/material_color.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "platform/file_system.h"
@@ -28,30 +28,6 @@ constexpr unsigned kPostProcess =
     aiProcess_JoinIdenticalVertices | aiProcess_PreTransformVertices |
     aiProcess_SortByPType | aiProcess_ImproveCacheLocality |
     aiProcess_ValidateDataStructure;
-
-// Returns the diffuse colour of the material of `mesh`, or `fallback` when it
-// has none. Assimp's fallback material is not authored content, so it must
-// not override the caller's colour. Material colours are used as-is, i.e.
-// treated as linear.
-glm::vec3 MeshColor(const aiScene& scene, const aiMesh& mesh,
-                    const glm::vec3& fallback) {
-  if (mesh.mMaterialIndex >= scene.mNumMaterials) {
-    return fallback;
-  }
-  const aiMaterial& material = *scene.mMaterials[mesh.mMaterialIndex];
-
-  aiString name;
-  if (material.Get(AI_MATKEY_NAME, name) == aiReturn_SUCCESS &&
-      name == aiString(AI_DEFAULT_MATERIAL_NAME)) {
-    return fallback;
-  }
-
-  aiColor3D diffuse;
-  if (material.Get(AI_MATKEY_COLOR_DIFFUSE, diffuse) != aiReturn_SUCCESS) {
-    return fallback;
-  }
-  return {diffuse.r, diffuse.g, diffuse.b};
-}
 
 }  // namespace
 
@@ -92,11 +68,7 @@ core::Result<MeshData, ImportError> ImportModel(const std::string& path,
   size_t vertex_count = 0;
   size_t index_count = 0;
   for (const aiMesh* mesh : std::span(scene->mMeshes, scene->mNumMeshes)) {
-    // Triangulating quads and n-gons only tags the mesh with the n-gon
-    // encoding flag; its faces are still triangles.
-    const unsigned primitive_types =
-        mesh->mPrimitiveTypes & ~aiPrimitiveType_NGONEncodingFlag;
-    if (primitive_types != aiPrimitiveType_TRIANGLE || mesh->mNumFaces == 0) {
+    if (!internal::IsTriangleMesh(*mesh)) {
       continue;
     }
     if (mesh->mNormals == nullptr) {
@@ -120,7 +92,8 @@ core::Result<MeshData, ImportError> ImportModel(const std::string& path,
   data.indices.reserve(index_count);
 
   for (const aiMesh* mesh : meshes) {
-    const glm::vec3 color = MeshColor(*scene, *mesh, options.default_color);
+    const glm::vec3 color =
+        internal::MeshColor(*scene, *mesh, options.default_color);
     const auto base = static_cast<Index>(data.vertices.size());
 
     for (unsigned i = 0; i < mesh->mNumVertices; ++i) {

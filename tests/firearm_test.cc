@@ -6,6 +6,8 @@
 #include <numeric>
 #include <span>
 
+#include "weapon/weapon_specs.h"
+
 namespace blue::weapon {
 namespace {
 
@@ -307,6 +309,96 @@ TEST_CASE("negative dt is treated as zero") {
   const FirearmEvents events = firearm.Update(Trigger(), -1.0f);
   REQUIRE(events.shots == 1);
   CHECK(events.shot_age[0] == 0.0f);
+}
+
+TEST_CASE("a semi-only weapon starts and stays in semi") {
+  FirearmSpec spec;
+  spec.select_fire = false;
+  spec.fire_mode = FireMode::kAuto;
+  Firearm firearm(spec);
+  CHECK(firearm.fire_mode() == FireMode::kSemi);
+  const FirearmEvents events =
+      firearm.Update({.fire_mode_pressed = true}, kFrame);
+  CHECK_FALSE(events.fire_mode_changed);
+  CHECK(firearm.fire_mode() == FireMode::kSemi);
+  // Holding the trigger fires once only.
+  CHECK(RunFor(firearm, Trigger(), kFrame, 1.0f).shots == 1);
+}
+
+TEST_CASE("the pistol spec: 17 + 1 rounds, semi only, 3 spares") {
+  Firearm pistol(Glock17Spec());
+  CHECK(pistol.rounds_loaded() == 18);
+  CHECK(pistol.fire_mode() == FireMode::kSemi);
+  CHECK(pistol.spare_magazines().size() == 3);
+  CHECK(pistol.spec().muzzle_velocity == 375.0f);
+  // Fast clicking is bounded by the mechanism's rate, not the frame.
+  int shots = 0;
+  for (int i = 0; i < 60; ++i) {
+    shots += pistol.Update(Trigger(), 1.0f / 240.0f).shots;
+    shots += pistol.Update(Idle(), 1.0f / 240.0f).shots;
+  }
+  // 0.5 s of clicking at 120 pulls per second: 1100 rpm allows 9 + 1.
+  CHECK(shots <= 10);
+  CHECK(shots >= 8);
+}
+
+TEST_CASE("CancelReload does nothing without a reload") {
+  Firearm firearm;
+  CHECK_FALSE(firearm.CancelReload());
+  CHECK(firearm.rounds_loaded() == 31);
+}
+
+TEST_CASE("CancelReload keeps the magazine bookkeeping at every stage") {
+  const FirearmSpec spec;
+  for (const float fraction : {0.1f, 0.5f, 0.75f, 0.9f}) {
+    CAPTURE(fraction);
+    for (const bool empty : {false, true}) {
+      CAPTURE(empty);
+      Firearm firearm(spec);
+      const int fired = empty ? spec.magazine_capacity + 1 : 3;
+      for (int i = 0; i < fired; ++i) {
+        PullOnce(firearm);
+      }
+      const int loaded_before = firearm.rounds_loaded();
+      REQUIRE(firearm.Update(Reload(), 0.0f).reload_started);
+      const float seconds =
+          empty ? spec.empty_reload_seconds : spec.tactical_reload_seconds;
+      (void)firearm.Update(Idle(), fraction * seconds);
+      REQUIRE(firearm.reloading());
+      CHECK(firearm.CancelReload());
+      CHECK_FALSE(firearm.reloading());
+      CHECK(firearm.reload_fraction() == 0.0f);
+      // No magazine is lost or duplicated: every round is accounted for.
+      int carried = firearm.rounds_loaded();
+      for (const int spare : firearm.spare_magazines()) {
+        carried += spare;
+      }
+      const int total =
+          (spec.spare_magazines + 1) * spec.magazine_capacity + 1 - fired;
+      CHECK(carried == total);
+      if (fraction < 0.3f) {  // before the pull: unchanged
+        CHECK(firearm.magazine_inserted());
+        CHECK(firearm.rounds_loaded() == loaded_before);
+        CHECK(firearm.spare_magazines().size() == 4);
+      } else if (fraction < 0.65f) {  // pulled, not seated: no magazine
+        CHECK_FALSE(firearm.magazine_inserted());
+        CHECK(firearm.rounds_loaded() == (empty ? 0 : 1));
+      } else {  // seated
+        CHECK(firearm.magazine_inserted());
+        CHECK(firearm.rounds_in_magazine() ==
+              spec.magazine_capacity - (empty && fraction >= 0.85f ? 1 : 0));
+        CHECK(firearm.bolt_locked_back() == (empty && fraction < 0.85f));
+      }
+      // A later reload completes normally from that state.
+      if (firearm.Update(Reload(), 0.0f).reload_started) {
+        (void)firearm.Update(Idle(), 5.0f);
+      }
+      CHECK_FALSE(firearm.reloading());
+      CHECK(firearm.magazine_inserted());
+      CHECK(firearm.round_chambered());
+      CHECK_FALSE(firearm.bolt_locked_back());
+    }
+  }
 }
 
 }  // namespace

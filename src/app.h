@@ -12,6 +12,7 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
 
+#include "animation/clip.h"
 #include "camera/camera_controller.h"
 #include "input/action.h"
 #include "input/input_settings.h"
@@ -19,16 +20,18 @@
 #include "physics/physics_world.h"
 #include "physics/scene_physics.h"
 #include "platform/input_mapper.h"
-#include "player/player_controller.h"
 #include "platform/window.h"
+#include "player/player_controller.h"
 #include "render/mesh_cache.h"
+#include "render/model_cache.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 #include "ui/perf_overlay.h"
-#include "weapon/firearm.h"
+#include "weapon/loadout.h"
 #include "weapon/projectile_system.h"
 #include "weapon/target_log.h"
 #include "weapon/viewmodel.h"
+#include "weapon/weapon_animator.h"
 
 namespace blue {
 
@@ -109,12 +112,31 @@ class App {
   // Pushes the dynamic body in the middle of the view along the camera
   // direction.
   void PushObject();
-  // Runs the rifle for one frame after the player's view is final: trigger,
-  // viewmodel pose, bullet spawns and recoil. Player view mode only.
+  // Runs the loadout for one frame after the player's view is final: weapon
+  // selection (keys 2 / 3), trigger, the pose of the weapon in hand, bullet
+  // spawns, recoil and the pistol's fire animation. Player view mode only.
   void UpdateWeapon(const input::InputFrame& input, float step);
-  // Fires one bullet from the muzzle, `age` seconds before the end of the
-  // frame, or lands it on whatever blocks the line from the eye to the
-  // muzzle (a rifle poking through a wall must not shoot through it).
+  // Imports and uploads the pistol and prepares its fire animation. On
+  // failure (logged) the pistol is not drawn.
+  void LoadPistolModel();
+  // Brings the loadout back to a fresh start: both weapons full, the rifle
+  // in hand, viewmodels and the pistol's animation at rest.
+  void ResetLoadout();
+  // Prepares the weapon that just came into the hands (Loadout's
+  // weapon_changed): fresh viewmodel and animation, its aim zoom.
+  void OnWeaponChanged();
+  // Applies what depends on the weapon in hand to the player (aim zoom).
+  void ApplyWeaponToPlayer();
+  [[nodiscard]] weapon::Viewmodel& active_viewmodel() {
+    return viewmodels_[static_cast<size_t>(loadout_.active())];
+  }
+  [[nodiscard]] const weapon::Viewmodel& active_viewmodel() const {
+    return viewmodels_[static_cast<size_t>(loadout_.active())];
+  }
+  // Fires one bullet of the weapon in hand from its muzzle, `age` seconds
+  // before the end of the frame, or lands it on whatever blocks the line from
+  // the eye to the muzzle (a weapon poking through a wall must not shoot
+  // through it).
   void FireBullet(float age);
   // Counts a bullet hit, logs it when the body is a target and, on a static
   // body, leaves an impact mark. Does not push the body.
@@ -124,8 +146,11 @@ class App {
   // Rebuilds targets_ from the entities named as targets; call after every
   // scene change. Ranges are measured from the scene camera.
   void FindTargets();
-  // Appends the rifle, the bullet streaks and the impact marks to draws_.
+  // Appends the weapon in hand, the bullet streaks and the impact marks to
+  // draws_.
   void AppendWeaponDraws();
+  // Appends one draw per part of the pistol model as posed this frame.
+  void AppendPistolDraws();
   [[nodiscard]] ui::WeaponOverlayInfo MakeWeaponOverlayInfo() const;
   [[nodiscard]] ui::HitLogOverlayInfo MakeHitLogOverlayInfo() const;
   // Returns the reflex sight as posed this frame, nullopt outside the
@@ -142,6 +167,7 @@ class App {
   platform::Window window_;
   render::Renderer renderer_;
   render::MeshCache mesh_cache_;
+  render::ModelCache model_cache_;
   physics::PhysicsRuntime physics_runtime_;
   physics::PhysicsWorld physics_world_;
   physics::ScenePhysics scene_physics_;
@@ -161,12 +187,29 @@ class App {
   std::string player_state_;  // Overlay stance text, rebuilt per frame.
   ViewMode view_mode_ = ViewMode::kPlayer;
 
-  // The player's rifle. Bullets are not part of the scene: they are neither
-  // saved nor loaded and are dropped on every scene reload.
-  weapon::Firearm firearm_;
-  weapon::Viewmodel viewmodel_;
+  // The player's weapons: the loadout owns one firearm per slot, and each
+  // slot has its own viewmodel (indexed by weapon::WeaponSlot). Bullets are
+  // not part of the scene: they are neither saved nor loaded and are dropped
+  // on every scene reload.
+  weapon::Loadout loadout_;
+  std::array<weapon::Viewmodel, weapon::kWeaponSlotCount> viewmodels_;
   weapon::ProjectileSystem projectiles_;
   std::string rifle_mesh_path_;  // Resolved once; looked up every frame.
+  // The pistol, loaded at startup so the first switch does not hitch. Owned
+  // by model_cache_; null if loading failed, then the pistol is not drawn
+  // (it still fires).
+  const render::UploadedModel* pistol_model_ = nullptr;
+  // The model's per-node clips merged into one firing animation; borrowed by
+  // pistol_animator_, so it never changes after LoadPistolModel().
+  animation::Clip pistol_fire_clip_;
+  // Engaged with pistol_model_; borrows its hierarchy and pistol_fire_clip_.
+  std::optional<weapon::WeaponAnimator> pistol_animator_;
+  // World matrix of every node of pistol_model_ this frame, sized once at
+  // startup.
+  std::vector<glm::mat4> pistol_world_;
+  // The parts of pistol_model_ that are drawn (all but kPistolHiddenNodes),
+  // filled once at startup.
+  std::vector<render::UploadedPart> pistol_parts_;
   // Ring buffer of the transforms of the most recent bullet holes on static
   // surfaces, each a small tile of the builtin cube: the first
   // `impact_mark_count_` entries are valid, `next_impact_mark_` is the slot the

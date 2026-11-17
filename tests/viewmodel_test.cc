@@ -10,11 +10,13 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/mat4x4.hpp>
+#include <glm/trigonometric.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
 #include "camera/look.h"
-#include "weapon/rifle_geometry.h"
+#include "weapon/weapon_geometry.h"
+#include "weapon/weapon_specs.h"
 
 namespace blue::weapon {
 namespace {
@@ -70,7 +72,7 @@ EyeFrame FrameOf(camera::LookAngles look, float roll) {
 }
 
 TEST_CASE("aimed, the optic axis runs through the eye along the view") {
-  const RifleGeometry& rifle = M16Geometry();
+  const WeaponGeometry& rifle = M16Geometry();
   for (const camera::LookAngles look :
        {camera::LookAngles{}, camera::LookAngles{2.3f, 0.4f},
         camera::LookAngles{-1.1f, -0.9f}}) {
@@ -85,11 +87,11 @@ TEST_CASE("aimed, the optic axis runs through the eye along the view") {
       float eye_side_along = 0.0f;
       float ahead_along = 0.0f;
       CHECK(DistanceFromAxis(eye, forward,
-                             ToWorld(viewmodel, rifle.optic_eye_side),
+                             ToWorld(viewmodel, rifle.sight_eye_point),
                              eye_side_along) < 1.0e-4f);
       // A point half a metre down the optic axis, past the front sight.
       const glm::vec3 ahead =
-          rifle.optic_eye_side + rifle.optic_axis * (0.5f / rifle.scale);
+          rifle.sight_eye_point + rifle.sight_axis * (0.5f / rifle.scale);
       CHECK(DistanceFromAxis(eye, forward, ToWorld(viewmodel, ahead),
                              ahead_along) < 1.0e-4f);
       CHECK(eye_side_along == doctest::Approx(viewmodel.tuning().eye_relief));
@@ -105,7 +107,7 @@ TEST_CASE("aimed, the optic axis runs through the eye along the view") {
 }
 
 TEST_CASE("the lens is posed on the rifle and the dot shows only through it") {
-  const RifleGeometry& rifle = M16Geometry();
+  const WeaponGeometry& rifle = M16Geometry();
   const camera::LookAngles look{0.6f, 0.2f};
   const float roll = 0.02f;
   const glm::vec3 eye(1.0f, 1.7f, 2.0f);
@@ -119,7 +121,7 @@ TEST_CASE("the lens is posed on the rifle and the dot shows only through it") {
   CHECK(glm::dot(viewmodel.optic_axis(), frame.forward) > 1.0f - 1.0e-6f);
   CHECK(glm::dot(viewmodel.lens_center() - eye, frame.forward) ==
         doctest::Approx(viewmodel.tuning().eye_relief +
-                        (rifle.optic_lens.z - rifle.optic_eye_side.z) *
+                        (rifle.optic_lens.z - rifle.sight_eye_point.z) *
                             rifle.scale));
 
   const glm::mat4 lens = viewmodel.lens_matrix();
@@ -142,7 +144,7 @@ TEST_CASE("the lens is posed on the rifle and the dot shows only through it") {
   CHECK(std::abs(centred.x) < 1.0e-5f);
   // Seen through the A2 notch: above the lens centre, inside the disc.
   CHECK(centred.y ==
-        doctest::Approx((rifle.optic_eye_side.y - rifle.optic_lens.y) *
+        doctest::Approx((rifle.sight_eye_point.y - rifle.optic_lens.y) *
                         rifle.scale)
             .epsilon(1.0e-3));
   CHECK(glm::length(centred) < radius);
@@ -153,7 +155,7 @@ TEST_CASE("the lens is posed on the rifle and the dot shows only through it") {
 }
 
 TEST_CASE("the zeroed bore crosses the line of sight at the zero distance") {
-  const RifleGeometry& rifle = M16Geometry();
+  const WeaponGeometry& rifle = M16Geometry();
   for (const float zero : {50.0f, 100.0f, 300.0f}) {
     CAPTURE(zero);
     ViewmodelTuning tuning;
@@ -304,7 +306,7 @@ TEST_CASE("aiming reduces the recoil kick") {
 }
 
 TEST_CASE("the model matrix is finite and carries the model scale") {
-  const RifleGeometry& rifle = M16Geometry();
+  const WeaponGeometry& rifle = M16Geometry();
   Viewmodel viewmodel(rifle);
   ViewmodelInput input = Still(false, {0.7f, -0.3f}, glm::vec3(5.0f), 0.02f);
   input.velocity = glm::vec3(3.0f, 0.0f, 1.0f);
@@ -325,7 +327,7 @@ TEST_CASE("the model matrix is finite and carries the model scale") {
 
 TEST_CASE("the rifle is rigidly attached to the eye frame") {
   // The same camera-space pose for any eye placement, yaw, pitch and roll.
-  const RifleGeometry& rifle = M16Geometry();
+  const WeaponGeometry& rifle = M16Geometry();
   Viewmodel reference(rifle);
   Settle(reference, Still(false));
   const glm::vec3 local_muzzle = reference.muzzle_position();
@@ -386,6 +388,136 @@ TEST_CASE("walking bobs the rifle; standing still does not") {
   CHECK(largest < 0.05f);
   Settle(viewmodel, Still(false));
   CHECK(glm::length(viewmodel.muzzle_position() - rest) < 1.0e-3f);
+}
+
+TEST_CASE("aimed, the pistol's iron sight line runs through the eye") {
+  const WeaponGeometry& pistol = Glock17Geometry();
+  const ViewmodelTuning tuning = Glock17ViewmodelTuning();
+  const camera::LookAngles look{-0.8f, 0.3f};
+  const glm::vec3 eye(1.0f, 1.6f, 2.0f);
+  Viewmodel viewmodel(pistol, tuning);
+  Settle(viewmodel, Still(true, look, eye, 0.01f));
+  REQUIRE(viewmodel.aim_fraction() == 1.0f);
+  const glm::vec3 forward = camera::ForwardFrom(look);
+  // Rear notch top and front post top, both on the line of sight.
+  const glm::vec3 front_post(-1.075f, 0.819f, 0.0f);
+  float rear_along = 0.0f;
+  float front_along = 0.0f;
+  CHECK(DistanceFromAxis(eye, forward,
+                         ToWorld(viewmodel, pistol.sight_eye_point),
+                         rear_along) < 1.0e-4f);
+  CHECK(DistanceFromAxis(eye, forward, ToWorld(viewmodel, front_post),
+                         front_along) < 1.0e-4f);
+  CHECK(rear_along == doctest::Approx(0.45f));
+  CHECK(front_along - rear_along == doctest::Approx(0.167f).epsilon(0.01));
+  CHECK(viewmodel.lens_radius() == 0.0f);
+  // Upright: the bore below the sights, the grip below the bore.
+  const EyeFrame frame = FrameOf(look, 0.01f);
+  const float muzzle_up = glm::dot(viewmodel.muzzle_position() - eye, frame.up);
+  CHECK(muzzle_up < -0.01f);
+  CHECK(muzzle_up > -0.03f);
+  CHECK(glm::dot(viewmodel.grip_position() - eye, frame.up) < muzzle_up);
+  CHECK(glm::dot(viewmodel.muzzle_position() - eye, forward) >
+        front_along - 0.01f);
+}
+
+TEST_CASE("the pistol is zeroed at 25 m for 375 m/s") {
+  const ViewmodelTuning tuning = Glock17ViewmodelTuning();
+  CHECK(tuning.zero_distance == 25.0f);
+  CHECK(tuning.muzzle_velocity == Glock17Spec().muzzle_velocity);
+  Viewmodel viewmodel(Glock17Geometry(), tuning);
+  Settle(viewmodel, Still(true));
+  const glm::vec3 muzzle = viewmodel.muzzle_position();
+  const glm::vec3 velocity =
+      tuning.muzzle_velocity * viewmodel.muzzle_direction();
+  auto height_at = [&](float distance) {
+    const float time = (-distance - muzzle.z) / velocity.z;
+    return muzzle.y + velocity.y * time - 0.5f * kG * time * time;
+  };
+  CHECK(muzzle.y < 0.0f);
+  CHECK(std::abs(height_at(25.0f)) < 1.0e-3f);
+  CHECK(height_at(20.0f) * height_at(30.0f) < 0.0f);
+  CHECK(std::abs(velocity.x) < 1.0e-3f);
+}
+
+TEST_CASE("the pistol's hip pose is more central and further out") {
+  Viewmodel rifle(M16Geometry(), M16ViewmodelTuning());
+  Viewmodel pistol(Glock17Geometry(), Glock17ViewmodelTuning());
+  Settle(rifle, Still(false));
+  Settle(pistol, Still(false));
+  const glm::vec3 rifle_eye = ToWorld(rifle, M16Geometry().sight_eye_point);
+  const glm::vec3 pistol_eye =
+      ToWorld(pistol, Glock17Geometry().sight_eye_point);
+  CHECK(pistol_eye.x > 0.0f);
+  CHECK(pistol_eye.x < rifle_eye.x);
+  CHECK(pistol_eye.z < rifle_eye.z);
+  // Still pointing roughly where the player looks.
+  CHECK(-pistol.muzzle_direction().z > std::cos(0.1f));
+}
+
+TEST_CASE("the pistol's shots kick the camera, not the model") {
+  Viewmodel rifle(M16Geometry(), M16ViewmodelTuning());
+  Viewmodel pistol(Glock17Geometry(), Glock17ViewmodelTuning());
+  Settle(rifle, Still(false));
+  Settle(pistol, Still(false));
+  const glm::vec3 rest = pistol.muzzle_position();
+  ViewmodelInput shot = Still(false);
+  shot.shots = 1;
+  rifle.Update(shot);
+  pistol.Update(shot);
+  CHECK(glm::length(pistol.muzzle_position() - rest) < 1.0e-6f);
+  CHECK(pistol.TakeLookKick().x > rifle.TakeLookKick().x);
+}
+
+TEST_CASE("lowered, the weapon is out of view and cannot aim") {
+  for (const bool pistol_weapon : {false, true}) {
+    CAPTURE(pistol_weapon);
+    Viewmodel viewmodel =
+        pistol_weapon ? Viewmodel(Glock17Geometry(), Glock17ViewmodelTuning())
+                      : Viewmodel(M16Geometry(), M16ViewmodelTuning());
+    const WeaponGeometry& geometry = viewmodel.geometry();
+    ViewmodelInput lowered = Still(true);
+    lowered.raise_fraction = 0.0f;
+    Settle(viewmodel, lowered);
+    CHECK(viewmodel.aim_fraction() == 0.0f);
+    // Every reference point is more than 40 degrees below the view axis (a
+    // 90 degree vertical field of view shows 45 degrees down).
+    for (const glm::vec3 point :
+         {geometry.muzzle, geometry.sight_eye_point, geometry.grip}) {
+      const glm::vec3 world = ToWorld(viewmodel, point);
+      CHECK(world.y < 0.0f);
+      CHECK(-world.y / glm::length(world) > std::sin(glm::radians(40.0f)));
+    }
+    // Part way: no aiming either; the blend is continuous.
+    lowered.raise_fraction = 0.99f;
+    Settle(viewmodel, lowered);
+    CHECK(viewmodel.aim_fraction() == 0.0f);
+    const glm::vec3 almost = viewmodel.muzzle_position();
+    lowered.raise_fraction = 1.0f;
+    lowered.aim_held = false;
+    Viewmodel reference = viewmodel;
+    reference.Update(lowered);
+    CHECK(glm::length(reference.muzzle_position() - almost) < 0.02f);
+  }
+}
+
+TEST_CASE("Reset clears blends, springs and the pending look kick") {
+  Viewmodel used(M16Geometry());
+  ViewmodelInput busy = Still(true);
+  busy.velocity = glm::vec3(4.0f, 0.0f, 0.0f);
+  busy.look_delta = glm::vec2(0.02f, 0.01f);
+  busy.shots = 1;
+  Settle(used, busy, 0.3f);
+  used.Reset();
+  CHECK(used.aim_fraction() == 0.0f);
+  CHECK(used.TakeLookKick() == glm::vec2(0.0f));
+  Viewmodel fresh(M16Geometry());
+  used.Update(Still(false));
+  fresh.Update(Still(false));
+  CHECK(glm::length(used.muzzle_position() - fresh.muzzle_position()) <
+        1.0e-6f);
+  CHECK(glm::length(used.muzzle_direction() - fresh.muzzle_direction()) <
+        1.0e-6f);
 }
 
 }  // namespace

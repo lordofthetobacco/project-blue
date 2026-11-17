@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -23,6 +24,7 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+#include "animation/clip.h"
 #include "camera/look.h"
 #include "camera/projection.h"
 #include "core/log.h"
@@ -34,10 +36,12 @@
 #include "scene/scene_serializer.h"
 #include "shader/shader_compiler.h"
 #include "weapon/firearm.h"
+#include "weapon/loadout.h"
 #include "weapon/projectile_system.h"
-#include "weapon/rifle_geometry.h"
 #include "weapon/target_log.h"
 #include "weapon/viewmodel.h"
+#include "weapon/weapon_geometry.h"
+#include "weapon/weapon_specs.h"
 
 namespace blue {
 
@@ -101,6 +105,20 @@ constexpr const char* kHouseModel = "house.obj";
 constexpr glm::vec3 kHousePosition{-9.0f, 0.0f, -3.0f};
 
 constexpr const char* kRifleModel = "m16.obj";
+constexpr const char* kPistolModel = "glock/glock17.glb";
+// The pistol's authored firing animation is split into one clip per node
+// (trigger, slide, barrel, whole gun); merged, they are one shot.
+constexpr std::string_view kPistolFireClipName = "fire";
+// Nodes of the pistol model that are not drawn: "Glock_parts_ORIGINAL_combined"
+// is a static copy of the Barrel, Frame_Parts, Guide_Rod, Slide and Trigger
+// meshes merged into one, which would hide the moving slide and trigger and
+// z-fight with them.
+constexpr std::string_view kPistolHiddenNodes[] = {
+    "Glock_parts_ORIGINAL_combined"};
+// Fully aimed vertical FOV as a fraction of the base one, per weapon: the
+// pistol's sights are held at arm's length and magnify less than the rifle's
+// cheek weld (the rifle keeps player::PlayerTuning's default).
+constexpr float kPistolAimFovScale = 0.9f;
 constexpr const char* kBulletMesh = "builtin:cube";
 // A bullet is drawn as a thin box trailing it by the distance it covers in
 // this time (about 4 m at the muzzle), never reaching back past the muzzle.
@@ -208,6 +226,8 @@ std::string ShaderDirectory() {
       {Action::kAim, "aim"},
       {Action::kReload, "reload"},
       {Action::kToggleFireMode, "fire mode"},
+      {Action::kEquipPistol, "pistol"},
+      {Action::kEquipRifle, "rifle"},
       {Action::kCycleCamera, "camera"},
       {Action::kPush, "push"},
       {Action::kToggleCascadeDebug, "cascades"},
@@ -253,12 +273,33 @@ std::string ShaderDirectory() {
   return text;
 }
 
-// Returns the viewmodel tuning that zeroes the sights for `spec`'s bullets.
-[[nodiscard]] weapon::ViewmodelTuning RifleViewmodelTuning(
-    const weapon::FirearmSpec& spec) {
-  weapon::ViewmodelTuning tuning;
-  tuning.muzzle_velocity = spec.muzzle_velocity;
-  return tuning;
+[[nodiscard]] weapon::Loadout MakeLoadout() {
+  return weapon::Loadout(weapon::Glock17Spec(), weapon::M16Spec());
+}
+
+// Indexed by weapon::WeaponSlot.
+static_assert(static_cast<int>(weapon::WeaponSlot::kPistol) == 0 &&
+              static_cast<int>(weapon::WeaponSlot::kRifle) == 1);
+[[nodiscard]] std::array<weapon::Viewmodel, weapon::kWeaponSlotCount>
+MakeViewmodels() {
+  return {
+      weapon::Viewmodel(weapon::Glock17Geometry(),
+                        weapon::Glock17ViewmodelTuning()),
+      weapon::Viewmodel(weapon::M16Geometry(), weapon::M16ViewmodelTuning()),
+  };
+}
+
+// Returns the slot whose key was pressed this frame; the rifle wins if both
+// were.
+[[nodiscard]] std::optional<weapon::WeaponSlot> SelectedSlot(
+    const input::InputFrame& input) {
+  if (input.actions.pressed(input::Action::kEquipRifle)) {
+    return weapon::WeaponSlot::kRifle;
+  }
+  if (input.actions.pressed(input::Action::kEquipPistol)) {
+    return weapon::WeaponSlot::kPistol;
+  }
+  return std::nullopt;
 }
 
 // Returns the transform that turns the builtin unit cube into a box centred
@@ -318,13 +359,16 @@ App::App(const CliOptions& options)
     : window_("Project Blue", kInitialWidth, kInitialHeight),
       renderer_(window_, ShaderDirectory(), kShaderCompileMode),
       mesh_cache_(renderer_),
+      model_cache_(renderer_),
       physics_world_(physics_runtime_),
       scene_physics_(physics_world_),
       overlay_(window_, renderer_),
       scene_path_(options.scene_path.value_or(kDefaultScenePath)),
       settings_path_(InputSettingsPath()),
-      viewmodel_(weapon::M16Geometry(), RifleViewmodelTuning(firearm_.spec())),
+      loadout_(MakeLoadout()),
+      viewmodels_(MakeViewmodels()),
       rifle_mesh_path_(SamplePath(kRifleModel)) {
+  LoadPistolModel();
   settings_ = input::LoadInputSettings(settings_path_);
   input_.set_bindings(settings_.bindings);
   help_text_ = BuildHelpText(settings_.bindings);
@@ -334,6 +378,56 @@ App::App(const CliOptions& options)
   RebuildPhysics();
   FindTargets();
   PlacePlayerAtSceneCamera();
+  ApplyWeaponToPlayer();
+}
+
+void App::LoadPistolModel() {
+  pistol_model_ = model_cache_.Get(SamplePath(kPistolModel));
+  if (pistol_model_ == nullptr) {
+    return;  // The cache logged why.
+  }
+  pistol_fire_clip_ = animation::MergeClips(pistol_model_->clips,
+                                            std::string(kPistolFireClipName));
+  pistol_animator_.emplace(&pistol_model_->hierarchy, &pistol_fire_clip_);
+  pistol_world_.assign(pistol_model_->hierarchy.nodes.size(), glm::mat4(1.0f));
+  for (const render::UploadedPart& part : pistol_model_->parts) {
+    const std::string_view node_name =
+        pistol_model_->hierarchy.nodes[static_cast<size_t>(part.node)].name;
+    if (std::ranges::find(kPistolHiddenNodes, node_name) ==
+        std::ranges::end(kPistolHiddenNodes)) {
+      pistol_parts_.push_back(part);
+    }
+  }
+  if (pistol_fire_clip_.channels.empty()) {
+    core::log::Warn("Pistol model has no animation: it will not cycle");
+  }
+}
+
+void App::ResetLoadout() {
+  loadout_ = MakeLoadout();
+  for (weapon::Viewmodel& viewmodel : viewmodels_) {
+    viewmodel.Reset();
+  }
+  if (pistol_animator_) {
+    pistol_animator_->Reset();
+  }
+  ApplyWeaponToPlayer();
+}
+
+void App::OnWeaponChanged() {
+  active_viewmodel().Reset();
+  if (loadout_.active() == weapon::WeaponSlot::kPistol && pistol_animator_) {
+    pistol_animator_->Reset();
+  }
+  ApplyWeaponToPlayer();
+}
+
+void App::ApplyWeaponToPlayer() {
+  player::PlayerTuning tuning = player_.tuning();
+  tuning.aim_fov_scale = loadout_.active() == weapon::WeaponSlot::kPistol
+                             ? kPistolAimFovScale
+                             : player::PlayerTuning{}.aim_fov_scale;
+  player_.set_tuning(tuning);
 }
 
 void App::PlacePlayerAtSceneCamera() {
@@ -399,15 +493,23 @@ void App::PushObject() {
 
 void App::UpdateWeapon(const input::InputFrame& input, float step) {
   using input::Action;
-  const weapon::FirearmEvents events = firearm_.Update(
-      {.trigger_held = input.actions.held(Action::kFire),
-       .reload_pressed = input.actions.pressed(Action::kReload),
-       .fire_mode_pressed = input.actions.pressed(Action::kToggleFireMode),
-       .can_fire = !player_.sprinting()},
+  const weapon::LoadoutEvents loadout_events = loadout_.Update(
+      {.select = SelectedSlot(input),
+       .firearm = {.trigger_held = input.actions.held(Action::kFire),
+                   .reload_pressed = input.actions.pressed(Action::kReload),
+                   .fire_mode_pressed =
+                       input.actions.pressed(Action::kToggleFireMode),
+                   .can_fire = !player_.sprinting()}},
       step);
+  const weapon::FirearmEvents& events = loadout_events.firearm;
+  if (loadout_events.weapon_changed) {
+    OnWeaponChanged();
+  }
 
+  const weapon::Firearm& firearm = loadout_.active_firearm();
+  weapon::Viewmodel& viewmodel = active_viewmodel();
   const player::PlayerView& view = player_.view();
-  viewmodel_.Update({
+  viewmodel.Update({
       .eye_position = view.eye_position,
       .look = view.look,
       .roll = view.roll,
@@ -417,8 +519,9 @@ void App::UpdateWeapon(const input::InputFrame& input, float step) {
       .velocity = player_.velocity(),
       .look_delta = player_.look_delta(),
       .shots = events.shots,
-      .reload_fraction = firearm_.reload_fraction(),
-      .reloading = firearm_.reloading(),
+      .reload_fraction = firearm.reload_fraction(),
+      .reloading = firearm.reloading(),
+      .raise_fraction = loadout_.raise_fraction(),
       .dt = step,
   });
 
@@ -426,19 +529,25 @@ void App::UpdateWeapon(const input::InputFrame& input, float step) {
     FireBullet(events.shot_age[static_cast<size_t>(i)]);
   }
   // Shows in the view from the next frame on, like mouse look.
-  const glm::vec2 kick = viewmodel_.TakeLookKick();
+  const glm::vec2 kick = viewmodel.TakeLookKick();
   player_.AddLookKick(kick.x, kick.y);
+
+  // The holstered pistol keeps its last pose; it is reset when drawn.
+  if (loadout_.active() == weapon::WeaponSlot::kPistol && pistol_animator_) {
+    pistol_animator_->Update(events.shots, firearm.bolt_locked_back(), step);
+  }
 }
 
 void App::FireBullet(float age) {
-  const weapon::FirearmSpec& spec = firearm_.spec();
-  const glm::vec3 muzzle = viewmodel_.muzzle_position();
+  const weapon::FirearmSpec& spec = loadout_.active_firearm().spec();
+  const weapon::Viewmodel& viewmodel = active_viewmodel();
+  const glm::vec3 muzzle = viewmodel.muzzle_position();
   // The bullet leaves the bore along the posed barrel and keeps the
   // shooter's own motion.
   const glm::vec3 velocity =
-      viewmodel_.muzzle_direction() * spec.muzzle_velocity + player_.velocity();
+      viewmodel.muzzle_direction() * spec.muzzle_velocity + player_.velocity();
 
-  // The rifle is not a physics body and can poke through a wall the player
+  // The weapon is not a physics body and can poke through a wall the player
   // stands against: then the bullet hits where the line from the eye to the
   // muzzle enters the wall instead of starting on the far side.
   const int shot_number = ++shots_fired_;
@@ -670,6 +779,8 @@ void App::ReloadCurrentScene() {
     camera_.SetFromSceneCamera(scene_.camera);
     RebuildPhysics();
     ClearBullets();  // Their impacts would name bodies that are gone.
+    // A reload is a fresh start: both weapons full, the rifle in hand.
+    ResetLoadout();
     FindTargets();
     PlacePlayerAtSceneCamera();
     status_ = TimedStatus("Loaded", scene_path_, start);
@@ -716,9 +827,10 @@ int App::Run() {
     }
     const float step = std::min(frame_seconds, kMaxSimulationStep);
     if (view_mode_ == ViewMode::kPlayer) {
-      // Both hands are busy during a reload: no aiming down the sights.
+      // Both hands are busy during a reload or a weapon switch: no aiming
+      // down the sights.
       input::InputFrame player_input = input;
-      if (firearm_.reloading()) {
+      if (loadout_.active_firearm().reloading() || loadout_.switching()) {
         player_input.actions.SetHeld(input::Action::kAim, false);
       }
       player_.Update(player_input, settings_, step);
@@ -741,8 +853,11 @@ int App::Run() {
     if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
       UpdateWeapon(input, step);
     } else {
-      // Debug cameras neither fire nor aim; a running reload still finishes.
-      (void)firearm_.Update({}, step);
+      // Debug cameras neither fire, aim nor switch weapons; a running reload
+      // or switch still finishes.
+      if (loadout_.Update({}, step).weapon_changed) {
+        OnWeaponChanged();
+      }
     }
     projectiles_.Update(physics_world_, scene_.gravity, step);
     for (const weapon::Impact& impact : projectiles_.impacts()) {
@@ -880,6 +995,8 @@ void App::HandleAction(input::Action action) {
     case Action::kAim:
     case Action::kReload:
     case Action::kToggleFireMode:
+    case Action::kEquipPistol:
+    case Action::kEquipRifle:
     case Action::kCount:
       break;
   }
@@ -961,31 +1078,40 @@ ui::HitLogOverlayInfo App::MakeHitLogOverlayInfo() const {
 }
 
 std::optional<render::ReticleSight> App::CurrentSight() const {
-  if (view_mode_ != ViewMode::kPlayer || !player_.spawned()) {
+  const weapon::Viewmodel& viewmodel = active_viewmodel();
+  // Iron sights (the pistol) have no lens and no dot.
+  if (view_mode_ != ViewMode::kPlayer || !player_.spawned() ||
+      !(viewmodel.lens_radius() > 0.0f)) {
     return std::nullopt;
   }
   // The model has no glass: the window is drawn in the hood's front opening,
   // lifted a hair towards the eye so it never fights the hood's own faces.
-  const glm::vec3 axis = viewmodel_.optic_axis();
+  const glm::vec3 axis = viewmodel.optic_axis();
   const glm::mat4 lift =
       glm::translate(glm::mat4(1.0f), -axis * kLensLiftTowardsEye);
   render::ReticleSight sight;
-  sight.lens = lift * viewmodel_.lens_matrix();
+  sight.lens = lift * viewmodel.lens_matrix();
   sight.axis = axis;
   return sight;
 }
 
 ui::WeaponOverlayInfo App::MakeWeaponOverlayInfo() const {
+  const weapon::Firearm& firearm = loadout_.active_firearm();
   return {
-      .rounds_in_magazine = firearm_.rounds_in_magazine(),
-      .magazine_inserted = firearm_.magazine_inserted(),
-      .round_chambered = firearm_.round_chambered(),
-      .bolt_locked_back = firearm_.bolt_locked_back(),
-      .reloading = firearm_.reloading(),
-      .reload_fraction = firearm_.reload_fraction(),
+      .name = firearm.spec().display_name,
+      .switching_to =
+          loadout_.switching()
+              ? loadout_.firearm(loadout_.selected()).spec().display_name
+              : std::string_view(),
+      .rounds_in_magazine = firearm.rounds_in_magazine(),
+      .magazine_inserted = firearm.magazine_inserted(),
+      .round_chambered = firearm.round_chambered(),
+      .bolt_locked_back = firearm.bolt_locked_back(),
+      .reloading = firearm.reloading(),
+      .reload_fraction = firearm.reload_fraction(),
       .fire_mode =
-          firearm_.fire_mode() == weapon::FireMode::kAuto ? "AUTO" : "SEMI",
-      .spare_magazines = firearm_.spare_magazines(),
+          firearm.fire_mode() == weapon::FireMode::kAuto ? "AUTO" : "SEMI",
+      .spare_magazines = firearm.spare_magazines(),
       .projectiles = static_cast<int>(projectiles_.projectiles().size()),
       .impacts = impacts_total_,
   };
@@ -993,10 +1119,12 @@ ui::WeaponOverlayInfo App::MakeWeaponOverlayInfo() const {
 
 void App::AppendWeaponDraws() {
   if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
-    if (const std::optional<render::CachedMesh> rifle =
-            mesh_cache_.Get(rifle_mesh_path_)) {
+    if (loadout_.active() == weapon::WeaponSlot::kPistol) {
+      AppendPistolDraws();
+    } else if (const std::optional<render::CachedMesh> rifle =
+                   mesh_cache_.Get(rifle_mesh_path_)) {
       draws_.push_back({.mesh = rifle->id,
-                        .transform = viewmodel_.model_matrix(),
+                        .transform = active_viewmodel().model_matrix(),
                         .bounds = rifle->bounds});
     }
   }
@@ -1023,6 +1151,20 @@ void App::AppendWeaponDraws() {
     draws_.push_back({.mesh = cube->id,
                       .transform = impact_marks_[i],
                       .bounds = cube->bounds});
+  }
+}
+
+void App::AppendPistolDraws() {
+  if (pistol_model_ == nullptr || !pistol_animator_) {
+    return;
+  }
+  pistol_animator_->ComputeWorld(active_viewmodel().model_matrix(),
+                                 pistol_world_);
+  for (const render::UploadedPart& part : pistol_parts_) {
+    draws_.push_back(
+        {.mesh = part.mesh,
+         .transform = pistol_world_[static_cast<size_t>(part.node)],
+         .bounds = part.bounds});
   }
 }
 

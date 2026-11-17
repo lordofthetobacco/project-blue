@@ -11,6 +11,10 @@ FetchContent_MakeAvailable(doctest)
 add_executable(blue_tests
     test_main.cc
     model_importer_test.cc
+    animated_model_test.cc
+    animation_clip_test.cc
+    animation_clip_player_test.cc
+    animation_hierarchy_test.cc
     scene_serializer_test.cc
     scene_test.cc
     placement_test.cc
@@ -37,9 +41,11 @@ add_executable(blue_tests
     cascades_test.cc
     firearm_test.cc
     projectile_system_test.cc
-    rifle_geometry_test.cc
+    loadout_test.cc
     target_log_test.cc
     viewmodel_test.cc
+    weapon_animator_test.cc
+    weapon_geometry_test.cc
     shader_compiler_test.cc
     shader_watcher_test.cc
 )
@@ -53,6 +59,6 @@ target_compile_definitions(blue_tests PRIVATE
 
 blue_target_defaults(blue_tests ALLOW_EXCEPTIONS_AND_RTTI)
 
-target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_input blue_camera blue_input_mapper blue_physics blue_player blue_weapon blue_lighting blue_shader doctest::doctest)
+target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_animation blue_input blue_camera blue_input_mapper blue_physics blue_player blue_weapon blue_lighting blue_shader doctest::doctest)
 
 add_test(NAME blue_tests COMMAND blue_tests)

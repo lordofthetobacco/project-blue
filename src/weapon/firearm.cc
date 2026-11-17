@@ -16,11 +16,12 @@ constexpr float kSecondsPerMinute = 60.0f;
 }  // namespace
 
 Firearm::Firearm(const FirearmSpec& spec)
-    : spec_(spec), fire_mode_(spec.fire_mode) {
+    : spec_(spec),
+      fire_mode_(spec.select_fire ? spec.fire_mode : FireMode::kSemi) {
   spec_.magazine_capacity = std::max(spec_.magazine_capacity, 0);
   spec_.spare_magazines = std::max(spec_.spare_magazines, 0);
   magazine_ = spec_.magazine_capacity;
-  // Room for every magazine the rifle carries, so reloads never allocate.
+  // Room for every magazine the weapon carries, so reloads never allocate.
   spare_magazines_.reserve(static_cast<size_t>(spec_.spare_magazines) + 1);
   if (spec_.magazine_capacity > 0) {
     spare_magazines_.assign(static_cast<size_t>(spec_.spare_magazines),
@@ -31,7 +32,7 @@ Firearm::Firearm(const FirearmSpec& spec)
 FirearmEvents Firearm::Update(const FirearmInput& input, float dt) {
   dt = std::max(dt, 0.0f);
   FirearmEvents events;
-  if (input.fire_mode_pressed) {
+  if (input.fire_mode_pressed && spec_.select_fire) {
     fire_mode_ =
         fire_mode_ == FireMode::kSemi ? FireMode::kAuto : FireMode::kSemi;
     events.fire_mode_changed = true;
@@ -46,6 +47,22 @@ FirearmEvents Firearm::Update(const FirearmInput& input, float dt) {
   trigger.can_fire = input.can_fire && !reload_blocks;
   UpdateTrigger(trigger, dt, events);
   return events;
+}
+
+bool Firearm::CancelReload() {
+  if (!reloading()) {
+    return false;
+  }
+  // Spares are never empty; a magazine of a zero-capacity weapon is dropped.
+  if (incoming_magazine_ > 0) {
+    spare_magazines_.push_back(incoming_magazine_);
+  }
+  incoming_magazine_ = -1;
+  reload_duration_ = 0.0f;
+  reload_elapsed_ = 0.0f;
+  empty_reload_ = false;
+  reload_stage_ = 0;
+  return true;
 }
 
 float Firearm::reload_fraction() const {

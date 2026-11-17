@@ -53,4 +53,11 @@ TEST_CASE("Trigger and aim are held, reload and fire mode edge-triggered") {
   CHECK(ParseAction("toggle_fire_mode") == Action::kToggleFireMode);
 }
 
+TEST_CASE("Weapon slot selection is edge-triggered") {
+  CHECK(IsEdgeTriggered(Action::kEquipPistol));
+  CHECK(IsEdgeTriggered(Action::kEquipRifle));
+  CHECK(ParseAction("equip_pistol") == Action::kEquipPistol);
+  CHECK(ParseAction("equip_rifle") == Action::kEquipRifle);
+}
+
 }  // namespace blue::input
