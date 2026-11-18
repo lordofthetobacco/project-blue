@@ -1,0 +1,6 @@
+# Project Blue material: M16 suppressor. Matte black high-temperature
+# finish on steel: very dark metal, rough.
+name = Silencer
+base_color = 0.1 0.1 0.1 1
+metallic = 1
+roughness = 0.75

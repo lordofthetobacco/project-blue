@@ -69,6 +69,13 @@ FetchContent_Declare(assimp
     GIT_SHALLOW    TRUE
     SYSTEM)
 
+# --- stb (header-only; only stb_image is used, compiled in src/asset/image_decoder.cc)
+# Pinned to a commit: stb has no release tags.
+FetchContent_Declare(stb
+    URL      https://github.com/nothings/stb/archive/fe3a2a73bfd5f38f8117d223896de72cc2aea30c.tar.gz
+    URL_HASH SHA256=06f97b11cf13645e6762c34a248d748c154235b04adf50d10e8266ae6d4ea555
+    SYSTEM)
+
 # --- JoltPhysics ---------------------------------------------------------------
 # /MD like the rest of the project; OVERRIDE_CXX_FLAGS OFF keeps Jolt from rewriting the
 # global CMAKE_CXX_FLAGS that first-party targets inherit.
@@ -97,7 +104,7 @@ FetchContent_Declare(JoltPhysics
     SOURCE_SUBDIR  Build
     SYSTEM)
 
-FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui assimp)
+FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui assimp stb)
 
 # Jolt only adds /arch:AVX2 and its JPH_USE_* definitions when CMAKE_VS_PLATFORM_NAME is
 # x64, which is empty under Ninja. Set it just for Jolt so it keeps its default AVX2 build.
@@ -124,3 +131,7 @@ target_include_directories(imgui SYSTEM PUBLIC
 )
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL3::SDL3-static)
+
+# stb has no CMake project; SYSTEM keeps its warnings out of /W4 /WX builds.
+add_library(stb INTERFACE)
+target_include_directories(stb SYSTEM INTERFACE ${stb_SOURCE_DIR})

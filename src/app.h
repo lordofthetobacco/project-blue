@@ -16,16 +16,19 @@
 #include "camera/camera_controller.h"
 #include "input/action.h"
 #include "input/input_settings.h"
+#include "lighting/environment.h"
 #include "physics/physics_runtime.h"
 #include "physics/physics_world.h"
 #include "physics/scene_physics.h"
 #include "platform/input_mapper.h"
 #include "platform/window.h"
 #include "player/player_controller.h"
+#include "render/material_cache.h"
 #include "render/mesh_cache.h"
 #include "render/model_cache.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
+#include "ui/editor_panels.h"
 #include "ui/perf_overlay.h"
 #include "weapon/loadout.h"
 #include "weapon/projectile_system.h"
@@ -105,6 +108,31 @@ class App {
   void AddImports(const std::vector<std::string>& imports);
   // Adds the shooting range's static target plates to the default scene.
   void AddRangeTargets();
+  // Adds the metallic x roughness sweep of preview spheres to the default
+  // scene, beside the spawn and clear of the firing line.
+  void AddPreviewSpheres();
+  // Sets the default scene's sky, sun, point light and exposure (see
+  // scene/default_lighting.h).
+  void ApplyDefaultLighting();
+  // Makes the renderer's environment match scene_.environment: loads the
+  // HDRI (or the generated default sky) when its path differs from the one
+  // loaded, or always when `force`, and estimates its sun; otherwise only
+  // updates intensity and rotation. A failed load keeps the default sky.
+  void LoadEnvironment(bool force);
+  // Returns the material that replaces all of `entity`'s own materials: its
+  // material file, else the target steel for target plates, else nothing.
+  [[nodiscard]] std::optional<render::MaterialId> EntityMaterial(
+      const scene::Entity& entity);
+  // Fills weapon_slots_ with the weapons' and effects' materials; call once
+  // after they are loaded.
+  void BuildWeaponMaterialSlots();
+  // Refills entity_slots_ with the materials of the editor's selection.
+  void UpdateEntityMaterialSlots();
+  // Selects the entity in the middle of the view in the editor.
+  void PickEntity();
+  // Builds the editor panels (cursor free and overlay shown) and carries out
+  // what they request.
+  void UpdateEditor();
   void SaveCurrentScene();
   void ReloadCurrentScene();
   // Recreates the physics bodies of `scene_`; call after every scene change.
@@ -156,6 +184,9 @@ class App {
   // Returns the reflex sight as posed this frame, nullopt outside the
   // player view.
   [[nodiscard]] std::optional<render::ReticleSight> CurrentSight() const;
+  // Creates the materials of the things drawn with the builtin cube that are
+  // not scene entities of their own look: tracers, impact marks, targets.
+  void CreateEffectMaterials();
   [[nodiscard]] render::SceneView BuildSceneView();
 
   // Declaration order is construction order and, reversed, destruction order:
@@ -168,11 +199,13 @@ class App {
   render::Renderer renderer_;
   render::MeshCache mesh_cache_;
   render::ModelCache model_cache_;
+  render::MaterialCache material_cache_;
   physics::PhysicsRuntime physics_runtime_;
   physics::PhysicsWorld physics_world_;
   physics::ScenePhysics scene_physics_;
   player::PlayerController player_;  // Owns a character in physics_world_.
   ui::PerfOverlay overlay_;
+  ui::EditorPanels editor_;
 
   scene::Scene scene_;
   std::string scene_path_;
@@ -224,6 +257,27 @@ class App {
   std::vector<RangeTargetEntry> targets_;
   std::vector<std::string> target_names_;  // Parallel to targets_.
   weapon::TargetLog target_log_{kHitLogCapacity, kMaxTargets};
+
+  // Owned by renderer_; created once at startup (CreateEffectMaterials).
+  // Tracers glow (emissive, bright enough for bloom), impact marks are dark
+  // and matte, target plates bare steel.
+  render::MaterialId tracer_material_ = render::kDefaultMaterial;
+  render::MaterialId impact_material_ = render::kDefaultMaterial;
+  render::MaterialId target_material_ = render::kDefaultMaterial;
+  // Post-processing settings edited in the editor's Post and Environment
+  // panels; not saved. Its exposure is ignored: the scene's
+  // environment.exposure_ev is used (and saved) instead.
+  render::PostSettings post_settings_;
+  // The materials the editor lists: the weapons' and effects' (built once
+  // at startup) and the selected entity's (rebuilt while the editor shows).
+  std::vector<ui::MaterialSlot> weapon_slots_;
+  std::vector<ui::MaterialSlot> entity_slots_;
+  // The HDRI path the renderer's environment was loaded from (empty for the
+  // generated default sky); nullopt before the first LoadEnvironment().
+  std::optional<std::string> environment_source_;
+  // The sun found in the loaded environment (EstimateSun), for aligning the
+  // scene's sun with it.
+  lighting::SunEstimate environment_sun_;
 
   bool mouse_captured_ = false;
   bool shadows_enabled_ = true;

@@ -48,6 +48,10 @@ add_executable(blue_tests
     weapon_geometry_test.cc
     shader_compiler_test.cc
     shader_watcher_test.cc
+    material_file_test.cc
+    image_decoder_test.cc
+    environment_test.cc
+    sample_content_test.cc
 )
 
 target_include_directories(blue_tests PRIVATE ${CMAKE_SOURCE_DIR})
@@ -59,6 +63,6 @@ target_compile_definitions(blue_tests PRIVATE
 
 blue_target_defaults(blue_tests ALLOW_EXCEPTIONS_AND_RTTI)
 
-target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_asset blue_animation blue_input blue_camera blue_input_mapper blue_physics blue_player blue_weapon blue_lighting blue_shader doctest::doctest)
+target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_material blue_asset blue_animation blue_input blue_camera blue_input_mapper blue_physics blue_player blue_weapon blue_lighting blue_shader doctest::doctest)
 
 add_test(NAME blue_tests COMMAND blue_tests)

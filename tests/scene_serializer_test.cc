@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -31,6 +32,8 @@ constexpr uint32_t kEnvr = MakeFourcc('E', 'N', 'V', 'R');
 constexpr uint32_t kEnts = MakeFourcc('E', 'N', 'T', 'S');
 constexpr uint32_t kPhys = MakeFourcc('P', 'H', 'Y', 'S');
 constexpr uint32_t kSun = MakeFourcc('S', 'U', 'N', ' ');
+constexpr uint32_t kMats = MakeFourcc('M', 'A', 'T', 'S');
+constexpr uint32_t kIbl = MakeFourcc('I', 'B', 'L', ' ');
 constexpr uint32_t kNanBits = 0x7FC00000U;
 
 std::vector<std::byte> ReadWholeFile(const std::string& path) {
@@ -72,6 +75,11 @@ void ExpectSameScene(const Scene& a, const Scene& b) {
   CHECK(SameBits(a.sun.color, b.sun.color));
   CHECK(SameBits(a.sun.intensity, b.sun.intensity));
   CHECK(a.sun.casts_shadows == b.sun.casts_shadows);
+  CHECK(a.environment.hdri_path == b.environment.hdri_path);
+  CHECK(SameBits(a.environment.intensity, b.environment.intensity));
+  CHECK(
+      SameBits(a.environment.rotation_radians, b.environment.rotation_radians));
+  CHECK(SameBits(a.environment.exposure_ev, b.environment.exposure_ev));
 
   REQUIRE(a.entities.size() == b.entities.size());
   for (size_t i = 0; i < a.entities.size(); ++i) {
@@ -87,6 +95,7 @@ void ExpectSameScene(const Scene& a, const Scene& b) {
     }
     CHECK(a.entities[i].name == b.entities[i].name);
     CHECK(a.entities[i].mesh_path == b.entities[i].mesh_path);
+    CHECK(a.entities[i].material_path == b.entities[i].material_path);
     CHECK(SameBits(a.entities[i].transform.position,
                    b.entities[i].transform.position));
     CHECK(SameBits(a.entities[i].transform.rotation,
@@ -217,12 +226,14 @@ Scene MakeSampleScene() {
                             "models/teapot.obj",
                             {{1.0f, -2.0f, 3.5f},
                              glm::normalize(glm::quat(0.9f, 0.1f, -0.3f, 0.2f)),
-                             {2.0f, 0.5f, 1.25f}}, {}});
+                             {2.0f, 0.5f, 1.25f}},
+                            {}});
   scene.entities.push_back({"",
                             "builtin:plane",
                             {{0.0f, 0.1f, 0.0f},
                              glm::angleAxis(1.1f, glm::vec3(0.0f, 1.0f, 0.0f)),
-                             {10.0f, 1.0f, 10.0f}}, {}});
+                             {10.0f, 1.0f, 10.0f}},
+                            {}});
   scene.gravity = {0.5f, -3.711f, 0.25f};
   scene.entities[1].body = RigidBody{.motion = MotionType::kDynamic,
                                      .shape = ShapeType::kConvexHull,
@@ -851,6 +862,230 @@ TEST_CASE("save rejects an invalid sun without writing anything") {
   CHECK((saved.error() == SceneIoError::kInvalidScene));
   CHECK_FALSE(platform::PathExists(file));
   CHECK_FALSE(platform::PathExists(file + ".tmp"));
+}
+
+namespace {
+
+// Appends a MATS chunk with a record count of `count` and the given
+// (entity index, stored path) records.
+void WriteMaterialsChunk(
+    BinaryWriter& writer, uint32_t count,
+    const std::vector<std::pair<uint32_t, std::string>>& records) {
+  const size_t chunk = writer.BeginChunk(kMats);
+  writer.WriteU32(count);
+  for (const auto& [index, path] : records) {
+    writer.WriteU32(index);
+    writer.WriteString(path);
+  }
+  writer.EndChunk(chunk);
+}
+
+// Raw fields of an IBL chunk.
+struct IblFields {
+  std::string hdri_path = "sky.hdr";
+  float intensity = 1.5f;
+  float rotation = 0.25f;
+  float exposure = -1.0f;
+};
+
+void WriteIblChunk(BinaryWriter& writer, const IblFields& fields) {
+  const size_t chunk = writer.BeginChunk(kIbl);
+  writer.WriteString(fields.hdri_path);
+  writer.WriteF32(fields.intensity);
+  writer.WriteF32(fields.rotation);
+  writer.WriteF32(fields.exposure);
+  writer.EndChunk(chunk);
+}
+
+// Payload with ENVR, `entity_count` entities and `extra` chunks before or
+// after ENTS.
+std::vector<std::byte> MakeExtraPayload(uint32_t entity_count,
+                                        std::span<const std::byte> extra,
+                                        bool extra_first = false) {
+  BinaryWriter payload;
+  WriteEnvironmentChunk(payload);
+  if (extra_first) {
+    payload.WriteBytes(extra);
+  }
+  WriteEntitiesChunk(payload, entity_count);
+  if (!extra_first) {
+    payload.WriteBytes(extra);
+  }
+  return payload.bytes();
+}
+
+}  // namespace
+
+TEST_CASE("material paths and the environment round trip") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("scenes/lit.bscn");
+
+  Scene scene = MakeSampleScene();
+  scene.entities[1].mesh_path = dir.Child("models/teapot.obj");
+  scene.entities[0].material_path = dir.Child("materials/steel.bmat");
+  scene.entities[2].material_path = dir.Child("materials/ground.bmat");
+  scene.environment = {.hdri_path = dir.Child("env/sky.hdr"),
+                       .intensity = 0.75f,
+                       .rotation_radians = 1.25f,
+                       .exposure_ev = -0.5f};
+
+  REQUIRE(SaveScene(scene, file).ok());
+
+  const std::vector<std::byte> raw = ReadWholeFile(file);
+  for (const std::string_view stored :
+       {"../materials/steel.bmat", "../env/sky.hdr"}) {
+    const std::string text(stored);
+    CAPTURE(text);
+    CHECK_FALSE(
+        std::ranges::search(raw, std::as_bytes(std::span(stored))).empty());
+  }
+  const auto loaded = LoadScene(file);
+  REQUIRE(loaded.ok());
+  ExpectSameScene(scene, loaded.value());
+}
+
+TEST_CASE("MATS and IBL chunks are written only when not default") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("plain.bscn");
+  Scene scene = MakeSampleScene();
+  REQUIRE(SaveScene(scene, file).ok());
+  const std::vector<std::byte> raw = ReadWholeFile(file);
+  for (const std::string_view fourcc : {"MATS", "IBL "}) {
+    const std::string text(fourcc);
+    CAPTURE(text);
+    CHECK(std::ranges::search(raw, std::as_bytes(std::span(fourcc))).empty());
+  }
+
+  SUBCASE("an environment differing only in exposure is written") {
+    scene.environment.exposure_ev = 1.0f;
+    REQUIRE(SaveScene(scene, file).ok());
+    const auto loaded = LoadScene(file);
+    REQUIRE(loaded.ok());
+    CHECK(loaded.value().environment.exposure_ev == 1.0f);
+    CHECK(loaded.value().environment.hdri_path.empty());
+  }
+}
+
+TEST_CASE("files without MATS and IBL load with defaults") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("old.bscn");
+  WriteWholeFile(file, MakeFile(MakeExtraPayload(2, {})));
+  const auto loaded = LoadScene(file);
+  REQUIRE(loaded.ok());
+  for (const Entity& entity : loaded.value().entities) {
+    CHECK(entity.material_path.empty());
+  }
+  const Environment defaults;
+  CHECK(loaded.value().environment.hdri_path.empty());
+  CHECK(loaded.value().environment.intensity == defaults.intensity);
+  CHECK(loaded.value().environment.rotation_radians ==
+        defaults.rotation_radians);
+  CHECK(loaded.value().environment.exposure_ev == defaults.exposure_ev);
+}
+
+TEST_CASE("hand-built MATS and IBL chunks load, MATS before ENTS too") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("hand.bscn");
+  BinaryWriter extra;
+  WriteMaterialsChunk(extra, 2, {{0, "a.bmat"}, {2, "sub/b.bmat"}});
+  WriteIblChunk(extra, {});
+
+  for (const bool first : {false, true}) {
+    CAPTURE(first);
+    WriteWholeFile(file, MakeFile(MakeExtraPayload(3, extra.bytes(), first)));
+    const auto loaded = LoadScene(file);
+    REQUIRE(loaded.ok());
+    const std::string scene_dir =
+        core::ParentPath(platform::AbsolutePath(file));
+    CHECK(loaded.value().entities[0].material_path ==
+          core::JoinPath(scene_dir, "a.bmat"));
+    CHECK(loaded.value().entities[1].material_path.empty());
+    CHECK(loaded.value().entities[2].material_path ==
+          core::JoinPath(scene_dir, "sub/b.bmat"));
+    CHECK(loaded.value().environment.hdri_path ==
+          core::JoinPath(scene_dir, "sky.hdr"));
+    CHECK(loaded.value().environment.intensity == 1.5f);
+    CHECK(loaded.value().environment.rotation_radians == 0.25f);
+    CHECK(loaded.value().environment.exposure_ev == -1.0f);
+  }
+}
+
+TEST_CASE("malformed MATS and IBL chunks are rejected as corrupt") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("bad.bscn");
+  const float nan = std::bit_cast<float>(kNanBits);
+
+  const auto expect_corrupt = [&](const BinaryWriter& extra) {
+    WriteWholeFile(file, MakeFile(MakeExtraPayload(2, extra.bytes())));
+    const auto loaded = LoadScene(file);
+    REQUIRE_FALSE(loaded.ok());
+    CHECK((loaded.error() == SceneIoError::kCorrupt ||
+           loaded.error() == SceneIoError::kTruncated));
+  };
+  BinaryWriter extra;
+
+  SUBCASE("MATS entity index out of range") {
+    WriteMaterialsChunk(extra, 1, {{2, "a.bmat"}});
+  }
+  SUBCASE("MATS duplicate entity") {
+    WriteMaterialsChunk(extra, 2, {{1, "a.bmat"}, {1, "b.bmat"}});
+  }
+  SUBCASE("MATS empty path") { WriteMaterialsChunk(extra, 1, {{0, ""}}); }
+  SUBCASE("MATS hostile count") {
+    WriteMaterialsChunk(extra, 0xFFFFFFFFU, {{0, "a.bmat"}});
+  }
+  SUBCASE("MATS count below the records") {
+    WriteMaterialsChunk(extra, 1, {{0, "a.bmat"}, {1, "b.bmat"}});
+  }
+  SUBCASE("duplicate MATS chunk") {
+    WriteMaterialsChunk(extra, 1, {{0, "a.bmat"}});
+    WriteMaterialsChunk(extra, 1, {{1, "b.bmat"}});
+  }
+  SUBCASE("IBL negative intensity") {
+    WriteIblChunk(extra, {.intensity = -1.0f});
+  }
+  SUBCASE("IBL non-finite values") { WriteIblChunk(extra, {.rotation = nan}); }
+  SUBCASE("IBL truncated") {
+    const size_t chunk = extra.BeginChunk(kIbl);
+    extra.WriteString("sky.hdr");
+    extra.WriteF32(1.0f);
+    extra.EndChunk(chunk);
+  }
+  SUBCASE("IBL too long") {
+    const size_t chunk = extra.BeginChunk(kIbl);
+    extra.WriteString("");
+    for (int i = 0; i < 4; ++i) {
+      extra.WriteF32(1.0f);
+    }
+    extra.EndChunk(chunk);
+  }
+  SUBCASE("duplicate IBL chunk") {
+    WriteIblChunk(extra, {});
+    WriteIblChunk(extra, {});
+  }
+  expect_corrupt(extra);
+}
+
+TEST_CASE("save rejects an invalid environment without writing anything") {
+  const testing::ScratchDirectory dir("scene");
+  const std::string file = dir.Child("invalid_env.bscn");
+  const float nan = std::bit_cast<float>(kNanBits);
+
+  Scene scene;
+  SUBCASE("negative intensity") { scene.environment.intensity = -0.5f; }
+  SUBCASE("non-finite rotation") { scene.environment.rotation_radians = nan; }
+  SUBCASE("non-finite exposure") { scene.environment.exposure_ev = nan; }
+  SUBCASE("oversized material path") {
+    scene.entities.push_back(
+        {.name = "e",
+         .mesh_path = "builtin:cube",
+         .material_path = dir.Child(std::string(5000, 'm'))});
+  }
+
+  const auto saved = SaveScene(scene, file);
+  REQUIRE_FALSE(saved.ok());
+  CHECK((saved.error() == SceneIoError::kInvalidScene));
+  CHECK_FALSE(platform::PathExists(file));
 }
 
 }  // namespace blue::scene

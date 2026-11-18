@@ -1,0 +1,7 @@
+# Project Blue material: M16 receiver, barrel and sights (overrides the MTL's
+# BaseMetal). Manganese-phosphate (parkerised) steel: a dark, evenly matte
+# metal. Base colour is the metal's reflectance, kept dark for the coating.
+name = BaseMetal
+base_color = 0.2 0.2 0.21 1
+metallic = 1
+roughness = 0.5

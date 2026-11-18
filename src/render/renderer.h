@@ -7,113 +7,93 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include <glm/mat4x4.hpp>
-#include <glm/vec3.hpp>
-
+#include "asset/image_decoder.h"
 #include "asset/mesh_data.h"
 #include "camera/frustum.h"
 #include "lighting/cascades.h"
+#include "material/material.h"
 #include "platform/window.h"
-#include "render/buffer.h"
+#include "render/draw_list.h"
+#include "render/environment.h"
 #include "render/frame_config.h"
+#include "render/frame_globals.h"
 #include "render/gpu_timer.h"
-#include "render/image.h"
+#include "render/material_system.h"
 #include "render/mesh.h"
-#include "render/pipeline.h"
+#include "render/passes/bloom_pass.h"
+#include "render/passes/depth_prepass.h"
+#include "render/passes/frame_context.h"
+#include "render/passes/mesh_pass.h"
+#include "render/passes/present_pass.h"
+#include "render/passes/reticle_pass.h"
+#include "render/passes/shadow_pass.h"
+#include "render/passes/skybox_pass.h"
+#include "render/passes/ssao_pass.h"
+#include "render/passes/tonemap_pass.h"
+#include "render/render_targets.h"
+#include "render/samplers.h"
+#include "render/scene_view.h"
 #include "render/shader_programs.h"
 #include "render/swapchain.h"
+#include "render/texture_cache.h"
 #include "render/vulkan_context.h"
-#include "scene/scene.h"
 #include "shader/shader_compiler.h"
+
+// How a frame is built
+// --------------------
+// Renderer::RecordCommands() is the wiring: it records the passes in order,
+// each wrapped in a GPU timer scope:
+//
+//   shadow cascades      ShadowPass        (sun depth, 4 layers)
+//   depth pre-pass       DepthPrepass      draw list -> depth
+//   ssao                 SsaoPass          depth -> ssao (half res, blurred)
+//   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
+//                        SkyboxPass, ReticlePass -> EndScenePass
+//   bloom                BloomPass         hdr -> bloom mip chain
+//   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
+//   present              PresentPass       ldr -> swapchain (FXAA)
+//   ui                   RecordUiPass      ImGui on the swapchain, -> present
+//
+// The visible submeshes are culled and sorted once per frame (DrawList) and
+// shared by the depth pre-pass and the mesh pass. Disabled effects
+// (SceneView::post) are skipped entirely.
+//
+// A pass is a class (or a pair of functions) in src/render/passes/ with its
+// own shaders. It gets the shared state it needs in its constructor
+// (VulkanContext, ShaderPrograms for hot-reloadable pipelines, the
+// FrameGlobals set layout, ...) and records with a FrameContext. To add one:
+//   1. Write passes/<name>_pass.{h,cc} and shaders/<name>.frag. A full-screen
+//      effect wraps a FullscreenPass (render/fullscreen_pass.h): it owns the
+//      input descriptor sets and the pipeline; set its inputs in a
+//      BindTargets() called at startup and after every swapchain rebuild.
+//   2. Add a GpuScope (render/gpu_timer.h) and a line in RecordCommands().
+//   3. Add the sources to CMakeLists.txt. Window-sized images belong in
+//      RenderTargets; scene-wide inputs (environment cube, BRDF LUT, AO) are
+//      already bindings of FrameGlobals' set 0 (render/frame_globals.h).
+// Each pass does its own image barriers: it knows the layout its inputs come
+// in (documented on the pass) and the scope of the previous frame's last use
+// of an image it overwrites (all frames in flight share the render targets).
+//
+// Layouts between passes: depth is DEPTH_READ_ONLY after the pre-pass (and
+// stays so through the scene pass); ssao, hdr, bloom and ldr are
+// SHADER_READ_ONLY whenever they are not being written; the shadow map is
+// DEPTH_READ_ONLY; the swapchain image is COLOR_ATTACHMENT after the present
+// pass and PRESENT_SRC after the UI.
 
 namespace blue::render {
 
-struct Camera {
-  glm::mat4 view{1.0f};
-  glm::mat4 projection{1.0f};
-  glm::vec3 position{0.0f};
-  // Parameters of `projection`, needed to fit the shadow cascades.
-  float vertical_fov_radians = 1.0f;
-  float near_plane = 0.1f;
-};
-
-struct PointLight {
-  glm::vec3 position{0.0f};
-  glm::vec3 color{1.0f};
-  float intensity = 1.0f;
-};
-
-// Handle to a mesh owned by the renderer.
-enum class MeshId : uint32_t {};
-
-struct DrawItem {
-  MeshId mesh;
-  glm::mat4 transform;
-  // Local-space bounds of the mesh; culled against the camera and the shadow
-  // cascades after `transform`.
-  asset::Bounds bounds;
-};
-
-// Draw counts of the most recent frame. Culled items were submitted in the
-// SceneView but skipped because their bounds fell outside the view.
-struct RenderStats {
-  uint32_t draw_calls = 0;  // Main pass.
-  uint64_t triangles = 0;   // Main pass.
-  uint32_t culled_draws = 0;
-  uint32_t shadow_draw_calls = 0;  // Summed over the cascades.
-  uint32_t shadow_culled_draws = 0;
-};
-
-// A collimated reflex sight, drawn over the opaque scene. The lens window is
-// a disc in world space; its dot is an image at infinity along `axis`, so a
-// pixel of the window shows the dot when the direction from the camera
-// through it is within the dot's angular radius of `axis`. The window is
-// depth tested (whatever is in front hides it) but writes no depth.
-struct ReticleSight {
-  // Maps the unit disc (x, y in [-1, 1], z = 0) onto the lens window in
-  // world space.
-  glm::mat4 lens{1.0f};
-  glm::vec3 axis{0.0f, 0.0f, -1.0f};  // world, unit, pointing downrange
-  // Nominal dot size: 3 MOA diameter.
-  float dot_angular_radius = 4.36e-4f;      // radians
-  glm::vec3 dot_color{4.0f, 0.12f, 0.06f};  // linear, intensity included
-  // The dot never gets smaller than this many pixels across, so it stays
-  // visible when the nominal size is below a pixel.
-  float min_dot_pixels = 2.0f;
-  glm::vec3 tint{0.004f, 0.006f, 0.005f};  // light added over the window
-};
-
-// Everything the renderer needs to draw one frame. `draws` is borrowed and
-// only needs to stay valid for the Renderer::DrawFrame call.
-struct SceneView {
-  Camera camera;
-  PointLight light;
-  glm::vec3 ambient{0.03f};
-  scene::SunLight sun;
-  // Shadows are skipped entirely when this is false or `sun` casts none.
-  bool shadows_enabled = true;
-  // Tints each pixel by the shadow cascade it samples.
-  bool cascade_debug = false;
-  std::span<const DrawItem> draws;
-  // Drawn after the draw items when present.
-  std::optional<ReticleSight> sight;
-};
-
-// Draws scenes with a forward mesh pipeline and presents them to a window.
-// Borrows `window`, which must outlive the renderer. Startup failures are
-// fatal. Neither copyable nor movable. Not thread-safe.
+// Draws scenes with a forward PBR pipeline into an HDR target, tonemaps and
+// presents them to a window. Owns meshes, materials and textures. Borrows
+// `window`, which must outlive the renderer. Startup failures are fatal.
+// Neither copyable nor movable. Not thread-safe.
 class Renderer {
  public:
-  static constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
-  static constexpr VkFormat kShadowFormat = VK_FORMAT_D16_UNORM;
-
   // Compiles the GLSL shaders in `shader_dir` with `shader_mode` and watches
   // them for changes (see ReloadChangedShaders()). A shader that does not
   // compile at startup is fatal.
@@ -130,6 +110,43 @@ class Renderer {
   // Uploads `data` and returns its handle. Meshes stay resident for the whole
   // session; unloading is out of scope.
   [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data);
+
+  // Decodes and uploads the textures `materials` reference in one batch
+  // (parallel decode). Optional before CreateMaterial(), which would load
+  // them one by one.
+  void PreloadTextures(std::span<const material::MaterialDesc> materials) {
+    textures_.Preload(materials);
+  }
+  // Creates a material (textures load on first use) and returns its handle.
+  // Materials stay resident for the whole session.
+  [[nodiscard]] MaterialId CreateMaterial(const material::MaterialDesc& desc) {
+    return materials_.Create(desc);
+  }
+  // Replaces material `id` by `desc` from the next frame on (live editing);
+  // frames in flight keep the old version. Call between frames.
+  void UpdateMaterial(MaterialId id, const material::MaterialDesc& desc) {
+    materials_.Update(id, desc);
+  }
+  // Returns the current description of `id`, which must be valid.
+  [[nodiscard]] const material::MaterialDesc& material(MaterialId id) const {
+    return materials_.desc(id);
+  }
+  [[nodiscard]] size_t material_count() const { return materials_.count(); }
+  [[nodiscard]] TextureStats texture_stats() const { return textures_.stats(); }
+
+  // Replaces the environment (sky and image-based lighting) by the
+  // equirectangular HDR image `equirect`, scaled by `intensity` and turned
+  // by `rotation_radians` about +Y. Waits for the GPU and filters the image
+  // (see render::Environment): meant for scene loads, not every frame.
+  void SetEnvironment(const asset::ImageDataF& equirect, float intensity,
+                      float rotation_radians) {
+    context_.WaitIdle();
+    environment_.Set(equirect, intensity, rotation_radians);
+  }
+  // Changes the intensity and rotation of the current environment; cheap.
+  void SetEnvironmentParams(float intensity, float rotation_radians) {
+    environment_.SetParams(intensity, rotation_radians);
+  }
 
   // Rebuilds the swapchain before the next frame, e.g. after a resize.
   void RequestSwapchainRebuild() { swapchain_dirty_ = true; }
@@ -164,86 +181,61 @@ class Renderer {
  private:
   using Cascades = std::array<lighting::Cascade, lighting::kCascadeCount>;
 
-  // Per-frame-in-flight resources.
+  // Per-frame-in-flight command recording and synchronization.
   struct Frame {
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence in_flight = VK_NULL_HANDLE;
     VkSemaphore image_acquired = VK_NULL_HANDLE;
-    Buffer uniforms;
-    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
   };
 
   void CreateFrames();
-  // Registers the mesh shaders in `shader_dir` and creates the mesh pipeline.
-  void AddMeshProgram(const std::string& shader_dir);
-  // Registers the shadow vertex shader and creates the depth-only pipeline.
-  void AddShadowProgram(const std::string& shader_dir);
-  // Registers the reflex sight shaders and creates their additive pipeline.
-  void AddReticleProgram(const std::string& shader_dir);
+  // Points the passes that read render targets at the current ones.
+  void BindTargets();
   [[nodiscard]] bool RebuildSwapchain();
 
   // Acquires the next swapchain image for `frame`. Returns nullopt, marking
   // the swapchain dirty, when it is out of date and nothing can be drawn.
   [[nodiscard]] std::optional<uint32_t> AcquireImage(const Frame& frame);
-  // Writes the per-frame uniform block for `view` into `frame`. `cascades`
-  // are only read when `shadows` is true.
-  void UpdateUniforms(const Frame& frame, const SceneView& view,
-                      const Cascades& cascades, bool shadows) const;
   // Submits the recorded commands of `frame` and presents `image_index`.
   void SubmitAndPresent(const Frame& frame, uint32_t image_index);
-
-  void RecordCommands(const Frame& frame, uint32_t image_index,
-                      const SceneView& view, const Cascades& cascades,
-                      bool shadows, const camera::Frustum& camera_frustum,
+  // Records every pass of the frame described by `ctx` (see the top of this
+  // file).
+  void RecordCommands(const Frame& frame, const FrameContext& ctx,
                       ImDrawData* ui);
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
-  // Renders the draw items that reach each cascade into its layer of the
-  // shadow map and leaves the map readable by fragment shaders. Must be
-  // recorded outside of a rendering pass, before the main pass.
-  void RecordShadowPass(VkCommandBuffer cmd, const SceneView& view,
-                        const Cascades& cascades);
-  // Moves the shadow map out of its initial layout the first time, so it can
-  // be bound while the shadow pass is skipped.
-  void InitializeShadowMapLayout(VkCommandBuffer cmd);
-  // Moves the color and depth images into attachment layouts.
-  void TransitionToAttachments(VkCommandBuffer cmd, uint32_t image_index) const;
-  // Begins dynamic rendering into the swapchain image and depth image, and
-  // sets the viewport and scissor.
-  void BeginRendering(VkCommandBuffer cmd, uint32_t image_index) const;
-  // Records one draw per item of `view` inside `camera_frustum` and updates
-  // the statistics.
-  void DrawScene(VkCommandBuffer cmd, const Frame& frame, const SceneView& view,
-                 const camera::Frustum& camera_frustum);
-  // Records the reflex sight of `view`, if any. Call after DrawScene, inside
-  // the same rendering pass, so the scene's depth hides the window.
-  void DrawReticle(VkCommandBuffer cmd, const Frame& frame,
-                   const SceneView& view);
 
   const platform::Window& window_;
   VulkanContext context_;
   bool vsync_ = true;
   bool swapchain_dirty_ = false;
   Swapchain swapchain_;
-  Image depth_;
-  // One map shared by all frames in flight: see RecordShadowPass().
-  Image shadow_map_;
-  VkSampler shadow_sampler_ = VK_NULL_HANDLE;
-  // False until the map has been moved out of its initial layout.
-  bool shadow_map_initialized_ = false;
+  Samplers samplers_;
+  RenderTargets targets_;
+  FrameGlobals frame_globals_;
+  TextureCache textures_;
+  MaterialSystem materials_;
+  ShaderPrograms shader_programs_;
+  Environment environment_;
+  // Declared before the passes that borrow it.
+  std::vector<Mesh> meshes_;
+  DrawList draw_list_;
 
-  VkDescriptorSetLayout frame_set_layout_ = VK_NULL_HANDLE;
-  VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+  ShadowPass shadow_pass_;
+  DepthPrepass depth_prepass_;
+  SsaoPass ssao_pass_;
+  MeshPass mesh_pass_;
+  SkyboxPass skybox_pass_;
+  ReticlePass reticle_pass_;
+  BloomPass bloom_pass_;
+  TonemapPass tonemap_pass_;
+  PresentPass present_pass_;
+
   std::array<Frame, kFramesInFlight> frames_;
   size_t frame_index_ = 0;
-
-  ShaderPrograms shader_programs_;
-  // Replaced when its shaders are reloaded; never null after construction.
-  std::unique_ptr<Pipeline> mesh_pipeline_;
-  std::unique_ptr<Pipeline> shadow_pipeline_;
-  std::unique_ptr<Pipeline> reticle_pipeline_;
-  std::vector<Mesh> meshes_;
+  // Number of the frame being recorded; counts every recorded frame from 1.
+  uint64_t frame_serial_ = 0;
   // World-space bounds of the current frame's draw items, parallel to
   // SceneView::draws; kept as a member to reuse its allocation.
   std::vector<camera::Aabb> world_bounds_;

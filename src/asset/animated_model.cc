@@ -12,6 +12,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -19,8 +20,10 @@
 #include <glm/common.hpp>
 #include <glm/ext/quaternion_geometric.hpp>
 #include <glm/vec4.hpp>
+#include <glm/vector_relational.hpp>
 
-#include "asset/internal/material_color.h"
+#include "asset/internal/material_import.h"
+#include "asset/internal/mesh_import.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "platform/file_system.h"
@@ -37,10 +40,7 @@ using animation::Transform;
 
 // Like ImportModel() minus aiProcess_PreTransformVertices, which would bake
 // the node transforms and drop the hierarchy.
-constexpr unsigned kPostProcess =
-    aiProcess_Triangulate | aiProcess_GenSmoothNormals |
-    aiProcess_JoinIdenticalVertices | aiProcess_SortByPType |
-    aiProcess_ImproveCacheLocality | aiProcess_ValidateDataStructure;
+constexpr unsigned kPostProcess = internal::kBasePostProcess;
 
 // Assimp's convention for files that do not state a tick rate.
 constexpr double kDefaultTicksPerSecond = 25.0;
@@ -81,125 +81,26 @@ Hierarchy BuildHierarchy(const aiNode& root,
   return hierarchy;
 }
 
-// Decodes each material's base-colour texture on first use and keeps it for
-// the rest of the import. Other textures (normal maps, ...) are never decoded.
-class BaseColorCache {
- public:
-  struct Entry {
-    std::optional<internal::DecodedImage> image;
-    unsigned uv_channel = 0;
-  };
-
-  explicit BaseColorCache(const aiScene& scene)
-      : scene_(scene),
-        entries_(scene.mNumMaterials),
-        srgb_(internal::MakeSrgbTable()) {}
-
-  BaseColorCache(const BaseColorCache&) = delete;
-  BaseColorCache& operator=(const BaseColorCache&) = delete;
-
-  // Returns the decoded texture of `material`, or nullptr if it has none or
-  // it cannot be decoded.
-  const Entry* Find(unsigned material) {
-    if (material >= entries_.size()) {
-      return nullptr;
-    }
-    std::optional<Entry>& entry = entries_[material];
-    if (!entry.has_value()) {
-      entry.emplace();
-      const std::optional<internal::BaseColorTexture> texture =
-          internal::FindBaseColorTexture(scene_, *scene_.mMaterials[material]);
-      if (texture.has_value()) {
-        entry->image = internal::DecodeTexture(*texture->texture);
-        entry->uv_channel = texture->uv_channel;
-      }
-    }
-    return entry->image.has_value() ? &*entry : nullptr;
-  }
-
-  const internal::SrgbTable& srgb() const { return srgb_; }
-
- private:
-  const aiScene& scene_;
-  std::vector<std::optional<Entry>> entries_;  // per material, lazily filled
-  internal::SrgbTable srgb_;
-};
-
-// Appends the vertices and triangles of `mesh` to `data`. Vertex colours are
-// the material colour, times the base-colour texture where there is one.
-void AppendMesh(const aiScene& scene, const aiMesh& mesh,
-                const ImportOptions& options, BaseColorCache& textures,
-                MeshData& data) {
-  const glm::vec3 factor =
-      internal::MeshColor(scene, mesh, options.default_color);
-  const BaseColorCache::Entry* texture = textures.Find(mesh.mMaterialIndex);
-  const aiVector3D* uvs = nullptr;
-  if (texture != nullptr && mesh.HasTextureCoords(texture->uv_channel)) {
-    uvs = mesh.mTextureCoords[texture->uv_channel];
-  }
-
-  const auto base = static_cast<Index>(data.vertices.size());
-  for (unsigned i = 0; i < mesh.mNumVertices; ++i) {
-    const aiVector3D& p = mesh.mVertices[i];
-    const aiVector3D& n = mesh.mNormals[i];
-    glm::vec3 color = factor;
-    if (uvs != nullptr) {
-      color *= internal::SampleLinear(*texture->image, textures.srgb(),
-                                      {uvs[i].x, uvs[i].y});
-    }
-    data.vertices.push_back({{p.x, p.y, p.z}, {n.x, n.y, n.z}, color});
-  }
-  for (const aiFace& face : std::span(mesh.mFaces, mesh.mNumFaces)) {
-    for (unsigned i = 0; i < 3; ++i) {
-      data.indices.push_back(base + face.mIndices[i]);
-    }
-  }
-}
-
-// Returns the merged mesh of the usable meshes of `node`, nullopt if it has
-// none, or kTooLarge if they overflow Index.
+// Returns the mesh of the usable meshes of `node`, nullopt if it has none,
+// or kTooLarge if they overflow Index.
 core::Result<std::optional<MeshData>, ImportError> ImportNodeMesh(
     const std::string& path, const aiScene& scene, const aiNode& node,
-    const ImportOptions& options, BaseColorCache& textures) {
+    internal::MaterialTable& materials) {
   using Result = core::Result<std::optional<MeshData>, ImportError>;
-  std::vector<const aiMesh*> meshes;
-  size_t vertex_count = 0;
-  size_t index_count = 0;
+  std::vector<const aiMesh*> candidates;
+  candidates.reserve(node.mNumMeshes);
   for (const unsigned mesh_index : std::span(node.mMeshes, node.mNumMeshes)) {
-    const aiMesh* mesh = scene.mMeshes[mesh_index];
-    if (!internal::IsTriangleMesh(*mesh)) {
-      continue;
-    }
-    if (mesh->mNormals == nullptr) {
-      core::log::Warn(
-          "ImportAnimatedModel: {}: skipping mesh '{}' without normals", path,
-          mesh->mName.C_Str());
-      continue;
-    }
-    meshes.push_back(mesh);
-    vertex_count += mesh->mNumVertices;
-    index_count += size_t{mesh->mNumFaces} * 3;
+    candidates.push_back(scene.mMeshes[mesh_index]);
   }
+  const std::vector<const aiMesh*> meshes =
+      internal::UsableMeshes(candidates, "ImportAnimatedModel: " + path);
   if (meshes.empty()) {
     return Result::Ok(std::nullopt);
   }
-  if (vertex_count > std::numeric_limits<Index>::max()) {
+  if (internal::VertexCount(meshes) > std::numeric_limits<Index>::max()) {
     return Result::Error(ImportError::kTooLarge);
   }
-
-  MeshData data;
-  data.vertices.reserve(vertex_count);
-  data.indices.reserve(index_count);
-  for (const aiMesh* mesh : meshes) {
-    AppendMesh(scene, *mesh, options, textures, data);
-  }
-  data.bounds = {.min = data.vertices.front().position,
-                 .max = data.vertices.front().position};
-  for (const Vertex& vertex : data.vertices) {
-    data.bounds.min = glm::min(data.bounds.min, vertex.position);
-    data.bounds.max = glm::max(data.bounds.max, vertex.position);
-  }
-  return Result::Ok(std::move(data));
+  return Result::Ok(internal::BuildMesh(meshes, materials));
 }
 
 // Returns true if `values` (one element) equals the `path` component of
@@ -381,9 +282,10 @@ core::Result<AnimatedModel, ImportError> ImportAnimatedModel(
   std::vector<const aiNode*> ai_nodes;
   model.hierarchy = BuildHierarchy(*scene->mRootNode, ai_nodes);
 
-  BaseColorCache textures(*scene);
+  internal::MaterialTable materials(*scene, path,
+                                    options.use_material_overrides);
   for (size_t i = 0; i < ai_nodes.size(); ++i) {
-    auto mesh = ImportNodeMesh(path, *scene, *ai_nodes[i], options, textures);
+    auto mesh = ImportNodeMesh(path, *scene, *ai_nodes[i], materials);
     if (!mesh.ok()) {
       return Result::Error(mesh.error());
     }
@@ -395,6 +297,7 @@ core::Result<AnimatedModel, ImportError> ImportAnimatedModel(
   if (model.parts.empty()) {
     return Result::Error(ImportError::kNoMeshes);
   }
+  model.materials = materials.Release();
 
   for (const aiAnimation* animation :
        std::span(scene->mAnimations, scene->mNumAnimations)) {
@@ -404,9 +307,10 @@ core::Result<AnimatedModel, ImportError> ImportAnimatedModel(
 
   const auto elapsed = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start);
-  core::log::Info("imported {}: {} nodes, {} parts, {} clips in {:.1f} ms",
-                  core::FileName(path), model.hierarchy.nodes.size(),
-                  model.parts.size(), model.clips.size(), elapsed.count());
+  core::log::Info(
+      "imported {}: {} nodes, {} parts, {} clips, {} materials in {:.1f} ms",
+      core::FileName(path), model.hierarchy.nodes.size(), model.parts.size(),
+      model.clips.size(), model.materials.size(), elapsed.count());
   return Result::Ok(std::move(model));
 }
 

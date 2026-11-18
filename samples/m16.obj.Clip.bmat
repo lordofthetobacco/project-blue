@@ -1,0 +1,7 @@
+# Project Blue material: M16 magazine. Grey hard-anodised aluminium: the
+# anodic oxide is a dielectric layer, so it is shaded as a dark grey
+# dielectric with a satin sheen rather than as bare metal.
+name = Clip
+base_color = 0.16 0.155 0.145 1
+metallic = 0
+roughness = 0.4

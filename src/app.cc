@@ -9,6 +9,8 @@
 #include <cstddef>
 #include <cstring>
 #include <format>
+#include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -25,13 +27,18 @@
 #include <glm/vec4.hpp>
 
 #include "animation/clip.h"
+#include "asset/image_decoder.h"
 #include "camera/look.h"
 #include "camera/projection.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "input/action.h"
 #include "input/bindings.h"
+#include "lighting/environment.h"
+#include "material/material.h"
+#include "material/material_file.h"
 #include "platform/file_system.h"
+#include "scene/default_lighting.h"
 #include "scene/placement.h"
 #include "scene/scene_serializer.h"
 #include "shader/shader_compiler.h"
@@ -104,6 +111,31 @@ constexpr std::string_view kTargetNamePrefix = "target ";
 constexpr const char* kHouseModel = "house.obj";
 constexpr glm::vec3 kHousePosition{-9.0f, 0.0f, -3.0f};
 
+// Material files of the default scene, in the samples directory.
+constexpr const char* kGroundMaterial = "materials/ground.bmat";
+constexpr const char* kTargetMaterial = "materials/steel.bmat";
+constexpr const char* kDefaultHdri =
+    "env/kloofendal_48d_partly_cloudy_puresky_2k.hdr";
+// Size of the generated sky used when a scene names no HDRI.
+constexpr int kDefaultSkyWidth = 512;
+constexpr int kDefaultSkyHeight = 256;
+
+// The preview spheres (builtin sphere, 1 m across, resting on the ground):
+// a dielectric row and a metal row, roughness growing away from the spawn,
+// each with its own file in samples/materials/preview/. They stand to the
+// right of the firing line, a few metres ahead of the spawn, where nothing
+// down range is hidden behind them.
+constexpr const char* kPreviewMaterialDir = "materials/preview/";
+constexpr std::string_view kPreviewKinds[] = {"dielectric", "metal"};
+constexpr std::string_view kPreviewRoughnessTags[] = {"005", "025", "050",
+                                                      "075", "100"};
+constexpr glm::vec3 kPreviewFirstSphere{6.0f, 0.5f, -4.0f};
+constexpr float kPreviewSpacing = 1.5f;     // m between spheres of a row
+constexpr float kPreviewRowSpacing = 2.0f;  // m between the two rows
+
+// How far "Pick in view" looks for an entity.
+constexpr float kPickReach = 1000.0f;  // m
+
 constexpr const char* kRifleModel = "m16.obj";
 constexpr const char* kPistolModel = "glock/glock17.glb";
 // The pistol's authored firing animation is split into one clip per node
@@ -127,6 +159,37 @@ constexpr float kTracerThickness = 0.02f;       // m
 constexpr float kImpactMarkSize = 0.05f;        // m, side of the square mark
 constexpr float kImpactMarkDepth = 0.004f;      // m, how far it stands out
 constexpr float kLensLiftTowardsEye = 0.0005f;  // m, see CurrentSight()
+
+// Hot copper-orange tracer glow, several times brighter than the sunlit
+// scene so it reads at range (and feeds bloom later).
+material::MaterialDesc TracerMaterial() {
+  material::MaterialDesc desc;
+  desc.name = "tracer";
+  desc.base_color = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+  desc.roughness = 1.0f;
+  desc.emissive = glm::vec3(1.0f, 0.55f, 0.25f);
+  desc.emissive_strength = 12.0f;
+  return desc;
+}
+
+// Soot-dark, fully rough bullet hole.
+material::MaterialDesc ImpactMaterial() {
+  material::MaterialDesc desc;
+  desc.name = "impact mark";
+  desc.base_color = glm::vec4(0.02f, 0.02f, 0.02f, 1.0f);
+  desc.roughness = 0.95f;
+  return desc;
+}
+
+// Bare, slightly worn steel plate.
+material::MaterialDesc TargetMaterial() {
+  material::MaterialDesc desc;
+  desc.name = "target steel";
+  desc.base_color = glm::vec4(0.56f, 0.57f, 0.58f, 1.0f);
+  desc.metallic = 1.0f;
+  desc.roughness = 0.45f;
+  return desc;
+}
 
 constexpr const char* kDefaultScenePath = "scenes/untitled.bscn";
 constexpr const char* kSettingsFileName = "input.cfg";
@@ -235,7 +298,7 @@ std::string ShaderDirectory() {
       {Action::kToggleInvertY, "invert Y"},
       {Action::kSensitivityDown, "/"},
       {Action::kSensitivityUp, "sens"},
-      {Action::kToggleOverlay, "overlay"},
+      {Action::kToggleOverlay, "overlay + editor"},
       {Action::kSaveScene, "save"},
       {Action::kLoadScene, "load"},
       {Action::kToggleVsync, "vsync"},
@@ -360,6 +423,7 @@ App::App(const CliOptions& options)
       renderer_(window_, ShaderDirectory(), kShaderCompileMode),
       mesh_cache_(renderer_),
       model_cache_(renderer_),
+      material_cache_(renderer_),
       physics_world_(physics_runtime_),
       scene_physics_(physics_world_),
       overlay_(window_, renderer_),
@@ -368,17 +432,26 @@ App::App(const CliOptions& options)
       loadout_(MakeLoadout()),
       viewmodels_(MakeViewmodels()),
       rifle_mesh_path_(SamplePath(kRifleModel)) {
+  CreateEffectMaterials();
   LoadPistolModel();
+  BuildWeaponMaterialSlots();
   settings_ = input::LoadInputSettings(settings_path_);
   input_.set_bindings(settings_.bindings);
   help_text_ = BuildHelpText(settings_.bindings);
   SDL_SetWindowTitle(window_.handle(), WindowTitle(scene_path_).c_str());
   InitializeScene(options);
+  LoadEnvironment(/*force=*/false);
   camera_.SetFromSceneCamera(scene_.camera);
   RebuildPhysics();
   FindTargets();
   PlacePlayerAtSceneCamera();
   ApplyWeaponToPlayer();
+}
+
+void App::CreateEffectMaterials() {
+  tracer_material_ = renderer_.CreateMaterial(TracerMaterial());
+  impact_material_ = renderer_.CreateMaterial(ImpactMaterial());
+  target_material_ = renderer_.CreateMaterial(TargetMaterial());
 }
 
 void App::LoadPistolModel() {
@@ -674,6 +747,7 @@ void App::InitializeScene(const CliOptions& options) {
       .transform = ground,
       .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
                                .shape = scene::ShapeType::kBox},
+      .material_path = SamplePath(kGroundMaterial),
   });
 
   // Static and collided against triangle by triangle, so the player can walk
@@ -689,6 +763,8 @@ void App::InitializeScene(const CliOptions& options) {
   });
 
   AddRangeTargets();
+  AddPreviewSpheres();
+  ApplyDefaultLighting();
 
   if (options.imports.empty()) {
     // Unit cube centred at the origin, dropped from 3 m at a tilt.
@@ -725,7 +801,214 @@ void App::AddRangeTargets() {
         .transform = transform,
         .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
                                  .shape = scene::ShapeType::kBox},
+        .material_path = SamplePath(kTargetMaterial),
     });
+  }
+}
+
+void App::AddPreviewSpheres() {
+  for (size_t row = 0; row < std::size(kPreviewKinds); ++row) {
+    for (size_t i = 0; i < std::size(kPreviewRoughnessTags); ++i) {
+      const std::string_view kind = kPreviewKinds[row];
+      const std::string_view tag = kPreviewRoughnessTags[i];
+      scene::Transform transform;
+      transform.position =
+          kPreviewFirstSphere +
+          glm::vec3(kPreviewSpacing * static_cast<float>(i), 0.0f,
+                    -kPreviewRowSpacing * static_cast<float>(row));
+      scene_.entities.push_back({
+          .name = std::format("preview {} r{}", kind, tag),
+          .mesh_path = "builtin:sphere",
+          .transform = transform,
+          .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
+                                   .shape = scene::ShapeType::kSphere},
+          .material_path = SamplePath(
+              std::format("{}{}_r{}.bmat", kPreviewMaterialDir, kind, tag)),
+      });
+    }
+  }
+}
+
+void App::ApplyDefaultLighting() {
+  scene_.environment = {
+      .hdri_path = SamplePath(kDefaultHdri),
+      .intensity = scene::kDefaultEnvironmentIntensity,
+      .rotation_radians = scene::kDefaultEnvironmentRotation,
+      .exposure_ev = scene::kDefaultExposureEv,
+  };
+  scene_.sun.direction = scene::kDefaultSunDirection;
+  scene_.sun.color = scene::kDefaultSunColor;
+  scene_.sun.intensity = scene::kDefaultSunIntensity;
+  scene_.light.intensity = scene::kDefaultPointLightIntensity;
+}
+
+void App::LoadEnvironment(bool force) {
+  const scene::Environment& environment = scene_.environment;
+  if (!force && environment_source_ == environment.hdri_path) {
+    renderer_.SetEnvironmentParams(environment.intensity,
+                                   environment.rotation_radians);
+    return;
+  }
+  const auto start = std::chrono::steady_clock::now();
+  std::optional<asset::ImageDataF> image;
+  if (!environment.hdri_path.empty()) {
+    auto loaded = asset::LoadHdrFile(environment.hdri_path);
+    if (loaded.ok()) {
+      image = std::move(loaded).value();
+    } else {
+      status_ = std::format("Cannot load HDRI {}: {}", environment.hdri_path,
+                            asset::ToString(loaded.error()));
+      core::log::Error("{}", status_);
+    }
+  }
+  if (!image) {
+    image =
+        lighting::MakeDefaultEnvironment(kDefaultSkyWidth, kDefaultSkyHeight);
+  }
+  environment_sun_ = lighting::EstimateSun(*image);
+  renderer_.SetEnvironment(*image, environment.intensity,
+                           environment.rotation_radians);
+  environment_source_ = environment.hdri_path;
+  core::log::Info("{}", TimedStatus("Environment",
+                                    environment.hdri_path.empty()
+                                        ? std::string("(default sky)")
+                                        : environment.hdri_path,
+                                    start));
+}
+
+std::optional<render::MaterialId> App::EntityMaterial(
+    const scene::Entity& entity) {
+  if (!entity.material_path.empty()) {
+    if (const std::optional<render::MaterialId> material =
+            material_cache_.Get(entity.material_path)) {
+      return material;
+    }
+  }
+  // Scenes saved before material files: plates are found by name, like
+  // FindTargets().
+  if (entity.name.starts_with(kTargetNamePrefix)) {
+    return target_material_;
+  }
+  return std::nullopt;
+}
+
+void App::BuildWeaponMaterialSlots() {
+  const auto add_model = [this](std::string_view weapon,
+                                const std::string& model_path,
+                                std::span<const render::MaterialId> ids) {
+    for (const render::MaterialId id : ids) {
+      const std::string& name = renderer_.material(id).name;
+      weapon_slots_.push_back(
+          {.label = std::format("{}: {}", weapon, name),
+           .id = id,
+           .save_path = material::SidecarMaterialPath(model_path, name)});
+    }
+  };
+  if (const std::optional<render::CachedMesh> rifle =
+          mesh_cache_.Get(rifle_mesh_path_)) {
+    add_model("M16", rifle_mesh_path_, rifle->materials);
+  }
+  if (pistol_model_ != nullptr) {
+    add_model("Glock", SamplePath(kPistolModel), pistol_model_->materials);
+  }
+  for (const render::MaterialId id :
+       {tracer_material_, impact_material_, target_material_}) {
+    const std::string& name = renderer_.material(id).name;
+    weapon_slots_.push_back(
+        {.label = std::format("Effect: {}", name),
+         .id = id,
+         .save_path = SamplePath(std::format(
+             "materials/{}.bmat", material::SanitizeMaterialName(name)))});
+  }
+}
+
+void App::UpdateEntityMaterialSlots() {
+  entity_slots_.clear();
+  const std::optional<size_t> selected = editor_.selected_entity();
+  if (!selected || *selected >= scene_.entities.size()) {
+    return;
+  }
+  const scene::Entity& entity = scene_.entities[*selected];
+  if (const std::optional<render::MaterialId> material =
+          EntityMaterial(entity)) {
+    const std::string& name = renderer_.material(*material).name;
+    entity_slots_.push_back(
+        {.label = std::format("{} (whole entity)", name),
+         .id = *material,
+         .save_path = !entity.material_path.empty()
+                          ? entity.material_path
+                          : SamplePath(std::format(
+                                "materials/{}.bmat",
+                                material::SanitizeMaterialName(name)))});
+    return;
+  }
+  const std::optional<render::CachedMesh> mesh =
+      mesh_cache_.Get(entity.mesh_path);
+  if (!mesh) {
+    return;
+  }
+  // The mesh's own materials, shared by every entity drawing that mesh.
+  const bool builtin = entity.mesh_path.starts_with(scene::kBuiltinMeshPrefix);
+  for (const render::MaterialId id : mesh->materials) {
+    const std::string& name = renderer_.material(id).name;
+    entity_slots_.push_back(
+        {.label = std::format("{} (model)", name),
+         .id = id,
+         .save_path =
+             builtin
+                 ? SamplePath(std::format("materials/{}.bmat",
+                                          material::SanitizeMaterialName(name)))
+                 : material::SidecarMaterialPath(entity.mesh_path, name)});
+  }
+}
+
+void App::PickEntity() {
+  const ViewPose eye = CurrentView();
+  const std::optional<physics::RayHit> hit =
+      physics_world_.CastRay(eye.position, eye.forward, kPickReach);
+  const std::optional<size_t> entity =
+      hit ? scene_physics_.EntityFor(hit->body) : std::nullopt;
+  if (!entity) {
+    status_ = "Pick: no entity in the middle of the view";
+    return;
+  }
+  editor_.Select(*entity);
+  status_ = "Picked " + scene_.entities[*entity].name;
+}
+
+void App::UpdateEditor() {
+  if (!overlay_.visible() || mouse_captured_) {
+    return;
+  }
+  UpdateEntityMaterialSlots();
+  const ui::EditorActions actions = editor_.Draw({
+      .scene = scene_,
+      .renderer = renderer_,
+      .material_files = material_cache_,
+      .post = post_settings_,
+      .entity_slots = entity_slots_,
+      .weapon_slots = weapon_slots_,
+      .environment_has_sun = environment_sun_.found,
+  });
+  if (actions.pick_entity) {
+    PickEntity();
+  }
+  if (actions.load_environment) {
+    LoadEnvironment(/*force=*/true);
+  } else if (actions.environment_params_changed) {
+    renderer_.SetEnvironmentParams(scene_.environment.intensity,
+                                   scene_.environment.rotation_radians);
+  }
+  const glm::quat rotation = glm::angleAxis(scene_.environment.rotation_radians,
+                                            glm::vec3(0.0f, 1.0f, 0.0f));
+  if (actions.align_sun && environment_sun_.found) {
+    // The environment's sun as the rotated sky shows it.
+    scene_.sun.direction = rotation * environment_sun_.direction;
+    scene_.sun.color = environment_sun_.color;
+  }
+  if (actions.sun_intensity_from_environment && environment_sun_.found) {
+    scene_.sun.intensity =
+        environment_sun_.intensity * scene_.environment.intensity;
   }
 }
 
@@ -776,6 +1059,7 @@ void App::ReloadCurrentScene() {
   auto loaded = scene::LoadScene(scene_path_);
   if (loaded.ok()) {
     scene_ = std::move(loaded).value();
+    LoadEnvironment(/*force=*/false);
     camera_.SetFromSceneCamera(scene_.camera);
     RebuildPhysics();
     ClearBullets();  // Their impacts would name bodies that are gone.
@@ -880,10 +1164,7 @@ int App::Run() {
                     .step_ms = physics_stats.last_step_ms,
                     .gravity = scene_.gravity},
         .shadows = {.enabled = shadows_enabled_ && scene_.sun.casts_shadows,
-                    .cascade_debug = cascade_debug_,
-                    .shadow_ms =
-                        renderer_.gpu_scope_ms(render::GpuScope::kShadow),
-                    .main_ms = renderer_.gpu_scope_ms(render::GpuScope::kMain)},
+                    .cascade_debug = cascade_debug_},
         .weapon = MakeWeaponOverlayInfo(),
         .hit_log = MakeHitLogOverlayInfo(),
         // The player aims with the rifle's sights only; the dot is a tool of
@@ -903,6 +1184,8 @@ int App::Run() {
     const ui::BuildResult ui =
         overlay_.Build(frame_seconds * 1000.0f, renderer_.gpu_frame_ms(),
                        scene_info, settings_);
+    UpdateEditor();
+    ImDrawData* const ui_draw_data = overlay_.Render();
     if (ui.settings_changed) {
       SaveSettings();
     }
@@ -911,7 +1194,7 @@ int App::Run() {
       target_log_.Clear();
       shots_fired_ = 0;
     }
-    renderer_.DrawFrame(BuildSceneView(), ui.draw_data);
+    renderer_.DrawFrame(BuildSceneView(), ui_draw_data);
   }
   return 0;
 }
@@ -1125,7 +1408,8 @@ void App::AppendWeaponDraws() {
                    mesh_cache_.Get(rifle_mesh_path_)) {
       draws_.push_back({.mesh = rifle->id,
                         .transform = active_viewmodel().model_matrix(),
-                        .bounds = rifle->bounds});
+                        .bounds = rifle->bounds,
+                        .submeshes = rifle->submeshes});
     }
   }
 
@@ -1145,12 +1429,14 @@ void App::AppendWeaponDraws() {
          .transform =
              BoxAlong(bullet.position - direction * (length * 0.5f), direction,
                       {kTracerThickness, kTracerThickness, length}),
-         .bounds = cube->bounds});
+         .bounds = cube->bounds,
+         .material_override = tracer_material_});
   }
   for (size_t i = 0; i < impact_mark_count_; ++i) {
     draws_.push_back({.mesh = cube->id,
                       .transform = impact_marks_[i],
-                      .bounds = cube->bounds});
+                      .bounds = cube->bounds,
+                      .material_override = impact_material_});
   }
 }
 
@@ -1164,7 +1450,8 @@ void App::AppendPistolDraws() {
     draws_.push_back(
         {.mesh = part.mesh,
          .transform = pistol_world_[static_cast<size_t>(part.node)],
-         .bounds = part.bounds});
+         .bounds = part.bounds,
+         .submeshes = part.submeshes});
   }
 }
 
@@ -1179,7 +1466,9 @@ render::SceneView App::BuildSceneView() {
             mesh_cache_.Get(entity.mesh_path)) {
       draws_.push_back({.mesh = mesh->id,
                         .transform = entity.transform.Matrix(),
-                        .bounds = mesh->bounds});
+                        .bounds = mesh->bounds,
+                        .submeshes = mesh->submeshes,
+                        .material_override = EntityMaterial(entity)});
     }
   }
   AppendWeaponDraws();
@@ -1201,6 +1490,8 @@ render::SceneView App::BuildSceneView() {
   view.cascade_debug = cascade_debug_;
   view.draws = draws_;
   view.sight = CurrentSight();
+  view.post = post_settings_;
+  view.post.exposure_ev = scene_.environment.exposure_ev;
   return view;
 }
 

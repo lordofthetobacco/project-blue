@@ -25,9 +25,9 @@ VertexBindings() {
             .inputRate = VK_VERTEX_INPUT_RATE_VERTEX}}};
 }
 
-// Returns the vertex attributes that match asset::Vertex (position, normal,
-// color).
-[[nodiscard]] constexpr std::array<VkVertexInputAttributeDescription, 3>
+// Returns the vertex attributes that match asset::Vertex: location 0
+// position, 1 normal, 2 uv, 3 tangent (xyz + handedness in w).
+[[nodiscard]] constexpr std::array<VkVertexInputAttributeDescription, 4>
 VertexAttributes() {
   return {{
       {.location = 0,
@@ -40,18 +40,29 @@ VertexAttributes() {
        .offset = offsetof(asset::Vertex, normal)},
       {.location = 2,
        .binding = 0,
-       .format = VK_FORMAT_R32G32B32_SFLOAT,
-       .offset = offsetof(asset::Vertex, color)},
+       .format = VK_FORMAT_R32G32_SFLOAT,
+       .offset = offsetof(asset::Vertex, uv)},
+      {.location = 3,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+       .offset = offsetof(asset::Vertex, tangent)},
   }};
 }
 
 // Returns only the position attribute of VertexAttributes(), for depth-only
 // passes whose vertex shader reads location 0 alone. Same binding and stride,
 // so the pass draws from the same vertex buffers as the main pass but fetches
-// 12 instead of 36 bytes per vertex.
+// 12 instead of 48 bytes per vertex.
 [[nodiscard]] constexpr std::array<VkVertexInputAttributeDescription, 1>
 PositionOnlyVertexAttributes() {
   return {{VertexAttributes()[0]}};
+}
+
+// Returns the position and uv attributes of VertexAttributes() (locations
+// 0 and 2), for the depth pre-pass: alpha-masked materials need the uv.
+[[nodiscard]] constexpr std::array<VkVertexInputAttributeDescription, 2>
+PositionUvVertexAttributes() {
+  return {{VertexAttributes()[0], VertexAttributes()[2]}};
 }
 
 // Mesh resident in device-local memory. Move-only. Not thread-safe.
@@ -67,6 +78,14 @@ class Mesh {
 
   // Records the bind and indexed draw commands for this mesh into `cmd`.
   void Draw(VkCommandBuffer cmd) const;
+  // Binds the vertex and index buffers; DrawRange() then draws from them.
+  void Bind(VkCommandBuffer cmd) const;
+  // Records an indexed draw of `index_count` indices from `first_index`
+  // (e.g. one submesh) of the bound mesh.
+  static void DrawRange(VkCommandBuffer cmd, uint32_t first_index,
+                        uint32_t index_count) {
+    vkCmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+  }
 
   [[nodiscard]] uint32_t index_count() const { return index_count_; }
 

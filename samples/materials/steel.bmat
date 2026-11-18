@@ -1,0 +1,10 @@
+# Project Blue material
+# ambientCG Metal032 (CC0): worn steel plate, used for the targets.
+name = steel
+base_color = 1 1 1 1
+metallic = 1
+roughness = 1
+base_color_texture = ../textures/metal032/color.jpg
+roughness_texture = ../textures/metal032/roughness.jpg
+metallic_texture = ../textures/metal032/metalness.jpg
+normal_texture = ../textures/metal032/normalgl.jpg

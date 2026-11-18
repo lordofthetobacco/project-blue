@@ -48,9 +48,23 @@ blue_target_defaults(blue_animation)
 
 target_link_libraries(blue_animation PUBLIC glm::glm)
 
+# PBR material descriptions and .bmat material files (glm + blue_core only).
+add_library(blue_material STATIC
+    src/material/material.cc
+    src/material/material_file.cc
+)
+
+target_include_directories(blue_material PUBLIC src)
+
+blue_target_defaults(blue_material)
+
+target_link_libraries(blue_material PUBLIC blue_core glm::glm)
+
 add_library(blue_asset STATIC
     src/asset/animated_model.cc
-    src/asset/internal/material_color.cc
+    src/asset/image_decoder.cc
+    src/asset/internal/material_import.cc
+    src/asset/internal/mesh_import.cc
     src/asset/mesh_data.cc
     src/asset/model_importer.cc
 )
@@ -60,8 +74,8 @@ target_include_directories(blue_asset PUBLIC src)
 blue_target_defaults(blue_asset)
 
 target_link_libraries(blue_asset
-    PUBLIC blue_core blue_animation glm::glm
-    PRIVATE assimp::assimp
+    PUBLIC blue_core blue_animation blue_material glm::glm
+    PRIVATE assimp::assimp stb
 )
 
 add_library(blue_scene STATIC
@@ -77,16 +91,18 @@ blue_target_defaults(blue_scene)
 
 target_link_libraries(blue_scene PUBLIC blue_core glm::glm)
 
-# Cascaded shadow map math for the sun (glm only).
+# Cascaded shadow map math for the sun and image-based lighting math
+# (equirect environments, SH9 irradiance, BRDF LUT).
 add_library(blue_lighting STATIC
     src/lighting/cascades.cc
+    src/lighting/environment.cc
 )
 
 target_include_directories(blue_lighting PUBLIC src)
 
 blue_target_defaults(blue_lighting)
 
-target_link_libraries(blue_lighting PUBLIC glm::glm)
+target_link_libraries(blue_lighting PUBLIC blue_asset glm::glm)
 
 # Rigid-body simulation on JoltPhysics. Jolt stays private: no Jolt type appears in the
 # public physics headers (its JPH_* definitions still propagate PUBLIC from Jolt itself,
@@ -209,17 +225,39 @@ add_executable(project-blue
     src/platform/window.cc
     src/render/vulkan_context.cc
     src/render/swapchain.cc
+    src/render/barriers.cc
+    src/render/draw_list.cc
+    src/render/environment.cc
     src/render/buffer.cc
+    src/render/frame_globals.cc
+    src/render/fullscreen_pass.cc
     src/render/image.cc
+    src/render/material_system.cc
     src/render/pipeline.cc
+    src/render/render_targets.cc
+    src/render/samplers.cc
     src/render/shader_programs.cc
     src/render/gpu_timer.cc
     src/render/mesh.cc
     src/render/mesh_cache.cc
+    src/render/material_cache.cc
     src/render/model_cache.cc
     src/render/renderer.cc
+    src/render/texture_cache.cc
+    src/render/passes/bloom_pass.cc
+    src/render/passes/depth_prepass.cc
+    src/render/passes/mesh_pass.cc
+    src/render/passes/present_pass.cc
+    src/render/passes/reticle_pass.cc
+    src/render/passes/scene_pass.cc
+    src/render/passes/shadow_pass.cc
+    src/render/passes/ssao_pass.cc
+    src/render/passes/skybox_pass.cc
+    src/render/passes/tonemap_pass.cc
+    src/render/passes/ui_pass.cc
     src/render/vma.cc
     src/render/vk_check.cc
+    src/ui/editor_panels.cc
     src/ui/perf_overlay.cc
 )
 
@@ -234,6 +272,7 @@ target_link_libraries(project-blue PRIVATE
     blue_core
     blue_asset
     blue_animation
+    blue_material
     blue_scene
     blue_lighting
     blue_physics

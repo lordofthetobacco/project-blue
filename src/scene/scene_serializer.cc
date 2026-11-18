@@ -30,6 +30,8 @@ constexpr uint32_t kEnvironmentChunk = MakeFourcc('E', 'N', 'V', 'R');
 constexpr uint32_t kEntitiesChunk = MakeFourcc('E', 'N', 'T', 'S');
 constexpr uint32_t kPhysicsChunk = MakeFourcc('P', 'H', 'Y', 'S');
 constexpr uint32_t kSunChunk = MakeFourcc('S', 'U', 'N', ' ');
+constexpr uint32_t kMaterialsChunk = MakeFourcc('M', 'A', 'T', 'S');
+constexpr uint32_t kImageLightingChunk = MakeFourcc('I', 'B', 'L', ' ');
 
 // SUN chunk size: vec3 direction, vec3 color, f32 intensity, u32 flags.
 constexpr size_t kSunChunkBytes = 8 * sizeof(uint32_t);
@@ -43,6 +45,9 @@ constexpr size_t kMinEntityBytes =
 // u32 entity index, u32 motion, u32 shape, f32 mass, f32 friction,
 // f32 restitution.
 constexpr size_t kPhysicsRecordBytes = 6 * sizeof(uint32_t);
+
+// u32 entity index, then the smallest valid string (u32 length, one byte).
+constexpr size_t kMinMaterialRecordBytes = 2 * sizeof(uint32_t) + 1;
 
 // Highest valid enumerator values on disk.
 constexpr uint32_t kMaxMotionType = static_cast<uint32_t>(MotionType::kDynamic);
@@ -82,6 +87,18 @@ std::string ResolvedMeshPath(const std::string& stored,
     return stored;
   }
   return core::JoinPath(scene_dir, stored);
+}
+
+// Like StoredMeshPath() for a file that is not a mesh; empty stays empty.
+std::string StoredFilePath(const std::string& path,
+                           const std::string& scene_dir) {
+  return path.empty() ? std::string() : StoredMeshPath(path, scene_dir);
+}
+
+// The inverse of StoredFilePath().
+std::string ResolvedFilePath(const std::string& stored,
+                             const std::string& scene_dir) {
+  return stored.empty() ? std::string() : core::JoinPath(scene_dir, stored);
 }
 
 void WriteVec3(BinaryWriter& writer, const glm::vec3& v) {
@@ -161,11 +178,27 @@ bool HasSunData(const SunLight& sun) {
          sun.casts_shadows != defaults.casts_shadows;
 }
 
+bool HasMaterial(const Entity& entity) { return !entity.material_path.empty(); }
+
+// Returns whether the IBL chunk carries information: any field that differs
+// from the default environment. Scenes without it stay byte-identical to
+// older files.
+bool HasImageLightingData(const Environment& environment) {
+  const Environment defaults;
+  return environment.hdri_path != defaults.hdri_path ||
+         environment.intensity != defaults.intensity ||
+         environment.rotation_radians != defaults.rotation_radians ||
+         environment.exposure_ev != defaults.exposure_ev;
+}
+
 // Rejects scenes the loader would refuse, so a save never produces an
 // unreadable file.
 bool IsSerializable(const Scene& scene, const std::string& scene_dir) {
   if (!IsEnvironmentFinite(scene) || !IsFinite(scene.gravity) ||
-      ValidateSunLight(scene.sun).has_value()) {
+      ValidateSunLight(scene.sun).has_value() ||
+      ValidateEnvironment(scene.environment).has_value() ||
+      StoredFilePath(scene.environment.hdri_path, scene_dir).size() >
+          kMaxStringLength) {
     return false;
   }
   return std::ranges::all_of(scene.entities, [&](const Entity& entity) {
@@ -173,6 +206,8 @@ bool IsSerializable(const Scene& scene, const std::string& scene_dir) {
            (!entity.body.has_value() ||
             !ValidateRigidBody(*entity.body).has_value()) &&
            StoredMeshPath(entity.mesh_path, scene_dir).size() <=
+               kMaxStringLength &&
+           StoredFilePath(entity.material_path, scene_dir).size() <=
                kMaxStringLength &&
            IsFinite(entity.transform.position) &&
            IsFinite(entity.transform.rotation) &&
@@ -212,8 +247,37 @@ void EncodeSun(const SunLight& sun, BinaryWriter& writer) {
   writer.EndChunk(chunk);
 }
 
+// Appends the MATS chunk: one record per entity with a material, in entity
+// order.
+void EncodeMaterials(const Scene& scene, const std::string& scene_dir,
+                     BinaryWriter& writer) {
+  const size_t chunk = writer.BeginChunk(kMaterialsChunk);
+  writer.WriteU32(static_cast<uint32_t>(
+      std::ranges::count_if(scene.entities, HasMaterial)));
+  for (size_t i = 0; i < scene.entities.size(); ++i) {
+    const Entity& entity = scene.entities[i];
+    if (!HasMaterial(entity)) {
+      continue;
+    }
+    writer.WriteU32(static_cast<uint32_t>(i));
+    writer.WriteString(StoredFilePath(entity.material_path, scene_dir));
+  }
+  writer.EndChunk(chunk);
+}
+
+// Appends the IBL chunk for `environment`.
+void EncodeImageLighting(const Environment& environment,
+                         const std::string& scene_dir, BinaryWriter& writer) {
+  const size_t chunk = writer.BeginChunk(kImageLightingChunk);
+  writer.WriteString(StoredFilePath(environment.hdri_path, scene_dir));
+  writer.WriteF32(environment.intensity);
+  writer.WriteF32(environment.rotation_radians);
+  writer.WriteF32(environment.exposure_ev);
+  writer.EndChunk(chunk);
+}
+
 // Returns the chunked payload (environment, entities, then the optional
-// physics and sun chunks) for `scene`.
+// physics, sun, materials and image-lighting chunks) for `scene`.
 std::vector<std::byte> EncodePayload(const Scene& scene,
                                      const std::string& scene_dir) {
   BinaryWriter writer;
@@ -244,6 +308,12 @@ std::vector<std::byte> EncodePayload(const Scene& scene,
   }
   if (HasSunData(scene.sun)) {
     EncodeSun(scene.sun, writer);
+  }
+  if (std::ranges::any_of(scene.entities, HasMaterial)) {
+    EncodeMaterials(scene, scene_dir, writer);
+  }
+  if (HasImageLightingData(scene.environment)) {
+    EncodeImageLighting(scene.environment, scene_dir, writer);
   }
   return writer.bytes();
 }
@@ -370,6 +440,57 @@ Status DecodeSun(std::span<const std::byte> body, Scene& scene) {
   return Status::Ok();
 }
 
+// Decodes the MATS chunk `body`: assigns a material file to each listed
+// entity. Must run after the entities are decoded.
+Status DecodeMaterials(std::span<const std::byte> body,
+                       const std::string& scene_dir, Scene& scene) {
+  BinaryReader reader(body);
+  const uint32_t count = reader.ReadU32();
+  if (auto status = ToResult(reader.status()); !status.ok()) {
+    return status;
+  }
+  // Checked before any record is read so a hostile count cannot drive work.
+  if (count > reader.remaining() / kMinMaterialRecordBytes) {
+    return Status::Error(SceneIoError::kCorrupt);
+  }
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t index = reader.ReadU32();
+    const std::string stored = reader.ReadString(kMaxStringLength);
+    if (auto status = ToResult(reader.status()); !status.ok()) {
+      return status;
+    }
+    if (index >= scene.entities.size() || stored.empty() ||
+        HasMaterial(scene.entities[index])) {
+      return Status::Error(SceneIoError::kCorrupt);
+    }
+    scene.entities[index].material_path = ResolvedFilePath(stored, scene_dir);
+  }
+  if (reader.remaining() != 0) {
+    return Status::Error(SceneIoError::kCorrupt);
+  }
+  return Status::Ok();
+}
+
+// Decodes the IBL chunk `body` into `scene.environment`.
+Status DecodeImageLighting(std::span<const std::byte> body,
+                           const std::string& scene_dir, Scene& scene) {
+  BinaryReader reader(body);
+  Environment environment;
+  environment.hdri_path =
+      ResolvedFilePath(reader.ReadString(kMaxStringLength), scene_dir);
+  environment.intensity = reader.ReadF32();
+  environment.rotation_radians = reader.ReadF32();
+  environment.exposure_ev = reader.ReadF32();
+  if (auto status = ToResult(reader.status()); !status.ok()) {
+    return status;
+  }
+  if (reader.remaining() != 0 || ValidateEnvironment(environment).has_value()) {
+    return Status::Error(SceneIoError::kCorrupt);
+  }
+  scene.environment = std::move(environment);
+  return Status::Ok();
+}
+
 // Validates the header and checksum of the scene file `file` and decodes its
 // chunks. Unknown chunks are skipped.
 SceneResult DecodeFile(std::span<const std::byte> file,
@@ -408,7 +529,9 @@ SceneResult DecodeFile(std::span<const std::byte> file,
   bool has_environment = false;
   bool has_entities = false;
   bool has_sun = false;
+  bool has_image_lighting = false;
   std::optional<std::span<const std::byte>> physics;
+  std::optional<std::span<const std::byte>> materials;
   BinaryReader chunks(payload);
   while (chunks.remaining() > 0) {
     if (chunks.remaining() < kChunkHeaderSize) {
@@ -428,6 +551,21 @@ SceneResult DecodeFile(std::span<const std::byte> file,
         return SceneResult::Error(SceneIoError::kCorrupt);
       }
       physics = body;
+    } else if (fourcc == kMaterialsChunk) {
+      // Like PHYS: records refer to entities by index.
+      if (materials.has_value()) {
+        return SceneResult::Error(SceneIoError::kCorrupt);
+      }
+      materials = body;
+    } else if (fourcc == kImageLightingChunk) {
+      if (has_image_lighting) {
+        return SceneResult::Error(SceneIoError::kCorrupt);
+      }
+      has_image_lighting = true;
+      if (auto decoded = DecodeImageLighting(body, scene_dir, scene);
+          !decoded.ok()) {
+        return SceneResult::Error(decoded.error());
+      }
     } else if (fourcc == kSunChunk) {
       if (has_sun) {
         return SceneResult::Error(SceneIoError::kCorrupt);
@@ -459,6 +597,12 @@ SceneResult DecodeFile(std::span<const std::byte> file,
       return SceneResult::Error(decoded.error());
     }
   }
+  if (materials.has_value()) {
+    if (auto decoded = DecodeMaterials(*materials, scene_dir, scene);
+        !decoded.ok()) {
+      return SceneResult::Error(decoded.error());
+    }
+  }
   return SceneResult::Ok(std::move(scene));
 }
 
@@ -482,7 +626,7 @@ const char* ToString(SceneIoError error) {
       return "corrupt scene data";
     case SceneIoError::kInvalidScene:
       return "scene cannot be serialized (oversized string, non-finite "
-             "value, invalid rigid body or invalid sun)";
+             "value, invalid rigid body, sun or environment)";
   }
   return "unknown error";
 }

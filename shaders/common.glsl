@@ -1,13 +1,17 @@
-// Declarations shared by the mesh shaders. Included with #include "common.glsl".
+// Declarations shared by the scene shaders (set 0, render::FrameGlobals).
+// Included with #include "common.glsl".
 
 const int kCascadeCount = 4;
 
 // Per-frame data, one uniform buffer per frame in flight. Must match
-// FrameUniforms in src/render/renderer.cc (std140; the C++ side asserts every
-// offset).
+// FrameUniforms in src/render/frame_globals.h (std140; the C++ side asserts
+// every offset).
 layout(set = 0, binding = 0) uniform FrameUniforms {
     mat4 viewProj;
     mat4 view;                                // World to camera view space.
+    mat4 projection;                          // Reversed-Z, infinite far.
+    mat4 inverseProjection;
+    mat4 inverseViewProj;
     vec4 cameraPosition;
     vec4 lightPosition;
     vec4 lightColor;                          // rgb: color, a: intensity
@@ -19,8 +23,19 @@ layout(set = 0, binding = 0) uniform FrameUniforms {
     vec4 cascadeTexelWorldSize;               // Metres per shadow-map texel.
     vec4 shadowParams;                        // x: shadows on, y: cascade debug,
                                               // z: shadow distance, w: normal offset scale
+    vec4 screen;                              // xy: target size in pixels, zw: 1 / size
+    vec4 irradianceSh[9];                     // Environment irradiance, SH9, rgb
+    vec4 environmentParams;                   // x: intensity, y: rotation (rad),
+                                              // z: max prefiltered mip, w: 1 if bound
 } frame;
 
 // Cascaded sun shadow map, one layer per cascade; compares against the
 // reference depth passed as the last texture coordinate.
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow shadowMap;
+// Prefiltered specular environment (GGX, roughness across mips). Black 1x1
+// until an environment is bound.
+layout(set = 0, binding = 2) uniform samplerCube environmentMap;
+// Split-sum BRDF lookup: x = NdotV, y = roughness; rg = scale, bias.
+layout(set = 0, binding = 3) uniform sampler2D brdfLut;
+// Screen-space ambient occlusion (r). White 1x1 until SSAO exists.
+layout(set = 0, binding = 4) uniform sampler2D ambientOcclusionMap;

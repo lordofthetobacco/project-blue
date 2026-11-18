@@ -74,9 +74,6 @@ struct PhysicsOverlayInfo {
 struct ShadowOverlayInfo {
   bool enabled = false;  // Shadows are actually being rendered.
   bool cascade_debug = false;
-  // GPU time of the shadow and main passes; nullopt when not measured.
-  std::optional<double> shadow_ms;
-  std::optional<double> main_ms;
 };
 
 // Plain data the overlay shows about the weapon in hand; the views must
@@ -133,7 +130,6 @@ struct SceneOverlayInfo {
 
 // What one Build() call produced.
 struct BuildResult {
-  ImDrawData* draw_data = nullptr;
   // The user finished changing a value in the settings window this frame.
   bool settings_changed = false;
   // The user pressed Clear in the hit log window this frame.
@@ -163,15 +159,19 @@ class PerfOverlay {
   // Forwards an SDL event to ImGui.
   void ProcessEvent(const SDL_Event& event);
   void ToggleVisible() { visible_ = !visible_; }
+  [[nodiscard]] bool visible() const { return visible_; }
 
-  // Records this frame's timings and builds the UI: the stats and settings
-  // windows while visible, plus the crosshair if requested. Edits in the
-  // settings window are written straight into `settings`. Always returns the
-  // frame's draw data.
+  // Records this frame's timings, starts the ImGui frame and builds the
+  // overlay: the stats and settings windows while visible, plus the
+  // crosshair if requested. Edits in the settings window are written
+  // straight into `settings`. More windows (ui::EditorPanels) may be emitted
+  // after it; Render() ends the frame.
   [[nodiscard]] BuildResult Build(float cpu_frame_ms,
                                   std::optional<double> gpu_frame_ms,
                                   const SceneOverlayInfo& scene_info,
                                   input::InputSettings& settings);
+  // Ends the ImGui frame Build() started and returns its draw data.
+  [[nodiscard]] ImDrawData* Render();
 
   // Whether ImGui is using the mouse / keyboard right now (hovering or
   // dragging a widget). The app keeps such events away from the game.
@@ -185,7 +185,8 @@ class PerfOverlay {
   // Each Draw* helper emits one section of the overlay window.
   void DrawTimings(float cpu_frame_ms) const;
   void DrawDeviceInfo() const;
-  // Emits the settings window; returns true when an edit was completed.
+  // Emits the settings window; returns true when an edit of `settings` was
+  // completed.
   [[nodiscard]] bool DrawSettings(input::InputSettings& settings) const;
   // Emits the hit log window; returns true when Clear was pressed.
   [[nodiscard]] bool DrawHitLog(const HitLogOverlayInfo& info) const;

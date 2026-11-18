@@ -25,16 +25,16 @@ TEST_CASE("an imported, placed model survives a scene save and load") {
   const auto imported = asset::ImportModel(teapot_path);
   REQUIRE(imported.ok());
 
-  const asset::MeshData plane = asset::MakePlane(12.0f, glm::vec3(0.1f));
+  const asset::MeshData plane = asset::MakePlane(12.0f);
   Scene scene;
   scene.entities.push_back(
       {.name = "ground", .mesh_path = "builtin:plane", .transform = {}});
   scene.entities.push_back({
       .name = "teapot",
       .mesh_path = teapot_path,
-      .transform =
-          FitOnGround(imported.value().bounds.min, imported.value().bounds.max,
-                      2.0f, {1.5f, plane.bounds.min.y, -0.5f}),
+      .transform = FitOnGround(imported.value().mesh.bounds.min,
+                               imported.value().mesh.bounds.max, 2.0f,
+                               {1.5f, plane.bounds.min.y, -0.5f}),
   });
 
   scene.entities[0].body = RigidBody{.motion = MotionType::kStatic,
@@ -73,7 +73,7 @@ TEST_CASE("an imported, placed model survives a scene save and load") {
 
   const auto reimported = asset::ImportModel(teapot.mesh_path);
   REQUIRE(reimported.ok());
-  CHECK(reimported.value().indices.size() / 3 == kTeapotTriangles);
+  CHECK(reimported.value().mesh.indices.size() / 3 == kTeapotTriangles);
 
   for (size_t i = 0; i < scene.entities.size(); ++i) {
     const Transform& expected = scene.entities[i].transform;

@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -12,6 +13,7 @@
 
 #include "asset/mesh_data.h"
 #include "render/renderer.h"
+#include "render/scene_view.h"
 
 namespace blue::render {
 
@@ -21,13 +23,29 @@ struct CachedMesh {
   // The CPU copy of the mesh, e.g. for building physics shapes. Owned by the
   // MeshCache that returned it and valid until that cache is destroyed.
   const asset::MeshData* cpu_mesh = nullptr;
+  // One entry per submesh of `cpu_mesh`, for DrawItem::submeshes. Owned by
+  // the cache, like `cpu_mesh`.
+  std::span<const SubmeshDraw> submeshes;
+  // The mesh's own materials (its model's material table, indexed like
+  // asset::Submesh::material). Owned by the cache.
+  std::span<const MaterialId> materials;
 };
 
-// Resolves scene::Entity::mesh_path to an uploaded mesh, importing each
-// source once. Failures are remembered so a broken path is reported once
-// rather than re-parsed every frame. The CPU mesh data of every loaded mesh
-// is kept for the cache's lifetime at a stable address (CachedMesh::cpu_mesh).
-// Borrows `renderer`, which must outlive the cache. Not thread-safe.
+// Returns one SubmeshDraw per element of `submeshes`, with each model-local
+// material index resolved through `materials` (kDefaultMaterial when out of
+// range).
+[[nodiscard]] std::vector<SubmeshDraw> ResolveSubmeshes(
+    std::span<const asset::Submesh> submeshes,
+    std::span<const MaterialId> materials);
+
+// Resolves scene::Entity::mesh_path to an uploaded mesh with its materials,
+// importing each source once (the model's materials are created once, its
+// textures loaded in one batch). Builtin meshes ("builtin:cube", "plane",
+// "sphere") get a material of their own. Failures are remembered so a broken
+// path is reported once rather than re-parsed every frame. The CPU mesh data
+// of every loaded mesh is kept for the cache's lifetime at a stable address
+// (CachedMesh::cpu_mesh). Borrows `renderer`, which must outlive the cache.
+// Not thread-safe.
 class MeshCache {
  public:
   explicit MeshCache(Renderer& renderer) : renderer_(renderer) {}
@@ -47,18 +65,27 @@ class MeshCache {
     }
   };
 
+  // Everything the cache keeps of one loaded mesh.
+  struct Stored {
+    asset::MeshData data;
+    std::vector<MaterialId> materials;
+    std::vector<SubmeshDraw> submeshes;
+  };
+
   using Entries = std::unordered_map<std::string, std::optional<CachedMesh>,
                                      StringHash, std::equal_to<>>;
 
-  // Keeps `data` for the cache's lifetime and uploads it.
-  [[nodiscard]] CachedMesh Store(asset::MeshData data);
+  // Creates `materials`, keeps `data` for the cache's lifetime and uploads
+  // it.
+  [[nodiscard]] CachedMesh Store(
+      asset::MeshData data, std::span<const material::MaterialDesc> materials);
   [[nodiscard]] std::optional<CachedMesh> Load(std::string_view mesh_path,
                                                const std::string& key);
 
   Renderer& renderer_;
-  // Owners of CachedMesh::cpu_mesh; declared before the maps that point into
-  // them.
-  std::vector<std::unique_ptr<asset::MeshData>> cpu_meshes_;
+  // Owners of the CachedMesh pointers and spans; declared before the maps
+  // that point into them.
+  std::vector<std::unique_ptr<Stored>> stored_;
   // In both maps nullopt marks a failed load.
   // Normalized key: one entry per distinct source.
   Entries by_key_;

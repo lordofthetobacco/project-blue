@@ -1,5 +1,6 @@
 #include "render/pipeline.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -10,6 +11,26 @@
 namespace blue::render {
 
 namespace {
+
+// Returns the blend state of `mode` for the single color attachment.
+VkPipelineColorBlendAttachmentState BlendAttachment(BlendMode mode) {
+  VkPipelineColorBlendAttachmentState state{
+      .blendEnable = mode == BlendMode::kReplace ? VK_FALSE : VK_TRUE,
+      .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+      .colorBlendOp = VK_BLEND_OP_ADD,
+      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+      .alphaBlendOp = VK_BLEND_OP_ADD,
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+  };
+  if (mode == BlendMode::kAlpha) {
+    state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  }
+  return state;
+}
 
 VkShaderModule CreateShaderModule(VkDevice device,
                                   std::span<const uint32_t> code) {
@@ -51,6 +72,20 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
       .module = vertex_module,
       .pName = "main",
   });
+  std::vector<VkSpecializationMapEntry> constant_entries;
+  for (size_t i = 0; i < desc.fragment_constants.size(); ++i) {
+    constant_entries.push_back({
+        .constantID = static_cast<uint32_t>(i),
+        .offset = static_cast<uint32_t>(i * sizeof(uint32_t)),
+        .size = sizeof(uint32_t),
+    });
+  }
+  const VkSpecializationInfo specialization{
+      .mapEntryCount = static_cast<uint32_t>(constant_entries.size()),
+      .pMapEntries = constant_entries.data(),
+      .dataSize = desc.fragment_constants.size_bytes(),
+      .pData = desc.fragment_constants.data(),
+  };
   if (!desc.fragment_spirv.empty()) {
     fragment_module = CreateShaderModule(device_, desc.fragment_spirv);
     stages.push_back({
@@ -58,6 +93,8 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
         .module = fragment_module,
         .pName = "main",
+        .pSpecializationInfo =
+            constant_entries.empty() ? nullptr : &specialization,
     });
   }
 
@@ -99,17 +136,8 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
       .depthWriteEnable = has_depth && desc.depth_write,
       .depthCompareOp = desc.depth_compare_op,
   };
-  const VkPipelineColorBlendAttachmentState blend_attachment{
-      .blendEnable = desc.additive_blend,
-      .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-      .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
-      .colorBlendOp = VK_BLEND_OP_ADD,
-      .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-      .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-      .alphaBlendOp = VK_BLEND_OP_ADD,
-      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-  };
+  const VkPipelineColorBlendAttachmentState blend_attachment =
+      BlendAttachment(desc.blend);
   const uint32_t color_attachment_count =
       desc.color_format != VK_FORMAT_UNDEFINED ? 1 : 0;
   const VkPipelineColorBlendStateCreateInfo color_blend{

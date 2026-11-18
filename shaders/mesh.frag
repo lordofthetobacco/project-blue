@@ -1,115 +1,88 @@
 #version 450
 
 #include "common.glsl"
+#include "shadows.glsl"
+#include "pbr.glsl"
+#include "material.glsl"
+
+// Pipeline variants (render::MaterialVariant).
+layout(constant_id = 0) const bool kAlphaMask = false;
+layout(constant_id = 1) const bool kDoubleSided = false;
 
 layout(location = 0) in vec3 inWorldPosition;
 layout(location = 1) in vec3 inNormal;
-layout(location = 2) in vec3 inColor;
+layout(location = 2) in vec2 inUv;
+layout(location = 3) in vec4 inTangent;
 
 layout(location = 0) out vec4 outColor;
 
-const float kShininess = 48.0;
-const float kSpecularStrength = 0.35;
-// Fraction of a cascade's depth range (and of the shadow distance) over which
-// it blends into the next cascade (or fades out).
-const float kBlendFraction = 0.1;
-const float kDebugTintStrength = 0.35;
-const vec3 kCascadeTints[kCascadeCount] = vec3[](
-    vec3(1.0, 0.1, 0.1), vec3(0.1, 1.0, 0.1), vec3(0.1, 0.3, 1.0), vec3(1.0, 0.9, 0.1));
-
-// Returns the lit fraction (0 = shadowed, 1 = lit) of `worldPosition` in
-// `cascade`: the position is moved along the normal by a few texels to avoid
-// self-shadowing, then filtered with a 3x3 grid of hardware-filtered taps.
-float SampleCascade(int cascade, vec3 worldPosition, vec3 normal)
+// Returns the shading normal: `normal` perturbed by the tangent-space normal
+// `mapped` (already unpacked to [-1, 1]). The mesh's bitangent
+// cross(N, T) * w points towards increasing v, which is image-down (UV
+// origin top-left); the maps' green channel points image-up (+Y, OpenGL /
+// glTF convention), hence the minus.
+vec3 PerturbNormal(vec3 normal, vec3 tangent, float handedness, vec3 mapped)
 {
-    const float offsetScale = frame.cascadeTexelWorldSize[cascade] * frame.shadowParams.w;
-    const vec4 lightClip = frame.cascadeViewProjection[cascade] * vec4(worldPosition + normal * offsetScale, 1.0);
-    const vec3 coord = vec3(lightClip.xy * 0.5 + 0.5, lightClip.z);
-
-    const vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0).xy);
-    float lit = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            const vec2 uv = coord.xy + vec2(x, y) * texel;
-            lit += texture(shadowMap, vec4(uv, float(cascade), coord.z));
-        }
+    const vec3 t = tangent - normal * dot(normal, tangent);
+    if (dot(t, t) < 1.0e-12) {
+        return normal;  // No usable tangent: keep the geometric normal.
     }
-    return lit / 9.0;
+    const vec3 unitTangent = normalize(t);
+    const vec3 bitangent = cross(normal, unitTangent) * handedness;
+    return normalize(unitTangent * mapped.x - bitangent * mapped.y + normal * mapped.z);
 }
 
-// Returns the index of the first cascade that reaches `viewDepth`, or
-// kCascadeCount beyond the shadow distance.
-int CascadeIndex(float viewDepth)
-{
-    for (int i = 0; i < kCascadeCount; ++i) {
-        if (frame.cascadeSplitFar[i] > viewDepth) {
-            return i;
-        }
-    }
-    return kCascadeCount;
-}
-
-// Returns the lit fraction of `worldPosition` at camera distance `viewDepth`.
-float SunVisibility(vec3 worldPosition, vec3 normal, float viewDepth)
-{
-    const int cascade = CascadeIndex(viewDepth);
-    if (cascade == kCascadeCount) {
-        return 1.0;
-    }
-
-    float visibility = SampleCascade(cascade, worldPosition, normal);
-
-    const float cascadeFar = frame.cascadeSplitFar[cascade];
-    const float cascadeNear = cascade == 0 ? 0.0 : frame.cascadeSplitFar[cascade - 1];
-    const float blendRange = (cascadeFar - cascadeNear) * kBlendFraction;
-    const float blend = clamp((viewDepth - (cascadeFar - blendRange)) / blendRange, 0.0, 1.0);
-    if (cascade + 1 < kCascadeCount && blend > 0.0) {
-        visibility = mix(visibility, SampleCascade(cascade + 1, worldPosition, normal), blend);
-    }
-
-    const float shadowDistance = frame.shadowParams.z;
-    const float fadeRange = shadowDistance * kBlendFraction;
-    const float fade = clamp((viewDepth - (shadowDistance - fadeRange)) / fadeRange, 0.0, 1.0);
-    return mix(visibility, 1.0, fade);
-}
-
-// Blinn-Phong lighting from the shadowed sun and a point fill light,
-// evaluated in world space, plus ambient.
 void main()
 {
-    const vec3 normal = normalize(inNormal);
-    const vec3 viewDir = normalize(frame.cameraPosition.xyz - inWorldPosition);
+    // Every texture is sampled before the alpha test so implicit derivatives
+    // stay defined in the whole quad.
+    const vec2 uv = inUv * material.uvAlpha.xy;
+    const vec4 baseColor = texture(baseColorMap, uv) * material.baseColor;
+    const vec4 metallicRoughness = texture(metallicRoughnessMap, uv);
+    vec3 mapped = texture(normalMap, uv).xyz * 2.0 - 1.0;
+    const float occlusionTexel = texture(occlusionMap, uv).r;
+    const vec3 emissive = texture(emissiveMap, uv).rgb * material.emissive.rgb;
 
-    // Point fill light (unshadowed).
+    vec3 geometricNormal = normalize(inNormal);
+    vec3 tangent = inTangent.xyz;
+    if (kDoubleSided && !gl_FrontFacing) {
+        // Back face: mirror the whole tangent frame. The bitangent comes from
+        // cross(N, T), which is unchanged when both flip, so flip its sign too.
+        geometricNormal = -geometricNormal;
+        tangent = -tangent;
+        mapped.y = -mapped.y;
+    }
+    mapped.xy *= material.surface.z;
+    const vec3 normal = PerturbNormal(geometricNormal, tangent, inTangent.w, mapped);
+
+    const float roughness = FilterRoughness(metallicRoughness.g * material.surface.y, normal);
+
+    if (kAlphaMask && baseColor.a < material.uvAlpha.z) {
+        discard;
+    }
+
+    const float metallic = clamp(metallicRoughness.b * material.surface.x, 0.0, 1.0);
+    const float occlusion = 1.0 + material.surface.w * (occlusionTexel - 1.0);
+    const Surface s = MakeSurface(inWorldPosition, normal, baseColor.rgb, metallic,
+                                  roughness, occlusion);
+
+    // Point fill light (unshadowed), inverse-square falloff.
     const vec3 toLight = frame.lightPosition.xyz - inWorldPosition;
-    const vec3 lightDir = normalize(toLight);
-    const vec3 halfDir = normalize(lightDir + viewDir);
-    const float distanceSq = dot(toLight, toLight);
-    const vec3 radiance = frame.lightColor.rgb * frame.lightColor.a / distanceSq;
-    const float diffuse = max(dot(normal, lightDir), 0.0);
-    const float specular = diffuse > 0.0 ? pow(max(dot(normal, halfDir), 0.0), kShininess) : 0.0;
+    const float distanceSq = max(dot(toLight, toLight), 1.0e-4);
+    vec3 color = DirectLight(s, toLight * inversesqrt(distanceSq),
+                             frame.lightColor.rgb * frame.lightColor.a / distanceSq);
 
-    // Sun. Surfaces facing away from it get no direct light, shadow lookup
-    // included.
+    // Sun. Surfaces whose geometry faces away from it get no direct light,
+    // shadow lookup included (a bumped normal must not light the back side).
     const vec3 sunDir = -normalize(frame.sunDirection.xyz);
-    const vec3 sunHalf = normalize(sunDir + viewDir);
-    const float sunDiffuse = max(dot(normal, sunDir), 0.0);
-    const bool shadowsOn = frame.shadowParams.x > 0.5;
     const float viewDepth = -(frame.view * vec4(inWorldPosition, 1.0)).z;
-    float visibility = 1.0;
-    if (shadowsOn && sunDiffuse > 0.0) {
-        visibility = SunVisibility(inWorldPosition, normal, viewDepth);
+    float visibility = dot(geometricNormal, sunDir) > 0.0 ? 1.0 : 0.0;
+    if (frame.shadowParams.x > 0.5 && visibility > 0.0) {
+        visibility = SunVisibility(inWorldPosition, geometricNormal, viewDepth);
     }
-    const float sunSpecular = sunDiffuse > 0.0 ? pow(max(dot(normal, sunHalf), 0.0), kShininess) : 0.0;
+    color += DirectLight(s, sunDir, frame.sunColor.rgb * visibility);
 
-    vec3 color = frame.ambientColor.rgb * inColor
-               + radiance * (diffuse * inColor + specular * kSpecularStrength)
-               + frame.sunColor.rgb * visibility * (sunDiffuse * inColor + sunSpecular * kSpecularStrength);
-
-    const int cascade = CascadeIndex(viewDepth);
-    if (shadowsOn && frame.shadowParams.y > 0.5 && cascade < kCascadeCount) {
-        color = mix(color, kCascadeTints[cascade], kDebugTintStrength);
-    }
-
+    color += AmbientLight(s, geometricNormal) + emissive;
+    color = ApplyCascadeDebugTint(color, viewDepth);
     outColor = vec4(color, 1.0);
 }

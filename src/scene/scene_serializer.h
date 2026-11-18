@@ -44,6 +44,14 @@ enum class SceneIoError {
 //           with the default sun stay byte-identical to older files; a file
 //           without it loads with the default sun. The direction is
 //           normalized on load.
+//   'MATS'  optional, once: u32 count, then count records of { u32
+//           entity_index, string material_path } sorted by entity index,
+//           paths stored like mesh paths. Written only if an entity has a
+//           material_path; may precede ENTS.
+//   'IBL '  optional, once: string hdri_path (stored like mesh paths; empty
+//           = default sky), f32 intensity, f32 rotation_radians, f32
+//           exposure_ev. Written only if the environment differs from the
+//           default. ('ENVR' is older and holds the camera and lights.)
 inline constexpr uint32_t kSceneFormatVersion = 1;
 
 // Writes `scene` to the file at `path`, creating missing directories and
@@ -51,8 +59,9 @@ inline constexpr uint32_t kSceneFormatVersion = 1;
 // scene file so a scene folder can be moved. Returns kInvalidScene, without
 // touching the file system, if the scene holds an oversized string or a
 // non-finite value, an invalid rigid body (see ValidateRigidBody()), an invalid
-// sun (see ValidateSunLight()) or a non-finite gravity, and kWriteFailed if the
-// file cannot be written.
+// sun (see ValidateSunLight()), an invalid environment (see
+// ValidateEnvironment()) or a non-finite gravity, and kWriteFailed if the
+// file cannot be written. Material and HDRI paths are stored like mesh paths.
 [[nodiscard]] core::Result<void, SceneIoError> SaveScene(
     const Scene& scene, const std::string& path);
 
@@ -61,7 +70,7 @@ inline constexpr uint32_t kSceneFormatVersion = 1;
 // the file cannot be read, kCorrupt if it exceeds the size limit, and the
 // matching error for any malformed contents, including physics records that
 // refer to missing entities or fail ValidateRigidBody(), and a malformed or
-// invalid SUN chunk; hostile sizes are
+// invalid SUN, MATS or IBL chunk; hostile sizes are
 // rejected before they can drive an allocation.
 [[nodiscard]] core::Result<Scene, SceneIoError> LoadScene(
     const std::string& path);

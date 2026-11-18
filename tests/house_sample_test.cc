@@ -3,6 +3,8 @@
 
 #include <doctest/doctest.h>
 
+#include <cstddef>
+
 #include <glm/vec3.hpp>
 
 #include "asset/model_importer.h"
@@ -10,6 +12,7 @@
 #include "physics/physics_runtime.h"
 #include "physics/physics_world.h"
 #include "scene/scene.h"
+#include "tests/mesh_checks.h"
 
 namespace blue {
 
@@ -17,7 +20,7 @@ TEST_CASE("The sample house imports in metres with its base on the ground") {
   const auto house =
       asset::ImportModel(core::JoinPath(BLUE_SAMPLES_DIR, "house.obj"));
   REQUIRE(house.ok());
-  const asset::MeshData& mesh = house.value();
+  const asset::MeshData& mesh = house.value().mesh;
   CHECK(mesh.indices.size() % 3 == 0);
   CHECK(mesh.indices.size() / 3 > 10000);
 
@@ -26,6 +29,14 @@ TEST_CASE("The sample house imports in metres with its base on the ground") {
   CHECK(size.x == doctest::Approx(6.44f).epsilon(0.01));
   CHECK(size.y == doctest::Approx(7.10f).epsilon(0.01));
   CHECK(size.z == doctest::Approx(14.79f).epsilon(0.01));
+
+  // The MTL file's 124 materials collapse to a few distinct ones.
+  const size_t materials = house.value().materials.size();
+  MESSAGE("house materials after merging: ", materials);
+  CHECK(materials >= 2);
+  CHECK(materials < 124);
+  testing::CheckSubmeshes(mesh, materials);
+  CHECK(mesh.submeshes.size() == materials);
 }
 
 TEST_CASE("The sample house becomes a static triangle mesh body") {
@@ -40,8 +51,8 @@ TEST_CASE("The sample house becomes a static triangle mesh body") {
                .shape = scene::ShapeType::kTriangleMesh},
       .pose = {.position = {-9.0f, 0.0f, -3.0f}},
       .scale = glm::vec3(1.0f),
-      .bounds = house.value().bounds,
-      .mesh = &house.value(),
+      .bounds = house.value().mesh.bounds,
+      .mesh = &house.value().mesh,
       .shape_key = "test:house",
   });
   REQUIRE(body.ok());

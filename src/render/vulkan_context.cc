@@ -88,7 +88,10 @@ bool SupportsRequiredFeatures(VkPhysicalDevice device) {
       .pNext = &features13};
   vkGetPhysicalDeviceFeatures2(device, &features);
   // Depth clamp keeps shadow casters in front of a cascade's near plane.
+  // Demote-to-helper (what discard compiles to for alpha-masked materials)
+  // is mandatory in Vulkan 1.3, but checked like the rest.
   return features13.dynamicRendering && features13.synchronization2 &&
+         features13.shaderDemoteToHelperInvocation &&
          features.features.depthClamp;
 }
 
@@ -273,6 +276,9 @@ void VulkanContext::SelectPhysicalDevice() {
   queue_family_ = best->queue_family;
   timestamp_valid_bits_ =
       QueryTimestampValidBits(physical_device_, queue_family_);
+  VkPhysicalDeviceFeatures supported{};
+  vkGetPhysicalDeviceFeatures(physical_device_, &supported);
+  sampler_anisotropy_ = supported.samplerAnisotropy == VK_TRUE;
 
   core::log::Info(
       "GPU: {} (Vulkan {}.{}.{}, driver 0x{:x})", properties_.deviceName,
@@ -292,13 +298,16 @@ void VulkanContext::CreateDevice() {
 
   VkPhysicalDeviceVulkan13Features features13{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+      .shaderDemoteToHelperInvocation = VK_TRUE,
       .synchronization2 = VK_TRUE,
       .dynamicRendering = VK_TRUE,
   };
   const VkPhysicalDeviceFeatures2 features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
       .pNext = &features13,
-      .features = {.depthClamp = VK_TRUE},
+      .features = {.depthClamp = VK_TRUE,
+                   .samplerAnisotropy =
+                       sampler_anisotropy_ ? VK_TRUE : VK_FALSE},
   };
 
   const VkDeviceCreateInfo create_info{

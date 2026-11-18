@@ -2,6 +2,7 @@
 #define BLUE_RENDER_MODEL_CACHE_H_
 
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -11,6 +12,7 @@
 #include "animation/hierarchy.h"
 #include "asset/mesh_data.h"
 #include "render/renderer.h"
+#include "render/scene_view.h"
 
 namespace blue::render {
 
@@ -20,24 +22,33 @@ struct UploadedPart {
   MeshId mesh{};
   // Bounds of the mesh in the node's local space, for DrawItem::bounds.
   asset::Bounds bounds;
+  // The part's submeshes with their materials, for DrawItem::submeshes.
+  // Points into the owning UploadedModel.
+  std::span<const SubmeshDraw> submeshes;
 };
 
 // An animated model on the GPU: one mesh per part, drawn with the world
 // matrix of its node. The CPU meshes are dropped after the upload; the node
-// hierarchy and the clips are kept for posing.
+// hierarchy, the clips and the materials are kept.
 struct UploadedModel {
   animation::Hierarchy hierarchy;
   std::vector<animation::Clip> clips;
   std::vector<UploadedPart> parts;
   asset::Bounds rest_bounds;  // Model space, rest pose.
+  // The model's material table (shared by all parts).
+  std::vector<MaterialId> materials;
+  // Storage of every part's UploadedPart::submeshes; never resized after
+  // loading.
+  std::vector<std::vector<SubmeshDraw>> part_submeshes;
 };
 
 // Resolves a model path to an UploadedModel, importing it with
-// asset::ImportAnimatedModel and uploading its parts once. Failures are
-// remembered, so a broken path is logged once. Returned models live at a
-// stable address until the cache is destroyed. Meant for loading at startup:
-// Get() normalizes the path, which allocates. Borrows `renderer`, which must
-// outlive the cache. Not thread-safe.
+// asset::ImportAnimatedModel and uploading its parts and materials once (the
+// textures in one batch). Failures are remembered, so a broken path is logged
+// once. Returned models live at a stable address until the cache is
+// destroyed. Meant for loading at startup: Get() normalizes the path, which
+// allocates. Borrows `renderer`, which must outlive the cache. Not
+// thread-safe.
 class ModelCache {
  public:
   explicit ModelCache(Renderer& renderer) : renderer_(renderer) {}

@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <string>
 #include <vector>
@@ -13,7 +14,9 @@
 #include "animation/clip.h"
 #include "animation/hierarchy.h"
 #include "core/path.h"
+#include "material/material.h"
 #include "platform/file_system.h"
+#include "tests/mesh_checks.h"
 
 namespace blue::asset {
 namespace {
@@ -130,32 +133,38 @@ TEST_CASE("ImportAnimatedModel loads the Glock 17 with its animations") {
             model.rest_bounds.max.z, ")");
   }
 
-  SUBCASE("vertex colours come from the base-colour textures") {
-    bool all_in_range = true;
-    bool any_not_white = false;
-    glm::vec3 lowest(1.0f);
-    glm::vec3 highest(0.0f);
-    glm::vec3 sum(0.0f);
-    size_t count = 0;
+  SUBCASE("two PBR materials with embedded textures") {
+    REQUIRE(model.materials.size() == 2);
+    for (const char* name : {"9m1", "9m2"}) {
+      CAPTURE(name);
+      const auto found = std::ranges::find(model.materials, std::string(name),
+                                           &material::MaterialDesc::name);
+      REQUIRE(found != model.materials.end());
+      for (const material::TextureRef* slot :
+           {&found->base_color_texture, &found->metallic_roughness_texture,
+            &found->normal_texture}) {
+        CHECK(slot->embedded());
+        CHECK(slot->path == GlockPath());
+      }
+      CHECK(found->emissive_texture.empty());
+    }
+    for (const ModelPart& part : model.parts) {
+      testing::CheckSubmeshes(part.mesh, model.materials.size());
+    }
+  }
+
+  SUBCASE("UVs and tangent frames follow the top-left convention") {
     for (const ModelPart& part : model.parts) {
       for (const Vertex& vertex : part.mesh.vertices) {
-        all_in_range =
-            all_in_range &&
-            glm::all(glm::greaterThanEqual(vertex.color, glm::vec3(0.0f))) &&
-            glm::all(glm::lessThanEqual(vertex.color, glm::vec3(1.0f)));
-        any_not_white = any_not_white || vertex.color != glm::vec3(1.0f);
-        lowest = glm::min(lowest, vertex.color);
-        highest = glm::max(highest, vertex.color);
-        sum += vertex.color;
-        ++count;
+        CHECK(glm::all(glm::greaterThanEqual(vertex.uv, glm::vec2(-0.01f))));
+        CHECK(glm::all(glm::lessThanEqual(vertex.uv, glm::vec2(1.01f))));
       }
+      // A few seams and mirrored islands disagree with the averaged
+      // per-vertex frames; nearly every triangle must agree.
+      const float agreement = testing::TangentAgreement(part.mesh);
+      MESSAGE("tangent agreement ", agreement);
+      testing::CheckTangentFrames(part.mesh, /*min_agreement=*/0.9f);
     }
-    CHECK(all_in_range);
-    CHECK(any_not_white);
-    // Texture detail, not one flat factor colour.
-    CHECK(highest.r - lowest.r > 0.05f);
-    const glm::vec3 mean = sum / static_cast<float>(count);
-    MESSAGE("mean vertex colour (", mean.x, ", ", mean.y, ", ", mean.z, ")");
   }
 
   SUBCASE("the per-node actions merge into one firing clip") {

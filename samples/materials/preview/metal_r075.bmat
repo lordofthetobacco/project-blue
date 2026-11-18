@@ -1,0 +1,6 @@
+# Project Blue material: preview sphere, gold (F0 1, 0.766, 0.336), roughness 0.75.
+# Part of the metallic x roughness sweep next to the spawn.
+name = preview metal r075
+base_color = 1 0.766 0.336 1
+metallic = 1
+roughness = 0.75

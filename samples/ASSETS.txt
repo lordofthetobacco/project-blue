@@ -1,0 +1,4 @@
+Third-party sample assets (all CC0 1.0, public domain):
+- env/kloofendal_48d_partly_cloudy_puresky_2k.hdr: Poly Haven, https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky
+- textures/ground037: ambientCG Ground037 (1K), https://ambientcg.com/view?id=Ground037
+- textures/metal032: ambientCG Metal032 (1K), https://ambientcg.com/view?id=Metal032

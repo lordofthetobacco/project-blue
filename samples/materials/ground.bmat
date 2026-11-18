@@ -1,0 +1,15 @@
+# Project Blue material
+# ambientCG Ground037 (CC0), the default scene's range floor. The builtin
+# plane's UVs are in its own unscaled metres (12 m square), and the default
+# scene stretches it by (4, 60.33) into the 48 x 724 m strip, so uv_scale
+# carries that stretch: (4, 60.33) / 2 repeats the texture once every 2 m in
+# both directions on the ground as placed.
+name = ground
+base_color = 1 1 1 1
+metallic = 0
+roughness = 1
+uv_scale = 2 30.1667
+base_color_texture = ../textures/ground037/color.jpg
+roughness_texture = ../textures/ground037/roughness.jpg
+normal_texture = ../textures/ground037/normalgl.jpg
+occlusion_texture = ../textures/ground037/ambientocclusion.jpg

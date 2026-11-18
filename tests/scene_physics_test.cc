@@ -24,9 +24,7 @@ constexpr size_t kCube = 1;
 // Owns the CPU meshes behind the builtin names the tests use.
 class TestMeshes {
  public:
-  TestMeshes()
-      : cube_(asset::MakeCube(glm::vec3(1.0f))),
-        plane_(asset::MakePlane(12.0f, glm::vec3(1.0f))) {}
+  TestMeshes() : cube_(asset::MakeCube()), plane_(asset::MakePlane(12.0f)) {}
 
   [[nodiscard]] MeshSource Source() const {
     return [this](std::string_view path) -> std::optional<MeshView> {

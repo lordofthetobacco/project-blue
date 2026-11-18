@@ -51,6 +51,19 @@ std::optional<std::string_view> ValidateSunLight(const SunLight& sun) {
   return std::nullopt;
 }
 
+std::optional<std::string_view> ValidateEnvironment(
+    const Environment& environment) {
+  if (!std::isfinite(environment.intensity) ||
+      !std::isfinite(environment.rotation_radians) ||
+      !std::isfinite(environment.exposure_ev)) {
+    return "non-finite value";
+  }
+  if (environment.intensity < 0.0f) {
+    return "intensity must be >= 0";
+  }
+  return std::nullopt;
+}
+
 glm::mat4 Transform::Matrix() const {
   return glm::translate(glm::mat4(1.0f), position) * glm::mat4_cast(rotation) *
          glm::scale(glm::mat4(1.0f), scale);

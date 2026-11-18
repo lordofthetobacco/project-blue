@@ -1,0 +1,6 @@
+# Project Blue material: M16 buttstock, the same black polymer as the grip
+# (the importer merges the two).
+name = Stock
+base_color = 0.04 0.04 0.042 1
+metallic = 0
+roughness = 0.6

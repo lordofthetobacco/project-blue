@@ -45,6 +45,9 @@ class VulkanContext {
   [[nodiscard]] uint32_t timestamp_valid_bits() const {
     return timestamp_valid_bits_;
   }
+  // Whether anisotropic filtering is enabled (the samplerAnisotropy feature
+  // is optional); the limit is properties().limits.maxSamplerAnisotropy.
+  [[nodiscard]] bool sampler_anisotropy() const { return sampler_anisotropy_; }
 
   // Records commands with `record` and blocks until the GPU has executed
   // them. Intended for setup work such as resource uploads, not per-frame use.
@@ -69,6 +72,7 @@ class VulkanContext {
   VkQueue queue_ = VK_NULL_HANDLE;
   uint32_t queue_family_ = 0;
   uint32_t timestamp_valid_bits_ = 0;
+  bool sampler_anisotropy_ = false;
   VmaAllocator allocator_ = VK_NULL_HANDLE;
   VkCommandPool immediate_pool_ = VK_NULL_HANDLE;
 };

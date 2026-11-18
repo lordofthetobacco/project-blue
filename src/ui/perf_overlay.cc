@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -19,6 +20,7 @@
 #include "core/log.h"
 #include "lighting/cascades.h"
 #include "platform/window.h"
+#include "render/gpu_timer.h"
 #include "render/renderer.h"
 #include "render/vk_check.h"
 #include "weapon/target_log.h"
@@ -80,16 +82,6 @@ void DrawPhysicsInfo(const PhysicsOverlayInfo& physics) {
 void DrawShadowInfo(const ShadowOverlayInfo& shadows) {
   ImGui::Text("Shadows: %s  (%d x %dpx)", shadows.enabled ? "on" : "off",
               lighting::kCascadeCount, lighting::kShadowMapSize);
-  if (shadows.shadow_ms) {
-    ImGui::Text("  shadow pass %7.3f ms", *shadows.shadow_ms);
-  } else {
-    ImGui::TextUnformatted("  shadow pass     n/a");
-  }
-  if (shadows.main_ms) {
-    ImGui::Text("  main pass   %7.3f ms", *shadows.main_ms);
-  } else {
-    ImGui::TextUnformatted("  main pass       n/a");
-  }
   ImGui::Text("  cascade debug: %s", shadows.cascade_debug ? "on" : "off");
 }
 
@@ -263,9 +255,9 @@ PerfOverlay::PerfOverlay(const platform::Window& window,
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
       .colorAttachmentCount = 1,
       .pColorAttachmentFormats = &color_format,
-      // The overlay is drawn inside the scene's rendering pass, which has a
-      // depth attachment.
-      .depthAttachmentFormat = render::Renderer::kDepthFormat,
+      // The overlay has its own rendering pass on the swapchain image, with
+      // no depth attachment (render::RecordUiPass).
+      .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
   };
   init_info.CheckVkResultFn = CheckImGuiVkResult;
 
@@ -347,9 +339,12 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
     }
   }
 
-  ImGui::Render();
-  result.draw_data = ImGui::GetDrawData();
   return result;
+}
+
+ImDrawData* PerfOverlay::Render() {
+  ImGui::Render();
+  return ImGui::GetDrawData();
 }
 
 bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
@@ -387,7 +382,9 @@ bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
         ImGui::Checkbox("Sprint toggles", &settings.sprint_toggle) || changed;
     changed =
         ImGui::Checkbox("Crouch toggles", &settings.crouch_toggle) || changed;
-    ImGui::TextDisabled("Esc frees the cursor to use this window");
+    ImGui::TextDisabled(
+        "Esc frees the cursor to use this window and the editor\n"
+        "(Materials, Environment, Post)");
   }
   ImGui::End();
   return changed;
@@ -483,6 +480,19 @@ void PerfOverlay::DrawTimings(float cpu_frame_ms) const {
   } else {
     ImGui::TextUnformatted("GPU frame     n/a");
   }
+  // Every timed pass; a pass that did not run last frame shows n/a.
+  for (size_t i = 0; i < render::kGpuScopeCount; ++i) {
+    const auto scope = static_cast<render::GpuScope>(i);
+    if (scope == render::GpuScope::kTotal) {
+      continue;
+    }
+    const std::optional<double> ms = renderer_.gpu_scope_ms(scope);
+    if (ms) {
+      ImGui::Text("  %-10s %7.3f ms", render::GpuScopeName(scope), *ms);
+    } else {
+      ImGui::Text("  %-10s     n/a", render::GpuScopeName(scope));
+    }
+  }
 
   const float graph_max = std::max(cpu_history_.max() * 1.2f, 1.0f);
   ImGui::PlotLines(
@@ -498,6 +508,10 @@ void PerfOverlay::DrawDeviceInfo() const {
   ImGui::Text("%u x %u  |  %s", swapchain.extent().width,
               swapchain.extent().height,
               PresentModeLabel(swapchain.present_mode()));
+  const render::TextureStats textures = renderer_.texture_stats();
+  ImGui::Text("Materials %zu  textures %zu (%.1f MiB)",
+              renderer_.material_count(), textures.count,
+              static_cast<double>(textures.bytes) / (1024.0 * 1024.0));
 }
 
 }  // namespace blue::ui

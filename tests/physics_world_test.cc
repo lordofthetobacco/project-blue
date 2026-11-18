@@ -257,7 +257,7 @@ TEST_CASE("a ray hits the top face of a box") {
 TEST_CASE("a dynamic triangle mesh is rejected") {
   PhysicsRuntime runtime;
   PhysicsWorld world(runtime);
-  const asset::MeshData cube = asset::MakeCube(glm::vec3(1.0f));
+  const asset::MeshData cube = asset::MakeCube();
   BodyDesc desc = CubeDesc(scene::ShapeType::kTriangleMesh,
                            scene::MotionType::kDynamic, glm::vec3(0.0f));
   desc.mesh = &cube;
@@ -289,7 +289,7 @@ TEST_CASE("a static triangle mesh catches a falling sphere") {
   PhysicsRuntime runtime;
   PhysicsWorld world(runtime);
   world.SetGravity(glm::vec3(0.0f, -9.81f, 0.0f));
-  const asset::MeshData plane = asset::MakePlane(20.0f, glm::vec3(1.0f));
+  const asset::MeshData plane = asset::MakePlane(20.0f);
   BodyDesc ground = GroundDesc();
   ground.body.shape = scene::ShapeType::kTriangleMesh;
   ground.mesh = &plane;
@@ -311,14 +311,14 @@ TEST_CASE("a convex hull of the teapot builds and stays put without gravity") {
   PhysicsWorld world(runtime);
   world.SetGravity(kNoGravity);
   const std::string path = std::string(BLUE_SAMPLES_DIR) + "/teapot.obj";
-  const core::Result<asset::MeshData, asset::ImportError> teapot =
+  const core::Result<asset::Model, asset::ImportError> teapot =
       asset::ImportModel(path, asset::ImportOptions{});
   REQUIRE(teapot.ok());
   BodyDesc desc;
   desc.body.shape = scene::ShapeType::kConvexHull;
   desc.pose.position = glm::vec3(1.0f, 2.0f, 3.0f);
-  desc.bounds = teapot.value().bounds;
-  desc.mesh = &teapot.value();
+  desc.bounds = teapot.value().mesh.bounds;
+  desc.mesh = &teapot.value().mesh;
   desc.shape_key = path;
 
   const core::Result<BodyId, PhysicsError> body = world.CreateBody(desc);

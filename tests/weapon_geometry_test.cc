@@ -26,12 +26,16 @@
 namespace blue::weapon {
 namespace {
 
-asset::MeshData ImportM16() {
-  core::Result<asset::MeshData, asset::ImportError> mesh =
-      asset::ImportModel(core::JoinPath(BLUE_SAMPLES_DIR, "m16.obj"));
-  REQUIRE(mesh.ok());
-  return std::move(mesh).value();
+// Returns the M16 as authored in its MTL file (sidecar overrides off).
+asset::Model ImportM16Model() {
+  core::Result<asset::Model, asset::ImportError> model =
+      asset::ImportModel(core::JoinPath(BLUE_SAMPLES_DIR, "m16.obj"),
+                         {.use_material_overrides = false});
+  REQUIRE(model.ok());
+  return std::move(model).value();
 }
+
+asset::MeshData ImportM16() { return ImportM16Model().mesh; }
 
 // Returns true when the ray `origin` + t * `direction`, t > 0, crosses any
 // triangle of `mesh` (Moller-Trumbore, both faces).
@@ -110,13 +114,14 @@ TEST_CASE("the M16 optic sits above the bore, the lens ahead of the eye") {
 }
 
 TEST_CASE("the M16 materials arrive with their own dark colours") {
-  const asset::MeshData mesh = ImportM16();
+  const asset::Model model = ImportM16Model();
   std::set<std::tuple<float, float, float>> colors;
   float brightest = 0.0f;
-  for (const asset::Vertex& vertex : mesh.vertices) {
-    colors.emplace(vertex.color.r, vertex.color.g, vertex.color.b);
-    brightest =
-        std::max({brightest, vertex.color.r, vertex.color.g, vertex.color.b});
+  for (const asset::Submesh& submesh : model.mesh.submeshes) {
+    const glm::vec4& color =
+        model.materials[static_cast<size_t>(submesh.material)].base_color;
+    colors.emplace(color.r, color.g, color.b);
+    brightest = std::max({brightest, color.r, color.g, color.b});
   }
   // Dark gun finishes, not the 0.8 grey fallback.
   CHECK(brightest < 0.25f);
