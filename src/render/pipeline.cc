@@ -109,7 +109,7 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
   };
   const VkPipelineInputAssemblyStateCreateInfo input_assembly{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .topology = desc.topology,
   };
   const VkPipelineViewportStateCreateInfo viewport{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,

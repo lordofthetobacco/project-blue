@@ -3,6 +3,7 @@
 
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "animation/transform.h"
@@ -40,12 +41,26 @@ struct Channel {
 // count and layout, and its times are strictly increasing.
 [[nodiscard]] bool IsValid(const Channel& channel);
 
+// A named moment of a clip, e.g. "shot" or "slide_lock" in a fire animation.
+// `time` is in seconds from the clip start, normally within [0, duration].
+struct ClipEvent {
+  std::string name;
+  float time = 0.0f;
+
+  friend bool operator==(const ClipEvent&, const ClipEvent&) = default;
+};
+
 // A named set of channels played together. `duration` is in seconds,
-// normally the last key time of any channel.
+// normally the last key time of any channel. `loop` says whether the clip
+// is authored to repeat (callers pass it to ClipPlayer::Play()). `events`
+// are kept sorted by time (ties in insertion order); AddEvent() maintains
+// that order.
 struct Clip {
   std::string name;
   float duration = 0.0f;
   std::vector<Channel> channels;
+  bool loop = false;
+  std::vector<ClipEvent> events;
 };
 
 // Writes the value of every channel of `clip` at `time` (seconds) into the
@@ -60,8 +75,23 @@ void SampleClip(const Clip& clip, float time, std::span<Transform> pose);
 // Returns one clip named `name` holding the channels of all `clips`, with the
 // longest duration among them. Used for files that store one action per node
 // of what is really a single animation. Channels targeting the same node and
-// path are kept in order, so the later one wins when sampled.
+// path are kept in order, so the later one wins when sampled. The events of
+// all clips are merged in time order (ties keep clip order); the result loops
+// only if every input clip loops (and there is at least one).
 [[nodiscard]] Clip MergeClips(std::span<const Clip> clips, std::string name);
+
+// Inserts `event` into `clip.events` after any events with the same or an
+// earlier time, keeping the list sorted.
+void AddEvent(Clip& clip, ClipEvent event);
+
+// Returns the first event of `clip` called `name`, or nullptr if there is
+// none. The pointer is valid until `clip.events` changes.
+[[nodiscard]] const ClipEvent* FindEvent(const Clip& clip,
+                                         std::string_view name);
+
+// Returns true if `clip` has a finite duration >= 0, every channel satisfies
+// IsValid(), and its events are finite and sorted by time.
+[[nodiscard]] bool IsValid(const Clip& clip);
 
 }  // namespace blue::animation
 

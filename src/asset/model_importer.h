@@ -38,8 +38,9 @@ struct Model {
 // one contiguous index range). Materials come from the file (glTF PBR, or
 // MTL/Phong converted, see the .cc) with identical materials merged, then
 // replaced by sidecar .bmat files when `options` allows. Meshes without a
-// material share a neutral grey default. UVs (channel 0) follow the
-// top-left convention of asset::Vertex; tangents are generated
+// material share a neutral grey default. UVs (channel 0 into uv0, channel 1
+// into uv1, else a copy of uv0) follow the top-left convention of
+// asset::Vertex; tangents are generated for uv0
 // (MikkTSpace-compatible); meshes without UVs get zero UVs and a fallback
 // tangent basis. Meshes without normals are skipped with a warning. Textures
 // are referenced, not decoded. Returns kFileNotFound if `path` is not a

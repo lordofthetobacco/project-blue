@@ -15,6 +15,7 @@
 
 namespace blue::physics {
 
+class CookedShape;
 class PhysicsRuntime;
 
 // Handle of a body inside one PhysicsWorld. Handles of removed bodies are
@@ -50,6 +51,19 @@ struct BodyDesc {
   std::string shape_key;  // E.g. the entity's mesh path.
 };
 
+// Everything besides the shape needed to create a body from a CookedShape
+// (prefab colliders). `scale` is applied to the shape (Jolt ScaledShape);
+// shapes that only support uniform scale (spheres, capsules) get the largest
+// component. `mass` is used for dynamic bodies only.
+struct ShapeBodyDesc {
+  scene::MotionType motion = scene::MotionType::kStatic;
+  Pose pose;
+  glm::vec3 scale{1.0f};
+  float mass = 1.0f;         // kg, > 0 for dynamic bodies
+  float friction = 0.6f;     // >= 0
+  float restitution = 0.1f;  // [0, 1]
+};
+
 struct RayHit {
   BodyId body;
   glm::vec3 point;
@@ -83,6 +97,12 @@ class PhysicsWorld {
   // Axes of a box thinner than 0.1 m are thickened to 0.1 m towards -axis so a
   // flat ground plane keeps its surface as the box's top face.
   core::Result<BodyId, PhysicsError> CreateBody(const BodyDesc& desc);
+
+  // Creates a body with the restored `shape` (shared, not copied), scaled by
+  // `desc.scale`. Fails with kInvalidShape for a bad scale, pose or
+  // parameter and kDynamicTriangleMesh for a dynamic triangle mesh shape.
+  core::Result<BodyId, PhysicsError> CreateBody(const CookedShape& shape,
+                                                const ShapeBodyDesc& desc);
 
   // Removes a body. Unknown or stale handles are ignored.
   void RemoveBody(BodyId id);

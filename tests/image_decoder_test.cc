@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "asset/animated_model.h"
+#include "asset/texture_loader.h"
 #include "core/path.h"
 #include "material/material.h"
 #include "platform/file_system.h"

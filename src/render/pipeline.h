@@ -48,6 +48,7 @@ struct GraphicsPipelineDesc {
   bool depth_clamp = false;
   // Enables depth bias; the factors are dynamic, set with vkCmdSetDepthBias.
   bool depth_bias = false;
+  VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 };
 
 // Graphics pipeline for dynamic rendering, with its layout. Viewport and

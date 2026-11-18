@@ -1,15 +1,13 @@
 #include "ui/perf_overlay.h"
 
 #include <imgui.h>
-#include <imgui_impl_sdl3.h>
-#include <imgui_impl_vulkan.h>
 #include <vulkan/vk_enum_string_helper.h>
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <format>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -17,22 +15,19 @@
 
 #include <glm/vec2.hpp>
 
-#include "core/log.h"
 #include "lighting/cascades.h"
 #include "platform/window.h"
 #include "render/gpu_timer.h"
 #include "render/renderer.h"
-#include "render/vk_check.h"
+#include "render/scene_view.h"
+#include "ui/imgui_layer.h"
 #include "weapon/target_log.h"
 
 namespace blue::ui {
 
 namespace {
 
-constexpr uint32_t kImGuiDescriptorPoolSize = 8;
 constexpr ImVec4 kShaderErrorColor{1.0f, 0.3f, 0.3f, 1.0f};
-
-void CheckImGuiVkResult(VkResult result) { render::CheckVk(result); }
 
 const char* PresentModeLabel(VkPresentModeKHR mode) {
   switch (mode) {
@@ -168,6 +163,32 @@ void DrawCrosshair() {
   draw_list->AddCircleFilled(center, radius, IM_COL32(255, 255, 255, 230));
 }
 
+// Emits the exposure and post-processing controls (applied live, reset by a
+// scene reload).
+void DrawPostSettings(render::PostSettings& post) {
+  if (!ImGui::CollapsingHeader("Image")) {
+    return;
+  }
+  constexpr float kMaxExposureEv = 8.0f;
+  constexpr float kMaxBloomStrength = 0.3f;
+  constexpr const char* kTonemappers[] = {"ACES fitted", "PBR Neutral",
+                                          "Clamp"};
+  ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
+  ImGui::SliderFloat("Exposure (EV)", &post.exposure_ev, -kMaxExposureEv,
+                     kMaxExposureEv, "%.2f");
+  int tonemapper = static_cast<int>(post.tonemapper);
+  if (ImGui::Combo("Tonemapper", &tonemapper, kTonemappers,
+                   static_cast<int>(std::size(kTonemappers)))) {
+    post.tonemapper = static_cast<render::Tonemapper>(tonemapper);
+  }
+  ImGui::Checkbox("Bloom", &post.bloom_enabled);
+  ImGui::SliderFloat("Bloom strength", &post.bloom_strength, 0.0f,
+                     kMaxBloomStrength, "%.3f");
+  ImGui::PopItemWidth();
+  ImGui::Checkbox("SSAO", &post.ssao_enabled);
+  ImGui::Checkbox("FXAA", &post.fxaa_enabled);
+}
+
 void DrawSceneInfo(const SceneOverlayInfo& scene_info) {
   ImGui::Text("Entities %zu  |  %u draws (%u culled)  |  %llu tris",
               scene_info.entity_count, scene_info.draw_calls,
@@ -175,7 +196,7 @@ void DrawSceneInfo(const SceneOverlayInfo& scene_info) {
               static_cast<unsigned long long>(scene_info.triangles));
   ImGui::Text("Shadow draws %u (%u culled)", scene_info.shadow_draw_calls,
               scene_info.shadow_culled_draws);
-  TextView(scene_info.scene_path);
+  TextView(scene_info.scene_name);
   if (!scene_info.status.empty()) {
     TextView(scene_info.status);
   }
@@ -224,82 +245,20 @@ float FrameTimeHistory::max() const {
 
 PerfOverlay::PerfOverlay(const platform::Window& window,
                          const render::Renderer& renderer)
-    : window_(window), renderer_(renderer) {
-  IMGUI_CHECKVERSION();
-  ImGui::CreateContext();
-
-  ImGuiIO& io = ImGui::GetIO();
-  io.IniFilename = nullptr;
-  io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-
-  UpdateScale();
-
-  ImGui_ImplSDL3_InitForVulkan(window.handle());
-
-  const render::VulkanContext& context = renderer.context();
-  const render::Swapchain& swapchain = renderer.swapchain();
-  const VkFormat color_format = swapchain.format();
-
-  ImGui_ImplVulkan_InitInfo init_info{};
-  init_info.ApiVersion = render::VulkanContext::kApiVersion;
-  init_info.Instance = context.instance();
-  init_info.PhysicalDevice = context.physical_device();
-  init_info.Device = context.device();
-  init_info.QueueFamily = context.queue_family();
-  init_info.Queue = context.queue();
-  init_info.DescriptorPoolSize = kImGuiDescriptorPoolSize;
-  init_info.MinImageCount = swapchain.min_image_count();
-  init_info.ImageCount = swapchain.image_count();
-  init_info.UseDynamicRendering = true;
-  init_info.PipelineInfoMain.PipelineRenderingCreateInfo = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-      .colorAttachmentCount = 1,
-      .pColorAttachmentFormats = &color_format,
-      // The overlay has its own rendering pass on the swapchain image, with
-      // no depth attachment (render::RecordUiPass).
-      .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
-  };
-  init_info.CheckVkResultFn = CheckImGuiVkResult;
-
-  if (!ImGui_ImplVulkan_Init(&init_info)) {
-    core::log::Fatal("ImGui Vulkan backend initialization failed");
-  }
-}
-
-PerfOverlay::~PerfOverlay() {
-  renderer_.context().WaitIdle();
-  ImGui_ImplVulkan_Shutdown();
-  ImGui_ImplSDL3_Shutdown();
-  ImGui::DestroyContext();
-}
-
-void PerfOverlay::ProcessEvent(const SDL_Event& event) {
-  ImGui_ImplSDL3_ProcessEvent(&event);
-}
-
-bool PerfOverlay::WantsMouse() const {
-  return ImGui::GetCurrentContext() != nullptr &&
-         ImGui::GetIO().WantCaptureMouse;
-}
-
-bool PerfOverlay::WantsKeyboard() const {
-  return ImGui::GetCurrentContext() != nullptr &&
-         ImGui::GetIO().WantCaptureKeyboard;
-}
+    : renderer_(renderer),
+      layer_(window, renderer, {.scale_mode = UiScaleMode::kWindowHeight}) {}
 
 BuildResult PerfOverlay::Build(float cpu_frame_ms,
                                std::optional<double> gpu_frame_ms,
                                const SceneOverlayInfo& scene_info,
-                               input::InputSettings& settings) {
+                               input::InputSettings& settings,
+                               render::PostSettings& post) {
   cpu_history_.Push(cpu_frame_ms);
   if (gpu_frame_ms) {
     gpu_frame_ms_ = gpu_frame_ms;
   }
 
-  ImGui_ImplVulkan_NewFrame();
-  ImGui_ImplSDL3_NewFrame();  // Refreshes io.DisplaySize from the window.
-  UpdateScale();
-  ImGui::NewFrame();
+  layer_.BeginFrame();
 
   BuildResult result;
   if (scene_info.show_crosshair) {
@@ -333,7 +292,7 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
     }
     ImGui::End();
 
-    result.settings_changed = DrawSettings(settings);
+    result.settings_changed = DrawSettings(settings, post);
     if (scene_info.hit_log.log != nullptr) {
       result.clear_hit_log = DrawHitLog(scene_info.hit_log);
     }
@@ -342,12 +301,8 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
   return result;
 }
 
-ImDrawData* PerfOverlay::Render() {
-  ImGui::Render();
-  return ImGui::GetDrawData();
-}
-
-bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
+bool PerfOverlay::DrawSettings(input::InputSettings& settings,
+                               render::PostSettings& post) const {
   const ImGuiStyle& style = ImGui::GetStyle();
   const ImVec2 display = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos(
@@ -382,9 +337,8 @@ bool PerfOverlay::DrawSettings(input::InputSettings& settings) const {
         ImGui::Checkbox("Sprint toggles", &settings.sprint_toggle) || changed;
     changed =
         ImGui::Checkbox("Crouch toggles", &settings.crouch_toggle) || changed;
-    ImGui::TextDisabled(
-        "Esc frees the cursor to use this window and the editor\n"
-        "(Materials, Environment, Post)");
+    DrawPostSettings(post);
+    ImGui::TextDisabled("Esc frees the cursor to use this window");
   }
   ImGui::End();
   return changed;
@@ -442,30 +396,6 @@ bool PerfOverlay::DrawHitLog(const HitLogOverlayInfo& info) const {
   }
   ImGui::End();
   return clear;
-}
-
-void PerfOverlay::UpdateScale() {
-  // Before the first frame DisplaySize is still zero; fall back to the
-  // window's own logical size then.
-  float height = ImGui::GetIO().DisplaySize.y;
-  if (height <= 0.0f) {
-    height = static_cast<float>(window_.height());
-  }
-  const float window_scale = height > 0.0f ? height / kReferenceHeight : 1.0f;
-  const float scale = std::clamp(window_scale * window_.DisplayScale(),
-                                 kMinUiScale, kMaxUiScale);
-  if (std::abs(scale - ui_scale_) < 1.0e-3f) {
-    return;
-  }
-  ui_scale_ = scale;
-
-  // ScaleAllSizes compounds, so always start from a fresh style.
-  ImGuiStyle& style = ImGui::GetStyle();
-  style = ImGuiStyle();
-  ImGui::StyleColorsDark();
-  style.ScaleAllSizes(scale);
-  style.FontScaleDpi = scale;
-  style.WindowRounding = 4.0f * scale;
 }
 
 void PerfOverlay::DrawTimings(float cpu_frame_ms) const {

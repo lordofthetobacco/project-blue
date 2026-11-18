@@ -25,14 +25,13 @@ bool IsSrgb(VkFormat format) {
 }  // namespace
 
 PresentPass::PresentPass(const VulkanContext& context, ShaderPrograms& programs,
-                         const std::string& shader_dir,
-                         VkFormat swapchain_format)
-    : srgb_swapchain_(IsSrgb(swapchain_format)),
+                         const std::string& shader_dir, VkFormat output_format)
+    : srgb_output_(IsSrgb(output_format)),
       pass_(context, programs, shader_dir,
             {.fragment_path = core::JoinPath(shader_dir, "present.frag"),
              .input_count = 1,
              .push_constant_size = sizeof(PresentConstants),
-             .output_format = swapchain_format}) {}
+             .output_format = output_format}) {}
 
 void PresentPass::BindTargets(const RenderTargets& targets,
                               const Samplers& samplers) {
@@ -41,23 +40,20 @@ void PresentPass::BindTargets(const RenderTargets& targets,
   pass_.SetInputs(0, inputs, samplers.linear_clamp());
 }
 
-void PresentPass::Record(const FrameContext& ctx) const {
-  // Nothing to wait for but the acquire semaphore, which the submission
-  // waits for at the color attachment output stage.
-  ImageBarrier(
-      ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
-      {VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_NONE},
-      kColorAttachmentWrite, VK_IMAGE_LAYOUT_UNDEFINED,
-      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+void PresentPass::Record(const FrameContext& ctx,
+                         const PresentTarget& target) const {
+  ImageBarrier(ctx.cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT,
+               target.previous_use, kColorAttachmentWrite,
+               VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
   const VkExtent2D extent = ctx.targets.extent();
   const PresentConstants constants{
-      .decode_srgb = srgb_swapchain_ ? 1 : 0,
+      .decode_srgb = srgb_output_ ? 1 : 0,
       .fxaa = ctx.view.post.fxaa_enabled ? 1 : 0,
       .texel_width = 1.0f / static_cast<float>(extent.width),
       .texel_height = 1.0f / static_cast<float>(extent.height),
   };
-  pass_.Record(ctx.cmd,
-               {.view = ctx.swapchain_view, .extent = ctx.swapchain_extent}, 0,
+  pass_.Record(ctx.cmd, {.view = target.view, .extent = target.extent}, 0,
                PushBytes(constants));
 }
 

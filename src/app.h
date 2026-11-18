@@ -4,7 +4,9 @@
 #include <SDL3/SDL_events.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -13,42 +15,45 @@
 #include <glm/vec3.hpp>
 
 #include "animation/clip.h"
+#include "animation/hierarchy.h"
+#include "asset/mesh_data.h"
 #include "camera/camera_controller.h"
 #include "input/action.h"
 #include "input/input_settings.h"
 #include "lighting/environment.h"
 #include "physics/physics_runtime.h"
 #include "physics/physics_world.h"
-#include "physics/scene_physics.h"
 #include "platform/input_mapper.h"
 #include "platform/window.h"
 #include "player/player_controller.h"
-#include "render/material_cache.h"
-#include "render/mesh_cache.h"
-#include "render/model_cache.h"
 #include "render/renderer.h"
-#include "scene/scene.h"
-#include "ui/editor_panels.h"
+#include "scene/scene_data.h"
 #include "ui/perf_overlay.h"
 #include "weapon/loadout.h"
 #include "weapon/projectile_system.h"
 #include "weapon/target_log.h"
 #include "weapon/viewmodel.h"
 #include "weapon/weapon_animator.h"
+#include "weapon/weapon_geometry.h"
+#include "world/gpu_backend.h"
+#include "world/prefab_cache.h"
+#include "world/prefab_pose.h"
+#include "world/world.h"
+#include "world/world_physics.h"
 
 namespace blue {
 
 struct CliOptions {
   std::optional<std::string> scene_path;
-  std::vector<std::string> imports;
+  std::optional<platform::WindowPair> window_position;
   bool show_help = false;
 };
 
 inline constexpr const char* kUsage =
-    "usage: project-blue [--scene <file.bscn>] [--import <model>]...";
+    "usage: project-blue [--scene <file.mscn>] [--window-pos X,Y]";
 
-// Parses the command line. Returns nullopt for unknown arguments or options
-// missing their value. --help / -h sets show_help.
+// Parses the command line. Returns nullopt for unknown arguments, options
+// missing their value and malformed values. --help / -h sets show_help.
 [[nodiscard]] std::optional<CliOptions> ParseCommandLine(
     int argc, const char* const argv[]);
 
@@ -59,12 +64,30 @@ enum class ViewMode {
   kOrbit,   // Debug orbit camera, cursor never captured.
 };
 
-// The game application: owns the window, renderer, scene, player and debug
-// camera, and runs the main loop. Startup failures are fatal. Neither
-// copyable nor movable. Not thread-safe.
+// The weapons' cooked data, loaded once at startup from their prefabs: the
+// prefabs stay in the cache, the calibration comes from their sockets and
+// the pistol's fire animation (copied out of the cache, so loading more
+// prefabs never moves what the animator borrows) from its "fire" clip.
+struct WeaponAssets {
+  world::PrefabId rifle{};
+  world::PrefabId pistol{};
+  weapon::WeaponGeometry rifle_geometry;
+  weapon::WeaponGeometry pistol_geometry;
+  animation::Hierarchy pistol_hierarchy;
+  animation::Clip pistol_fire_clip;
+  weapon::WeaponAnimatorTuning pistol_tuning;
+};
+
+// The game application: owns the window, renderer, the scene (a .mscn
+// resolved into a world::World), the player and debug camera, and runs the
+// main loop. Startup failures are fatal. Neither copyable nor movable. Not
+// thread-safe.
 class App {
  public:
-  explicit App(const CliOptions& options);
+  // `process_start` is when main() was entered; the time to the first frame
+  // is logged.
+  App(const CliOptions& options,
+      std::chrono::steady_clock::time_point process_start);
 
   App(const App&) = delete;
   App& operator=(const App&) = delete;
@@ -84,8 +107,15 @@ class App {
 
   // A target plate of the scene, found by name after every scene change.
   struct RangeTargetEntry {
-    size_t entity = 0;  // Index into scene_.entities.
+    scene::InstanceId instance = scene::kNoInstance;
     weapon::Target target;
+  };
+
+  // The builtin unit cube the bullet streaks and impact marks are drawn
+  // with; uploaded once.
+  struct EffectMesh {
+    render::MeshId id{};
+    asset::Bounds bounds;
   };
 
   static constexpr size_t kMaxImpactMarks = 64;
@@ -99,43 +129,41 @@ class App {
   void CycleViewMode();
   void ChangeSensitivity(float factor);
   void SaveSettings();
-  // Puts the player on the floor under the scene camera, facing its target.
-  // Spawns the character on first use, teleports it afterwards.
-  void PlacePlayerAtSceneCamera();
+  // Loads scene_path_ into scene_ and rebuilds the world (RebuildWorld()).
+  // Returns false (status set, nothing changed) if the file cannot be
+  // loaded.
+  bool LoadScene();
+  // Rebuilds the world from scene_: instances, environment, bodies and
+  // targets. Needed after every scene load and every prefab replacement.
+  void RebuildWorld();
+  // Reloads the scene file (F9) after re-reading every cached prefab whose
+  // file changed: a fresh start with the loadout reset and the player back
+  // at the scene's start. Made for the editor's save-and-play loop.
+  void ReloadScene();
+  // Appends the file times of the prefabs cached since the last call.
+  void RecordPrefabWriteTimes();
+  // Replaces every cached prefab whose file changed since it was loaded (a
+  // file that fails to load is kept and logged) and re-reads the weapons if
+  // theirs changed. Returns the number replaced; the world must be rebuilt
+  // afterwards.
+  int ReloadChangedPrefabs();
+  // Re-reads weapons_ from the cached weapon prefabs and rebuilds what
+  // depends on it (viewmodels, rifle pose, pistol animator). A broken prefab
+  // keeps the previous calibration (logged).
+  void RereadWeapons();
+  // Puts the player on the floor under the scene's player start, looking
+  // its way. Spawns the character on first use, teleports it afterwards.
+  void PlacePlayerAtStart();
+  // Points the debug camera from the scene's player start.
+  void PlaceDebugCameraAtStart();
   [[nodiscard]] ViewPose CurrentView() const;
   [[nodiscard]] ui::CameraOverlayInfo MakeCameraOverlayInfo() const;
-  void InitializeScene(const CliOptions& options);
-  void AddImports(const std::vector<std::string>& imports);
-  // Adds the shooting range's static target plates to the default scene.
-  void AddRangeTargets();
-  // Adds the metallic x roughness sweep of preview spheres to the default
-  // scene, beside the spawn and clear of the firing line.
-  void AddPreviewSpheres();
-  // Sets the default scene's sky, sun, point light and exposure (see
-  // scene/default_lighting.h).
-  void ApplyDefaultLighting();
   // Makes the renderer's environment match scene_.environment: loads the
   // HDRI (or the generated default sky) when its path differs from the one
-  // loaded, or always when `force`, and estimates its sun; otherwise only
-  // updates intensity and rotation. A failed load keeps the default sky.
+  // loaded, or always when `force`; otherwise only updates intensity and
+  // rotation. A failed load keeps the default sky.
   void LoadEnvironment(bool force);
-  // Returns the material that replaces all of `entity`'s own materials: its
-  // material file, else the target steel for target plates, else nothing.
-  [[nodiscard]] std::optional<render::MaterialId> EntityMaterial(
-      const scene::Entity& entity);
-  // Fills weapon_slots_ with the weapons' and effects' materials; call once
-  // after they are loaded.
-  void BuildWeaponMaterialSlots();
-  // Refills entity_slots_ with the materials of the editor's selection.
-  void UpdateEntityMaterialSlots();
-  // Selects the entity in the middle of the view in the editor.
-  void PickEntity();
-  // Builds the editor panels (cursor free and overlay shown) and carries out
-  // what they request.
-  void UpdateEditor();
-  void SaveCurrentScene();
-  void ReloadCurrentScene();
-  // Recreates the physics bodies of `scene_`; call after every scene change.
+  // Recreates the physics bodies of world_; call after every world build.
   void RebuildPhysics();
   // Pushes the dynamic body in the middle of the view along the camera
   // direction.
@@ -144,9 +172,6 @@ class App {
   // selection (keys 2 / 3), trigger, the pose of the weapon in hand, bullet
   // spawns, recoil and the pistol's fire animation. Player view mode only.
   void UpdateWeapon(const input::InputFrame& input, float step);
-  // Imports and uploads the pistol and prepares its fire animation. On
-  // failure (logged) the pistol is not drawn.
-  void LoadPistolModel();
   // Brings the loadout back to a fresh start: both weapons full, the rifle
   // in hand, viewmodels and the pistol's animation at rest.
   void ResetLoadout();
@@ -171,44 +196,43 @@ class App {
   void RecordHit(const weapon::Impact& impact);
   // Removes every bullet, impact mark and logged hit.
   void ClearBullets();
-  // Rebuilds targets_ from the entities named as targets; call after every
-  // scene change. Ranges are measured from the scene camera.
+  // Rebuilds targets_ from the instances named as targets; call after every
+  // world build. Ranges are measured from the player start.
   void FindTargets();
   // Appends the weapon in hand, the bullet streaks and the impact marks to
   // draws_.
   void AppendWeaponDraws();
-  // Appends one draw per part of the pistol model as posed this frame.
+  // Appends one draw per mesh of the pistol prefab as posed this frame.
   void AppendPistolDraws();
   [[nodiscard]] ui::WeaponOverlayInfo MakeWeaponOverlayInfo() const;
   [[nodiscard]] ui::HitLogOverlayInfo MakeHitLogOverlayInfo() const;
   // Returns the reflex sight as posed this frame, nullopt outside the
   // player view.
   [[nodiscard]] std::optional<render::ReticleSight> CurrentSight() const;
-  // Creates the materials of the things drawn with the builtin cube that are
-  // not scene entities of their own look: tracers, impact marks, targets.
-  void CreateEffectMaterials();
   [[nodiscard]] render::SceneView BuildSceneView();
 
   // Declaration order is construction order and, reversed, destruction order:
-  // the overlay and renderer must go before the window they render into, and
-  // scene_physics_ and player_ (which borrow the world) before the world,
-  // which needs the runtime. The mesh cache owns the CPU meshes shapes are
-  // built from, but bodies copy what they need, so it only has to outlive
-  // Rebuild calls.
+  // the overlay and renderer must go before the window they render into; the
+  // prefab cache borrows the GPU backend, the world borrows the cache;
+  // world_physics_ and player_ (which own bodies of the physics world) go
+  // before the physics world, which needs the runtime.
   platform::Window window_;
   render::Renderer renderer_;
-  render::MeshCache mesh_cache_;
-  render::ModelCache model_cache_;
-  render::MaterialCache material_cache_;
+  world::RendererBackend gpu_backend_;
+  world::PrefabCache prefab_cache_;
+  world::World world_;
+  // File time of every cached prefab when it was (re)loaded, indexed by
+  // PrefabId; nullopt if it could not be read.
+  std::vector<std::optional<int64_t>> prefab_write_times_;
   physics::PhysicsRuntime physics_runtime_;
   physics::PhysicsWorld physics_world_;
-  physics::ScenePhysics scene_physics_;
+  world::WorldPhysics world_physics_;
   player::PlayerController player_;  // Owns a character in physics_world_.
   ui::PerfOverlay overlay_;
-  ui::EditorPanels editor_;
 
-  scene::Scene scene_;
+  scene::SceneData scene_;
   std::string scene_path_;
+  std::string scene_name_;  // File name of scene_path_, for the overlay.
   std::string status_;
   std::vector<render::DrawItem> draws_;
 
@@ -222,31 +246,22 @@ class App {
 
   // The player's weapons: the loadout owns one firearm per slot, and each
   // slot has its own viewmodel (indexed by weapon::WeaponSlot). Bullets are
-  // not part of the scene: they are neither saved nor loaded and are dropped
-  // on every scene reload.
+  // not part of the scene and are dropped on every scene reload.
+  WeaponAssets weapons_;  // Before the members built from it.
   weapon::Loadout loadout_;
   std::array<weapon::Viewmodel, weapon::kWeaponSlotCount> viewmodels_;
   weapon::ProjectileSystem projectiles_;
-  std::string rifle_mesh_path_;  // Resolved once; looked up every frame.
-  // The pistol, loaded at startup so the first switch does not hitch. Owned
-  // by model_cache_; null if loading failed, then the pistol is not drawn
-  // (it still fires).
-  const render::UploadedModel* pistol_model_ = nullptr;
-  // The model's per-node clips merged into one firing animation; borrowed by
-  // pistol_animator_, so it never changes after LoadPistolModel().
-  animation::Clip pistol_fire_clip_;
-  // Engaged with pistol_model_; borrows its hierarchy and pistol_fire_clip_.
-  std::optional<weapon::WeaponAnimator> pistol_animator_;
-  // World matrix of every node of pistol_model_ this frame, sized once at
-  // startup.
+  // The rifle at rest (it has no animation).
+  world::PrefabPose rifle_pose_;
+  // Borrows weapons_.pistol_hierarchy and weapons_.pistol_fire_clip.
+  weapon::WeaponAnimator pistol_animator_;
+  // World matrix of every node of the pistol this frame, sized once.
   std::vector<glm::mat4> pistol_world_;
-  // The parts of pistol_model_ that are drawn (all but kPistolHiddenNodes),
-  // filled once at startup.
-  std::vector<render::UploadedPart> pistol_parts_;
+  EffectMesh effect_cube_;
   // Ring buffer of the transforms of the most recent bullet holes on static
-  // surfaces, each a small tile of the builtin cube: the first
-  // `impact_mark_count_` entries are valid, `next_impact_mark_` is the slot the
-  // next mark overwrites.
+  // surfaces, each a small tile of the effect cube: the first
+  // `impact_mark_count_` entries are valid, `next_impact_mark_` is the slot
+  // the next mark overwrites.
   std::array<glm::mat4, kMaxImpactMarks> impact_marks_{};
   size_t impact_mark_count_ = 0;
   size_t next_impact_mark_ = 0;
@@ -258,27 +273,19 @@ class App {
   std::vector<std::string> target_names_;  // Parallel to targets_.
   weapon::TargetLog target_log_{kHitLogCapacity, kMaxTargets};
 
-  // Owned by renderer_; created once at startup (CreateEffectMaterials).
-  // Tracers glow (emissive, bright enough for bloom), impact marks are dark
-  // and matte, target plates bare steel.
+  // Owned by renderer_; created once at startup. Tracers glow (emissive,
+  // bright enough for bloom), impact marks are dark and matte.
   render::MaterialId tracer_material_ = render::kDefaultMaterial;
   render::MaterialId impact_material_ = render::kDefaultMaterial;
-  render::MaterialId target_material_ = render::kDefaultMaterial;
-  // Post-processing settings edited in the editor's Post and Environment
-  // panels; not saved. Its exposure is ignored: the scene's
-  // environment.exposure_ev is used (and saved) instead.
+  // Exposure and post-processing, edited live in the overlay and not
+  // saved; the exposure is reset from the scene's environment on every load.
   render::PostSettings post_settings_;
-  // The materials the editor lists: the weapons' and effects' (built once
-  // at startup) and the selected entity's (rebuilt while the editor shows).
-  std::vector<ui::MaterialSlot> weapon_slots_;
-  std::vector<ui::MaterialSlot> entity_slots_;
   // The HDRI path the renderer's environment was loaded from (empty for the
   // generated default sky); nullopt before the first LoadEnvironment().
   std::optional<std::string> environment_source_;
-  // The sun found in the loaded environment (EstimateSun), for aligning the
-  // scene's sun with it.
-  lighting::SunEstimate environment_sun_;
 
+  std::chrono::steady_clock::time_point process_start_;
+  bool first_frame_logged_ = false;
   bool mouse_captured_ = false;
   bool shadows_enabled_ = true;
   bool cascade_debug_ = false;

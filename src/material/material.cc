@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace blue::material {
 namespace {
@@ -39,6 +40,9 @@ MaterialDesc Sanitize(MaterialDesc desc) {
   }
   desc.alpha_cutoff =
       ClampFinite(desc.alpha_cutoff, 0.0f, 1.0f, defaults.alpha_cutoff);
+  for (uint8_t& uv_set : desc.uv_set) {
+    uv_set = std::min<uint8_t>(uv_set, 1);
+  }
   return desc;
 }
 

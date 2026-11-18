@@ -175,13 +175,17 @@ void ShadowPass::Record(const FrameContext& ctx) {
         continue;
       }
       const DrawItem& item = ctx.view.draws[i];
+      const auto mesh_index = static_cast<size_t>(item.mesh);
+      if (mesh_index >= meshes_.size() || !meshes_[mesh_index].resident()) {
+        continue;
+      }
       ++ctx.stats.shadow_draw_calls;
       const ShadowConstants constants{
           .light_model_view_proj = cascade.view_projection * item.transform,
       };
       vkCmdPushConstants(cmd, pipeline_->layout(), kConstantsRange.stageFlags,
                          0, sizeof(constants), &constants);
-      meshes_[static_cast<size_t>(item.mesh)].Draw(cmd);
+      meshes_[mesh_index].Draw(cmd);
     }
     vkCmdEndRendering(cmd);
   }

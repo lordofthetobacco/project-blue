@@ -18,6 +18,8 @@ class Buffer {
   enum class Access {
     kGpuOnly,             // Device-local, filled through a staging upload.
     kCpuSequentialWrite,  // Host-visible, persistently mapped, written often.
+    kCpuRead,             // Host-visible, persistently mapped, read back by
+                          // the CPU (call InvalidateForRead() first).
   };
 
   Buffer() = default;
@@ -33,8 +35,11 @@ class Buffer {
   [[nodiscard]] VkBuffer handle() const { return buffer_; }
   [[nodiscard]] VkDeviceSize size() const { return size_; }
   // Returns the persistent mapping, or nullptr unless the buffer was created
-  // with Access::kCpuSequentialWrite.
+  // with Access::kCpuSequentialWrite or kCpuRead.
   [[nodiscard]] void* mapped() const { return mapped_; }
+  // Makes GPU writes visible through mapped() (needed for non-coherent
+  // memory) once the writing work has finished. kCpuRead buffers only.
+  void InvalidateForRead() const;
 
  private:
   void Release();

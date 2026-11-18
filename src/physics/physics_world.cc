@@ -23,6 +23,7 @@
 // clang-format on
 
 #include "core/log.h"
+#include "physics/internal/cooked_shape_access.h"
 #include "physics/internal/jolt_math.h"
 #include "physics/internal/layers.h"
 #include "physics/internal/physics_world_impl.h"
@@ -175,18 +176,54 @@ core::Result<BodyId, PhysicsError> PhysicsWorld::Impl::CreateBody(
     return Result::Error(shape.error());
   }
 
+  return AddBody(shape.value().GetPtr(),
+                 ShapeBodyDesc{.motion = desc.body.motion,
+                               .pose = desc.pose,
+                               .scale = desc.scale,
+                               .mass = desc.body.mass,
+                               .friction = desc.body.friction,
+                               .restitution = desc.body.restitution});
+}
+
+core::Result<BodyId, PhysicsError> PhysicsWorld::Impl::CreateBody(
+    JPH::ShapeRefC shape, const ShapeBodyDesc& desc) {
+  using Result = core::Result<BodyId, PhysicsError>;
+  const bool dynamic = desc.motion == scene::MotionType::kDynamic;
+  if (dynamic && shape->GetSubType() == JPH::EShapeSubType::Mesh) {
+    return Result::Error(PhysicsError::kDynamicTriangleMesh);
+  }
+  const scene::RigidBody body{.motion = desc.motion,
+                              .mass = desc.mass,
+                              .friction = desc.friction,
+                              .restitution = desc.restitution};
+  if (scene::ValidateRigidBody(body).has_value() || !IsValidScale(desc.scale) ||
+      !IsFiniteVec(desc.pose.position)) {
+    return Result::Error(PhysicsError::kInvalidShape);
+  }
+  core::Result<JPH::ShapeRefC, PhysicsError> scaled =
+      internal::ApplyScale(shape, desc.scale);
+  if (!scaled.ok()) {
+    return Result::Error(scaled.error());
+  }
+  return AddBody(scaled.value().GetPtr(), desc);
+}
+
+core::Result<BodyId, PhysicsError> PhysicsWorld::Impl::AddBody(
+    const JPH::Shape* shape, const ShapeBodyDesc& desc) {
+  using Result = core::Result<BodyId, PhysicsError>;
+  const bool dynamic = desc.motion == scene::MotionType::kDynamic;
   JPH::BodyCreationSettings settings(
-      shape.value().GetPtr(), ToJolt(desc.pose.position),
+      shape, ToJolt(desc.pose.position),
       ToJolt(glm::normalize(desc.pose.rotation)),
       dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
       dynamic ? layers::kMoving : layers::kNonMoving);
-  settings.mFriction = desc.body.friction;
-  settings.mRestitution = desc.body.restitution;
+  settings.mFriction = desc.friction;
+  settings.mRestitution = desc.restitution;
   settings.mLinearDamping = kLinearDamping;
   if (dynamic) {
     settings.mOverrideMassProperties =
         JPH::EOverrideMassProperties::CalculateInertia;
-    settings.mMassPropertiesOverride.mMass = desc.body.mass;
+    settings.mMassPropertiesOverride.mMass = desc.mass;
   }
 
   JPH::BodyInterface& bodies = system_.GetBodyInterface();
@@ -307,6 +344,11 @@ PhysicsWorld::~PhysicsWorld() = default;
 core::Result<BodyId, PhysicsError> PhysicsWorld::CreateBody(
     const BodyDesc& desc) {
   return impl_->CreateBody(desc);
+}
+
+core::Result<BodyId, PhysicsError> PhysicsWorld::CreateBody(
+    const CookedShape& shape, const ShapeBodyDesc& desc) {
+  return impl_->CreateBody(internal::CookedShapeAccess::Shape(shape), desc);
 }
 
 void PhysicsWorld::RemoveBody(BodyId id) { impl_->RemoveBody(id); }

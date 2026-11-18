@@ -14,12 +14,13 @@ invariant gl_Position;
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
-layout(location = 2) in vec2 inUv;
-layout(location = 3) in vec4 inTangent; // xyz: +u direction, w: handedness
+layout(location = 2) in vec2 inUv0;
+layout(location = 3) in vec4 inTangent; // xyz: +u0 direction, w: handedness
+layout(location = 4) in vec2 inUv1;
 
 layout(location = 0) out vec3 outWorldPosition;
 layout(location = 1) out vec3 outNormal;
-layout(location = 2) out vec2 outUv;
+layout(location = 2) out vec4 outUv;   // xy: uv0, zw: uv1
 layout(location = 3) out vec4 outTangent;
 
 void main()
@@ -37,7 +38,7 @@ void main()
 
     outWorldPosition = worldPosition.xyz;
     outNormal = cofactor * inNormal * mirror;
-    outUv = inUv;
+    outUv = vec4(inUv0, inUv1);
     outTangent = vec4(m * inTangent.xyz, inTangent.w * mirror);
 
     gl_Position = frame.viewProj * worldPosition;

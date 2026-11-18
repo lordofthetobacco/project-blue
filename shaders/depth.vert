@@ -10,9 +10,10 @@ layout(push_constant) uniform DrawConstants {
 } draw;
 
 layout(location = 0) in vec3 inPosition;
-layout(location = 2) in vec2 inUv;
+layout(location = 2) in vec2 inUv0;
+layout(location = 4) in vec2 inUv1;
 
-layout(location = 0) out vec2 outUv;
+layout(location = 0) out vec4 outUv;  // xy: uv0, zw: uv1
 
 // Must produce exactly the depth of mesh.vert: same inputs, same expression
 // (worldPosition, then viewProj * worldPosition), both invariant.
@@ -21,6 +22,6 @@ invariant gl_Position;
 void main()
 {
     const vec4 worldPosition = draw.model * vec4(inPosition, 1.0);
-    outUv = inUv;
+    outUv = vec4(inUv0, inUv1);
     gl_Position = frame.viewProj * worldPosition;
 }

@@ -4,6 +4,7 @@
 #include <assimp/material.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
 #include <set>
 #include <string>
@@ -27,26 +28,34 @@ using material::TextureRef;
 // (AI_MATKEY_GLTF_TEXTURE_STRENGTH); both are read.
 constexpr const char* kImporterStrengthKey = "$tex.file.strength";
 
+// A texture reference and the UV set (0 or 1) it is sampled with.
+struct FoundTexture {
+  TextureRef ref;
+  uint8_t uv_set = 0;
+};
+
 // Returns the texture of `type` (slot 0) of `material`, or an empty ref.
-TextureRef FindTexture(const aiScene& scene, const aiMaterial& material,
-                       aiTextureType type, const std::string& model_path,
-                       std::set<std::string>& missing_files) {
+FoundTexture FindTexture(const aiScene& scene, const aiMaterial& material,
+                         aiTextureType type, const std::string& model_path,
+                         std::set<std::string>& missing_files) {
   aiString path;
   unsigned uv_channel = 0;
   if (material.GetTexture(type, 0, &path, nullptr, &uv_channel) !=
       aiReturn_SUCCESS) {
     return {};
   }
-  if (uv_channel != 0) {
+  if (uv_channel > 1) {
     core::log::Warn(
         "{}: material '{}': texture '{}' uses UV channel {}; only "
-        "channel 0 is supported, dropping it",
+        "channels 0 and 1 are supported, dropping it",
         model_path, material.GetName().C_Str(), path.C_Str(), uv_channel);
     return {};
   }
+  const auto uv_set = static_cast<uint8_t>(uv_channel);
   const auto [embedded, index] = scene.GetEmbeddedTextureAndIndex(path.C_Str());
   if (embedded != nullptr && index >= 0) {
-    return {.path = model_path, .embedded_index = index};
+    return {.ref = {.path = model_path, .embedded_index = index},
+            .uv_set = uv_set};
   }
   const std::string file =
       core::JoinPath(core::ParentPath(model_path), path.C_Str());
@@ -56,19 +65,19 @@ TextureRef FindTexture(const aiScene& scene, const aiMaterial& material,
     }
     return {};
   }
-  return {.path = file};
+  return {.ref = {.path = file}, .uv_set = uv_set};
 }
 
 // Returns the first non-empty texture of `types`.
-TextureRef FindFirstTexture(const aiScene& scene, const aiMaterial& material,
-                            std::initializer_list<aiTextureType> types,
-                            const std::string& model_path,
-                            std::set<std::string>& missing_files) {
+FoundTexture FindFirstTexture(const aiScene& scene, const aiMaterial& material,
+                              std::initializer_list<aiTextureType> types,
+                              const std::string& model_path,
+                              std::set<std::string>& missing_files) {
   for (const aiTextureType type : types) {
-    TextureRef ref =
+    FoundTexture found =
         FindTexture(scene, material, type, model_path, missing_files);
-    if (!ref.empty()) {
-      return ref;
+    if (!found.ref.empty()) {
+      return found;
     }
   }
   return {};
@@ -143,16 +152,25 @@ MaterialDesc ConvertMaterial(const aiScene& scene, const aiMaterial& material,
   MaterialDesc desc{.name = name.C_Str()};
   ReadFactors(material, desc);
 
-  const auto find = [&](std::initializer_list<aiTextureType> types) {
-    return FindFirstTexture(scene, material, types, model_path, missing_files);
+  const auto find = [&](material::TextureSlot slot,
+                        std::initializer_list<aiTextureType> types) {
+    FoundTexture found =
+        FindFirstTexture(scene, material, types, model_path, missing_files);
+    desc.uv_set[static_cast<size_t>(slot)] = found.uv_set;
+    return std::move(found.ref);
   };
+  using material::TextureSlot;
   desc.base_color_texture =
-      find({aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE});
-  desc.metallic_roughness_texture =
-      find({aiTextureType_GLTF_METALLIC_ROUGHNESS});
-  desc.normal_texture = find({aiTextureType_NORMALS, aiTextureType_HEIGHT});
-  desc.occlusion_texture = find({aiTextureType_LIGHTMAP});
-  desc.emissive_texture = find({aiTextureType_EMISSIVE});
+      find(TextureSlot::kBaseColor,
+           {aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE});
+  desc.metallic_roughness_texture = find(
+      TextureSlot::kMetallicRoughness, {aiTextureType_GLTF_METALLIC_ROUGHNESS});
+  desc.normal_texture =
+      find(TextureSlot::kNormal, {aiTextureType_NORMALS, aiTextureType_HEIGHT});
+  desc.occlusion_texture =
+      find(TextureSlot::kOcclusion, {aiTextureType_LIGHTMAP});
+  desc.emissive_texture =
+      find(TextureSlot::kEmissive, {aiTextureType_EMISSIVE});
 
   if (material.Get(AI_MATKEY_GLTF_TEXTURE_SCALE(aiTextureType_NORMALS, 0),
                    desc.normal_scale) != aiReturn_SUCCESS) {

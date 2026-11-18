@@ -21,6 +21,9 @@ Buffer::Buffer(VmaAllocator allocator, VkDeviceSize size,
   if (access == Access::kCpuSequentialWrite) {
     alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  } else if (access == Access::kCpuRead) {
+    alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                       VMA_ALLOCATION_CREATE_MAPPED_BIT;
   }
 
   VmaAllocationInfo result{};
@@ -48,6 +51,10 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
     mapped_ = std::exchange(other.mapped_, nullptr);
   }
   return *this;
+}
+
+void Buffer::InvalidateForRead() const {
+  CheckVk(vmaInvalidateAllocation(allocator_, allocation_, 0, VK_WHOLE_SIZE));
 }
 
 void Buffer::Release() {

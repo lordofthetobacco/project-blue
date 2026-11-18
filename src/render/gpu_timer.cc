@@ -38,6 +38,8 @@ const char* GpuScopeName(GpuScope scope) {
       return "bloom";
     case GpuScope::kTonemap:
       return "tonemap";
+    case GpuScope::kOverlay:
+      return "overlay";
     case GpuScope::kPresent:
       return "present";
     case GpuScope::kUi:

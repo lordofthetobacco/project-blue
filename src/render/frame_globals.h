@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <span>
 
+#include <glm/ext/vector_uint4.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/vec4.hpp>
 
@@ -21,6 +22,14 @@
 
 namespace blue::render {
 
+// One point light as the shaders read it. Must match GpuPointLight in
+// shaders/common.glsl (std140).
+struct GpuPointLight {
+  // xyz: world position, w: 1 / range^2, or 0 for an unlimited range.
+  glm::vec4 position_inverse_range_sq;
+  glm::vec4 radiance;  // rgb: color * intensity, w: unused
+};
+
 // Must match FrameUniforms in shaders/common.glsl (std140; offsets are
 // asserted in the .cc).
 struct FrameUniforms {
@@ -30,8 +39,6 @@ struct FrameUniforms {
   glm::mat4 inverse_projection;
   glm::mat4 inverse_view_proj;
   glm::vec4 camera_position;
-  glm::vec4 light_position;
-  glm::vec4 light_color;  // rgb: color, a: intensity
   glm::vec4 ambient_color;
   glm::vec4 sun_direction;  // xyz: direction the light travels
   glm::vec4 sun_color;      // rgb: color * intensity
@@ -50,11 +57,17 @@ struct FrameUniforms {
   // x: intensity, y: rotation about +Y (radians), z: highest mip of the
   // prefiltered cube, w: 1 when an environment is bound, else 0.
   glm::vec4 environment_params;
+  // x: number of valid point_lights, [0, kMaxPointLights].
+  glm::uvec4 point_light_count;
+  std::array<GpuPointLight, kMaxPointLights> point_lights;
 };
 
 // Returns the uniforms of `view` for a render target of `extent`.
 // `cascades` are only read when `shadows` is true. The environment fields
-// stay zero (no environment yet).
+// stay zero (no environment yet). Point lights whose range sphere lies
+// outside the camera frustum are dropped; when more than kMaxPointLights
+// remain, the ones that light the camera position the least are dropped.
+// Allocates nothing.
 [[nodiscard]] FrameUniforms MakeFrameUniforms(
     const SceneView& view, std::span<const lighting::Cascade> cascades,
     bool shadows, VkExtent2D extent);

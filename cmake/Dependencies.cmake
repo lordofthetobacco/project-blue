@@ -35,11 +35,20 @@ FetchContent_Declare(VulkanMemoryAllocator
     GIT_SHALLOW    TRUE
     SYSTEM)
 
-# --- Dear ImGui (no CMake support upstream; target defined below) ------------
+# --- Dear ImGui, docking branch (no CMake support upstream; target defined below)
+# Docking is only switched on by the editor (ImGuiConfigFlags_DockingEnable).
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.92.9b
+    GIT_TAG        v1.92.9b-docking
     GIT_SHALLOW    TRUE
+    SYSTEM)
+
+# --- ImGuizmo (editor transform gizmos; MIT). Only ImGuizmo.cpp is compiled, as
+# a target defined below against our ImGui (checked to build with 1.92.9b-docking).
+FetchContent_Declare(imguizmo
+    URL      https://github.com/CedricGuillemet/ImGuizmo/archive/105e4fde45e4e74aae8973d98750820ef7aca7e2.tar.gz
+    URL_HASH SHA256=d625a9f3207f15b7a5b7706269747676f17b7e4df00f898ced9480e5063d493a
+    SOURCE_SUBDIR  no-cmake
     SYSTEM)
 
 # --- assimp (model importers; only the formats we ship) -----------------------
@@ -76,6 +85,25 @@ FetchContent_Declare(stb
     URL_HASH SHA256=06f97b11cf13645e6762c34a248d748c154235b04adf50d10e8266ae6d4ea555
     SYSTEM)
 
+# --- bc7enc_rdo (BC7 + BC4/BC5 encoders, BC7 decoder; MIT or public domain) -----
+# Pinned to a commit: no release tags. Only the portable C++ encoders are used
+# (no ISPC), see cmake/third_party/bc7enc_rdo. SOURCE_SUBDIR names a directory
+# without a CMakeLists.txt, so FetchContent only downloads the sources.
+FetchContent_Declare(bc7enc_rdo
+    URL      https://github.com/richgel999/bc7enc_rdo/archive/b9438627eef73a1157e84201b6fa6eb2ffd6d9f0.tar.gz
+    URL_HASH SHA256=bbb33d1dbb6178a3a2c044956c3cc0b8ea9fc2f2903824379dd86f87d53b64c6
+    SOURCE_SUBDIR  no_cmake
+    SYSTEM)
+
+# --- meshoptimizer (vertex cache / fetch optimisation; MIT) ---------------------
+# v1.3, pinned by commit.
+set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(meshoptimizer
+    URL      https://github.com/zeux/meshoptimizer/archive/9e1f07b159d3cb777f1c67ed31fc11fd117986f4.tar.gz
+    URL_HASH SHA256=e753b45fbc410031bd69cb278180ae31fa0d5430d0c3e662e3a3b100467ce0b3
+    SYSTEM)
+
 # --- JoltPhysics ---------------------------------------------------------------
 # /MD like the rest of the project; OVERRIDE_CXX_FLAGS OFF keeps Jolt from rewriting the
 # global CMAKE_CXX_FLAGS that first-party targets inherit.
@@ -104,7 +132,54 @@ FetchContent_Declare(JoltPhysics
     SOURCE_SUBDIR  Build
     SYSTEM)
 
-FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui assimp stb)
+FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui imguizmo stb)
+
+# The asset-cooking dependencies are compiled optimised even in Debug: assimp
+# parses m16.obj in ~1.7 s at /Od, and BC7 encoding is far too slow without
+# optimisation. CMAKE_<LANG>_FLAGS_DEBUG is read per directory, so the
+# replacement only reaches the subdirectories added while it is set. The
+# runtime library (/MDd, from CMAKE_MSVC_RUNTIME_LIBRARY) and with it the
+# debug STL ABI stay the same as for first-party code.
+set(blue_saved_c_flags_debug "${CMAKE_C_FLAGS_DEBUG}")
+set(blue_saved_cxx_flags_debug "${CMAKE_CXX_FLAGS_DEBUG}")
+if(MSVC)
+    set(CMAKE_C_FLAGS_DEBUG "/O2 /Ob2")
+    set(CMAKE_CXX_FLAGS_DEBUG "/O2 /Ob2")
+else()
+    set(CMAKE_C_FLAGS_DEBUG "-O2")
+    set(CMAKE_CXX_FLAGS_DEBUG "-O2")
+endif()
+
+# assimp is the one dependency built as a shared library (DLL), placed in
+# <build>/bin next to the executables; blue_tests copies it next to itself.
+# Do not make it static again: assimp is compiled with exceptions
+# (_HAS_EXCEPTIONS=1) and throws/catches DeadlyImportError on normal paths
+# (its glTF 1 importer rejects every .glb that way). First-party code is
+# compiled with _HAS_EXCEPTIONS=0, where MSVC's <exception> defines a
+# different std::exception (non-owning message pointer, other layout). Both
+# emit the inline std::exception / std::runtime_error members as COMDATs
+# with the same names, and in a static link the linker keeps whichever
+# object it loads first, so assimp's exceptions could be built and destroyed
+# by mismatched code (heap corruption in ~DeadlyImportError, depending on
+# link order). Inside the DLL assimp only sees its own copies.
+set(BUILD_SHARED_LIBS ON)
+set(ASSIMP_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin" CACHE STRING "" FORCE)
+set(ASSIMP_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin" CACHE STRING "" FORCE)
+FetchContent_MakeAvailable(assimp)
+unset(BUILD_SHARED_LIBS)
+set_target_properties(assimp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(MSVC)
+    # assimp appends "/D_DEBUG /Zi /Od" to its own debug flags; a later /O2
+    # wins (the compiler notes the override with D9025 once per file).
+    target_compile_options(assimp PRIVATE $<$<CONFIG:Debug>:/O2>)
+endif()
+
+FetchContent_MakeAvailable(meshoptimizer bc7enc_rdo)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/third_party/bc7enc_rdo
+    ${CMAKE_BINARY_DIR}/_deps/bc7enc_rdo-target)
+set(CMAKE_C_FLAGS_DEBUG "${blue_saved_c_flags_debug}")
+set(CMAKE_CXX_FLAGS_DEBUG "${blue_saved_cxx_flags_debug}")
 
 # Jolt only adds /arch:AVX2 and its JPH_USE_* definitions when CMAKE_VS_PLATFORM_NAME is
 # x64, which is empty under Ninja. Set it just for Jolt so it keeps its default AVX2 build.
@@ -131,6 +206,10 @@ target_include_directories(imgui SYSTEM PUBLIC
 )
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL3::SDL3-static)
+
+add_library(imguizmo STATIC ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp)
+target_include_directories(imguizmo SYSTEM PUBLIC ${imguizmo_SOURCE_DIR}/src)
+target_link_libraries(imguizmo PUBLIC imgui)
 
 # stb has no CMake project; SYSTEM keeps its warnings out of /W4 /WX builds.
 add_library(stb INTERFACE)

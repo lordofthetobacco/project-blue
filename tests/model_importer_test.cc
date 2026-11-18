@@ -59,7 +59,7 @@ TEST_CASE("ImportModel loads the teapot") {
   for (const Vertex& vertex : mesh.vertices) {
     CHECK(std::abs(glm::length(vertex.normal) - 1.0f) <= kEpsilon);
     // The file has no UVs.
-    CHECK(vertex.uv == glm::vec2(0.0f));
+    CHECK(vertex.uv0 == glm::vec2(0.0f));
   }
   for (const Index index : mesh.indices) {
     CHECK(index < mesh.vertices.size());
@@ -153,8 +153,8 @@ TEST_CASE("ImportModel flips OBJ UVs to top-left and orients tangents") {
   REQUIRE(model.mesh.vertices.size() == 4);
   for (const Vertex& vertex : model.mesh.vertices) {
     // Top-left convention: the top edge (y = 1) has v = 0.
-    CHECK(vertex.uv.x == doctest::Approx(vertex.position.x));
-    CHECK(vertex.uv.y == doctest::Approx(1.0f - vertex.position.y));
+    CHECK(vertex.uv0.x == doctest::Approx(vertex.position.x));
+    CHECK(vertex.uv0.y == doctest::Approx(1.0f - vertex.position.y));
     CHECK(NearlyEqual(glm::vec3(vertex.tangent), {1.0f, 0.0f, 0.0f}));
     // The bitangent points along +v, down the image.
     CHECK(NearlyEqual(

@@ -92,6 +92,8 @@ class PhysicsWorld::Impl {
   ~Impl();
 
   core::Result<BodyId, PhysicsError> CreateBody(const BodyDesc& desc);
+  core::Result<BodyId, PhysicsError> CreateBody(JPH::ShapeRefC shape,
+                                                const ShapeBodyDesc& desc);
   void RemoveBody(BodyId id);
   void RemoveAllBodies();
   void Update(float frame_seconds);
@@ -120,6 +122,9 @@ class PhysicsWorld::Impl {
 
   // Returns the (cached) shape for `desc`, scale applied.
   core::Result<JPH::ShapeRefC, PhysicsError> GetShape(const BodyDesc& desc);
+  // Creates and adds a body with `shape` (scale already applied).
+  core::Result<BodyId, PhysicsError> AddBody(const JPH::Shape* shape,
+                                             const ShapeBodyDesc& desc);
   // Runs one fixed step and refreshes the tracked poses.
   void Step();
 

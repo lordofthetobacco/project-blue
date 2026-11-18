@@ -4,11 +4,13 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
+
+// Value types shared by scenes (.mscn, see scene_data.h), physics bodies,
+// cameras and the renderer.
 
 namespace blue::scene {
 
@@ -33,9 +35,9 @@ enum class ShapeType {
   kTriangleMesh,  // The mesh triangles; static bodies only.
 };
 
-// Passive physics description of an entity. Shapes are derived from the
-// entity's mesh bounds (box, sphere) or vertices (hull, triangle mesh) at body
-// creation and scaled by the entity transform's scale. Units are SI.
+// Passive physics description of a body built from a mesh. Shapes are
+// derived from the mesh bounds (box, sphere) or vertices (hull, triangle
+// mesh) at body creation and scaled by the body's scale. Units are SI.
 struct RigidBody {
   MotionType motion = MotionType::kDynamic;
   ShapeType shape = ShapeType::kBox;
@@ -51,29 +53,10 @@ struct RigidBody {
 [[nodiscard]] std::optional<std::string_view> ValidateRigidBody(
     const RigidBody& body);
 
-struct Entity {
-  std::string name;
-  // Filesystem path (absolute or relative to the working directory) or
-  // "builtin:<id>".
-  std::string mesh_path;
-  Transform transform;
-  // Physics description; the entity is not simulated if empty.
-  std::optional<RigidBody> body;
-  // .bmat material file applied to every submesh of the mesh (path like
-  // mesh_path); empty keeps the mesh's own materials.
-  std::string material_path;
-};
-
 struct SceneCamera {
   glm::vec3 position{2.2f, 1.6f, 2.8f};
   glm::vec3 target{0.0f};
   float vertical_fov_degrees = 60.0f;
-};
-
-struct SceneLight {
-  glm::vec3 position{2.5f, 3.5f, 1.5f};
-  glm::vec3 color{1.0f, 0.96f, 0.9f};
-  float intensity = 18.0f;
 };
 
 // Directional light (the sun). `direction` is the direction the light
@@ -96,8 +79,9 @@ struct SunLight {
 // Image-based lighting of the scene: an HDRI environment map drawn as the sky
 // and used for ambient light and reflections.
 struct Environment {
-  // Radiance .hdr equirect panorama (path like Entity::mesh_path); empty
-  // uses the generated default sky (lighting::MakeDefaultEnvironment()).
+  // Radiance .hdr equirect panorama (absolute, or relative to the working
+  // directory); empty uses the generated default sky
+  // (lighting::MakeDefaultEnvironment()).
   std::string hdri_path;
   float intensity = 1.0f;         // scales the environment's radiance, >= 0
   float rotation_radians = 0.0f;  // about +Y
@@ -109,22 +93,6 @@ struct Environment {
 // string literal.
 [[nodiscard]] std::optional<std::string_view> ValidateEnvironment(
     const Environment& environment);
-
-// The contents of a scene file: entities plus the camera, light, sun,
-// ambient term and image-based environment.
-struct Scene {
-  std::vector<Entity> entities;
-  SceneCamera camera;
-  SceneLight light;
-  SunLight sun;
-  glm::vec3 ambient{0.025f};
-  glm::vec3 gravity{0.0f, -9.81f, 0.0f};  // m/s^2
-  Environment environment;
-};
-
-// Prefix of Entity::mesh_path values that name a built-in mesh instead of a
-// file.
-inline constexpr std::string_view kBuiltinMeshPrefix = "builtin:";
 
 }  // namespace blue::scene
 

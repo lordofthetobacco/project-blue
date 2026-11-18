@@ -2,7 +2,9 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <span>
 #include <string>
@@ -116,6 +118,35 @@ TEST_CASE("A material file round-trips every field") {
   CHECK(contents.find("base_color_texture = ../textures/color.jpg") !=
         std::string::npos);
   CHECK(contents.find("normal_texture.embedded = 3") != std::string::npos);
+}
+
+TEST_CASE("UV sets and normal encoding round-trip and default to absent") {
+  const testing::ScratchDirectory dir("material_uv_sets");
+  MaterialDesc desc{.name = "two_uv"};
+  desc.uv_set = {0, 1, 0, 1, 1};
+  desc.normal_encoding = NormalEncoding::kRg;
+  desc.occlusion_in_metallic_roughness = true;
+  const std::string path = dir.Child("two_uv.bmat");
+  REQUIRE(SaveMaterialFile(desc, path).ok());
+  const auto loaded = LoadMaterialFile(path);
+  REQUIRE(loaded.ok());
+  CHECK(loaded.value() == desc);
+
+  // Defaults write none of the optional keys.
+  const std::string plain_path = dir.Child("plain.bmat");
+  REQUIRE(SaveMaterialFile(MaterialDesc{.name = "plain"}, plain_path).ok());
+  const auto text = platform::ReadFile(plain_path, 4096);
+  REQUIRE(text.ok());
+  const std::string contents(reinterpret_cast<const char*>(text.value().data()),
+                             text.value().size());
+  CHECK(contents.find("uv_set") == std::string::npos);
+  CHECK(contents.find("normal_encoding") == std::string::npos);
+  CHECK(contents.find("occlusion_in_metallic_roughness") == std::string::npos);
+
+  MaterialDesc out_of_range;
+  out_of_range.uv_set = {7, 0, 1, 2, 0};
+  CHECK(Sanitize(out_of_range).uv_set ==
+        std::array<uint8_t, kTextureSlotCount>{1, 0, 1, 1, 0});
 }
 
 TEST_CASE("LoadMaterialFile keeps defaults for missing and bad values") {

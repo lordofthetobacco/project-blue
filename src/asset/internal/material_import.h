@@ -32,7 +32,8 @@ namespace blue::asset::internal {
 // Embedded textures become TextureRef{model_path, index}; file textures are
 // resolved against the model's directory and dropped with a warning (once
 // per path, remembered in `missing_files`) if the file does not exist.
-// Textures on a UV channel other than 0 are dropped with a warning. Assimp's
+// Each slot's UV channel (0 or 1) is kept in MaterialDesc::uv_set; textures
+// on other channels are dropped with a warning. Assimp's
 // fallback material (AI_DEFAULT_MATERIAL_NAME) becomes DefaultMaterial().
 [[nodiscard]] material::MaterialDesc ConvertMaterial(
     const aiScene& scene, const aiMaterial& material,

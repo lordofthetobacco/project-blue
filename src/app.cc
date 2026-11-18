@@ -9,8 +9,6 @@
 #include <cstddef>
 #include <cstring>
 #include <format>
-#include <initializer_list>
-#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -19,7 +17,6 @@
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/trigonometric.hpp>
 #include <glm/vec2.hpp>
@@ -28,6 +25,7 @@
 
 #include "animation/clip.h"
 #include "asset/image_decoder.h"
+#include "asset/mesh_data.h"
 #include "camera/look.h"
 #include "camera/projection.h"
 #include "core/log.h"
@@ -36,18 +34,17 @@
 #include "input/bindings.h"
 #include "lighting/environment.h"
 #include "material/material.h"
-#include "material/material_file.h"
 #include "platform/file_system.h"
-#include "scene/default_lighting.h"
-#include "scene/placement.h"
-#include "scene/scene_serializer.h"
+#include "prefab/prefab.h"
+#include "prefab/prefab_file.h"
+#include "scene/mscn_serializer.h"
 #include "shader/shader_compiler.h"
 #include "weapon/firearm.h"
 #include "weapon/loadout.h"
 #include "weapon/projectile_system.h"
 #include "weapon/target_log.h"
 #include "weapon/viewmodel.h"
-#include "weapon/weapon_geometry.h"
+#include "weapon/weapon_prefab.h"
 #include "weapon/weapon_specs.h"
 
 namespace blue {
@@ -64,94 +61,37 @@ constexpr float kNearPlane = 0.02f;
 constexpr float kMaxSimulationStep = 0.1f;
 constexpr float kSensitivityStep = 1.15f;
 
-constexpr float kImportTargetSize = 2.0f;
-constexpr float kImportSpacing = 2.5f;
-constexpr float kImportDropHeight = 1.5f;  // Imports start this high and fall.
-constexpr float kImportMass = 10.0f;       // kg
-
 constexpr float kPushReach = 100.0f;   // m
 constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
-// How far below the scene camera the floor is looked for when placing the
-// player; beyond that the feet go an eye height below the camera.
+// How far below the player start the floor is looked for when placing the
+// player; beyond that the feet go an eye height below the start.
 constexpr float kSpawnProbeDistance = 3.0f;  // m
 
-// The default scene's ground: the builtin plane (12 m square) stretched into
-// a 48 m wide strip that runs from behind the spawn to 700 m down range
-// (-Z), so bullet drop can be watched all the way to the farthest target.
-constexpr float kBuiltinPlaneSize = 12.0f;  // m, see render::MeshCache
-constexpr float kGroundWidth = 48.0f;       // m along X
-constexpr float kGroundBackZ = 24.0f;       // m, edge behind the spawn
-constexpr float kGroundFrontZ = -700.0f;    // m, far edge down range
-// The default player position and view: at the firing line, looking level
-// down range. The house is to the left, the cube just ahead on the left.
-constexpr glm::vec3 kFiringPosition{2.2f, 1.6f, 2.8f};
-constexpr glm::vec3 kDownRange{0.0f, 0.0f, -1.0f};
-
-// Flat steel plates down range, measured from kFiringPosition: 0.5 m squares
-// up close, 0.5 x 1.0 m torso plates farther out. Each sits a little to one
-// side so that none hides another from the firing line.
-struct RangeTarget {
-  float range;     // m down range
-  float offset;    // m to the right of the firing line
-  glm::vec2 size;  // m, width and height
-};
-constexpr RangeTarget kRangeTargets[] = {
-    {25.0f, -1.5f, {0.5f, 0.5f}},  {50.0f, 1.5f, {0.5f, 0.5f}},
-    {100.0f, -2.5f, {0.5f, 1.0f}}, {200.0f, 2.0f, {0.5f, 1.0f}},
-    {300.0f, -5.0f, {0.5f, 1.0f}}, {400.0f, 6.0f, {0.5f, 1.0f}},
-    {600.0f, 0.0f, {0.5f, 1.0f}},
-};
-constexpr float kTargetHeight = 1.5f;      // m, centre above the ground
-constexpr float kTargetThickness = 0.05f;  // m
-// Entities whose name starts with this are targets: the hit log finds them by
-// name, so they survive a save and reload of the scene.
+// Instances whose name starts with this are targets: the hit log finds them
+// by name, so scenes made in the editor get them too.
 constexpr std::string_view kTargetNamePrefix = "target ";
-// The sample house (6.4 x 7.1 x 14.8 m, authored in metres, base at y = 0),
-// placed to the left of the default camera's view and clear of the cube.
-constexpr const char* kHouseModel = "house.obj";
-constexpr glm::vec3 kHousePosition{-9.0f, 0.0f, -3.0f};
 
-// Material files of the default scene, in the samples directory.
-constexpr const char* kGroundMaterial = "materials/ground.bmat";
-constexpr const char* kTargetMaterial = "materials/steel.bmat";
-constexpr const char* kDefaultHdri =
-    "env/kloofendal_48d_partly_cloudy_puresky_2k.hdr";
+// Cooked content, in the assets directory next to the executable (built by
+// `blue-pack samples`).
+constexpr const char* kAssetDirectory = "assets";
+constexpr const char* kDefaultScene = "range.mscn";
+constexpr const char* kRifleAsset = "m16.pbo";
+constexpr const char* kPistolAsset = "glock17.pbo";
+// The pistol's firing animation, with "shot" and "slide_lock" events.
+constexpr std::string_view kPistolFireClipName = "fire";
+
+// Constant ambient light added to the image-based lighting (the value
+// scenes had before .mscn).
+constexpr glm::vec3 kAmbient{0.025f};
+
 // Size of the generated sky used when a scene names no HDRI.
 constexpr int kDefaultSkyWidth = 512;
 constexpr int kDefaultSkyHeight = 256;
 
-// The preview spheres (builtin sphere, 1 m across, resting on the ground):
-// a dielectric row and a metal row, roughness growing away from the spawn,
-// each with its own file in samples/materials/preview/. They stand to the
-// right of the firing line, a few metres ahead of the spawn, where nothing
-// down range is hidden behind them.
-constexpr const char* kPreviewMaterialDir = "materials/preview/";
-constexpr std::string_view kPreviewKinds[] = {"dielectric", "metal"};
-constexpr std::string_view kPreviewRoughnessTags[] = {"005", "025", "050",
-                                                      "075", "100"};
-constexpr glm::vec3 kPreviewFirstSphere{6.0f, 0.5f, -4.0f};
-constexpr float kPreviewSpacing = 1.5f;     // m between spheres of a row
-constexpr float kPreviewRowSpacing = 2.0f;  // m between the two rows
-
-// How far "Pick in view" looks for an entity.
-constexpr float kPickReach = 1000.0f;  // m
-
-constexpr const char* kRifleModel = "m16.obj";
-constexpr const char* kPistolModel = "glock/glock17.glb";
-// The pistol's authored firing animation is split into one clip per node
-// (trigger, slide, barrel, whole gun); merged, they are one shot.
-constexpr std::string_view kPistolFireClipName = "fire";
-// Nodes of the pistol model that are not drawn: "Glock_parts_ORIGINAL_combined"
-// is a static copy of the Barrel, Frame_Parts, Guide_Rod, Slide and Trigger
-// meshes merged into one, which would hide the moving slide and trigger and
-// z-fight with them.
-constexpr std::string_view kPistolHiddenNodes[] = {
-    "Glock_parts_ORIGINAL_combined"};
 // Fully aimed vertical FOV as a fraction of the base one, per weapon: the
 // pistol's sights are held at arm's length and magnify less than the rifle's
 // cheek weld (the rifle keeps player::PlayerTuning's default).
 constexpr float kPistolAimFovScale = 0.9f;
-constexpr const char* kBulletMesh = "builtin:cube";
 // A bullet is drawn as a thin box trailing it by the distance it covers in
 // this time (about 4 m at the muzzle), never reaching back past the muzzle.
 constexpr float kTracerSeconds = 0.004f;
@@ -161,7 +101,7 @@ constexpr float kImpactMarkDepth = 0.004f;      // m, how far it stands out
 constexpr float kLensLiftTowardsEye = 0.0005f;  // m, see CurrentSight()
 
 // Hot copper-orange tracer glow, several times brighter than the sunlit
-// scene so it reads at range (and feeds bloom later).
+// scene so it reads at range (and feeds bloom).
 material::MaterialDesc TracerMaterial() {
   material::MaterialDesc desc;
   desc.name = "tracer";
@@ -181,17 +121,6 @@ material::MaterialDesc ImpactMaterial() {
   return desc;
 }
 
-// Bare, slightly worn steel plate.
-material::MaterialDesc TargetMaterial() {
-  material::MaterialDesc desc;
-  desc.name = "target steel";
-  desc.base_color = glm::vec4(0.56f, 0.57f, 0.58f, 1.0f);
-  desc.metallic = 1.0f;
-  desc.roughness = 0.45f;
-  return desc;
-}
-
-constexpr const char* kDefaultScenePath = "scenes/untitled.bscn";
 constexpr const char* kSettingsFileName = "input.cfg";
 
 #ifdef NDEBUG
@@ -216,16 +145,9 @@ std::string ShaderDirectory() {
   return core::JoinPath(platform::BasePath(), "shaders");
 }
 
-// Returns the path of the sample model `file_name`: the repository copy in
-// Debug builds, otherwise the copy deployed next to the executable.
-[[nodiscard]] std::string SamplePath(std::string_view file_name) {
-#ifdef BLUE_DEV_SAMPLES_DIR
-  const std::string dev_path = core::JoinPath(BLUE_DEV_SAMPLES_DIR, file_name);
-  if (platform::PathExists(dev_path)) {
-    return dev_path;
-  }
-#endif
-  return core::JoinPath(core::JoinPath(platform::BasePath(), "samples"),
+// Returns the path of the cooked asset `file_name` next to the executable.
+[[nodiscard]] std::string AssetPath(std::string_view file_name) {
+  return core::JoinPath(core::JoinPath(platform::BasePath(), kAssetDirectory),
                         file_name);
 }
 
@@ -298,9 +220,8 @@ std::string ShaderDirectory() {
       {Action::kToggleInvertY, "invert Y"},
       {Action::kSensitivityDown, "/"},
       {Action::kSensitivityUp, "sens"},
-      {Action::kToggleOverlay, "overlay + editor"},
-      {Action::kSaveScene, "save"},
-      {Action::kLoadScene, "load"},
+      {Action::kToggleOverlay, "overlay"},
+      {Action::kLoadScene, "reload scene"},
       {Action::kToggleVsync, "vsync"},
       {Action::kEscape, "release/quit"},
   };
@@ -336,6 +257,76 @@ std::string ShaderDirectory() {
   return text;
 }
 
+// Returns the prefab at `path` from `cache`, loading it; a failure is fatal
+// (the game cannot run without its weapons).
+[[nodiscard]] world::PrefabId LoadRequiredPrefab(world::PrefabCache& cache,
+                                                 const std::string& path) {
+  core::Result<world::PrefabId, prefab::PrefabError> loaded = cache.Get(path);
+  if (!loaded.ok()) {
+    core::log::Fatal("Cannot load {}: {}", path,
+                     prefab::ToString(loaded.error()));
+  }
+  return loaded.value();
+}
+
+// Reads what the game needs from the cached weapon prefabs `rifle` and
+// `pistol`: their calibration (sockets) and the pistol's fire clip and its
+// event timing. Returns an error naming the file and what is missing.
+[[nodiscard]] core::Result<WeaponAssets, std::string> ReadWeaponAssets(
+    const world::PrefabCache& cache, world::PrefabId rifle,
+    world::PrefabId pistol) {
+  using AssetsResult = core::Result<WeaponAssets, std::string>;
+  WeaponAssets assets;
+  assets.rifle = rifle;
+  assets.pistol = pistol;
+  core::Result<weapon::WeaponGeometry, std::string> rifle_geometry =
+      weapon::GeometryFromSockets(cache.prefab(rifle));
+  if (!rifle_geometry.ok()) {
+    return AssetsResult::Error(
+        std::format("{}: {}", cache.key(rifle), rifle_geometry.error()));
+  }
+  assets.rifle_geometry = rifle_geometry.value();
+
+  const prefab::Prefab& prefab = cache.prefab(pistol);
+  core::Result<weapon::WeaponGeometry, std::string> pistol_geometry =
+      weapon::GeometryFromSockets(prefab);
+  if (!pistol_geometry.ok()) {
+    return AssetsResult::Error(
+        std::format("{}: {}", cache.key(pistol), pistol_geometry.error()));
+  }
+  assets.pistol_geometry = pistol_geometry.value();
+  const int fire_clip = prefab::FindClip(prefab, kPistolFireClipName);
+  if (fire_clip < 0) {
+    return AssetsResult::Error(std::format(
+        "{}: no '{}' clip", cache.key(pistol), kPistolFireClipName));
+  }
+  assets.pistol_hierarchy = prefab.hierarchy;
+  assets.pistol_fire_clip = prefab.clips[static_cast<size_t>(fire_clip)];
+  core::Result<weapon::WeaponAnimatorTuning, std::string> tuning =
+      weapon::AnimatorTuningFromClip(assets.pistol_fire_clip);
+  if (!tuning.ok()) {
+    return AssetsResult::Error(
+        std::format("{}: {}", cache.key(pistol), tuning.error()));
+  }
+  assets.pistol_tuning = tuning.value();
+  return AssetsResult::Ok(std::move(assets));
+}
+
+// Loads the rifle and pistol prefabs and what the game reads from them;
+// anything missing is fatal with a message naming it.
+[[nodiscard]] WeaponAssets LoadWeaponAssets(world::PrefabCache& cache) {
+  const world::PrefabId rifle =
+      LoadRequiredPrefab(cache, AssetPath(kRifleAsset));
+  const world::PrefabId pistol =
+      LoadRequiredPrefab(cache, AssetPath(kPistolAsset));
+  core::Result<WeaponAssets, std::string> assets =
+      ReadWeaponAssets(cache, rifle, pistol);
+  if (!assets.ok()) {
+    core::log::Fatal("{}", assets.error());
+  }
+  return std::move(assets).value();
+}
+
 [[nodiscard]] weapon::Loadout MakeLoadout() {
   return weapon::Loadout(weapon::Glock17Spec(), weapon::M16Spec());
 }
@@ -344,11 +335,11 @@ std::string ShaderDirectory() {
 static_assert(static_cast<int>(weapon::WeaponSlot::kPistol) == 0 &&
               static_cast<int>(weapon::WeaponSlot::kRifle) == 1);
 [[nodiscard]] std::array<weapon::Viewmodel, weapon::kWeaponSlotCount>
-MakeViewmodels() {
+MakeViewmodels(const WeaponAssets& assets) {
   return {
-      weapon::Viewmodel(weapon::Glock17Geometry(),
+      weapon::Viewmodel(assets.pistol_geometry,
                         weapon::Glock17ViewmodelTuning()),
-      weapon::Viewmodel(weapon::M16Geometry(), weapon::M16ViewmodelTuning()),
+      weapon::Viewmodel(assets.rifle_geometry, weapon::M16ViewmodelTuning()),
   };
 }
 
@@ -365,8 +356,8 @@ MakeViewmodels() {
   return std::nullopt;
 }
 
-// Returns the transform that turns the builtin unit cube into a box centred
-// at `center` with its local z along the unit `axis` and `size` metres along
+// Returns the transform that turns the unit cube into a box centred at
+// `center` with its local z along the unit `axis` and `size` metres along
 // (x, y, z). The box's roll about `axis` is arbitrary.
 [[nodiscard]] glm::mat4 BoxAlong(glm::vec3 center, glm::vec3 axis,
                                  glm::vec3 size) {
@@ -379,18 +370,59 @@ MakeViewmodels() {
           glm::vec4(axis * size.z, 0.0f), glm::vec4(center, 1.0f)};
 }
 
+// Returns the target plate of a placed prefab: the box `bounds` (prefab
+// space) placed by `world`, whose thinnest axis is the plate normal (turned
+// towards `firing_position`). Up is the prefab's +Y unless that is the
+// normal. Nullopt for a degenerate box.
+[[nodiscard]] std::optional<weapon::Target> PlateTarget(
+    const asset::Bounds& bounds, const glm::mat4& world,
+    glm::vec3 firing_position) {
+  const glm::vec3 center = glm::vec3(world * glm::vec4(bounds.center(), 1.0f));
+  std::array<glm::vec3, 3> axes{};
+  std::array<float, 3> extents{};
+  for (int i = 0; i < 3; ++i) {
+    const glm::vec3 axis = glm::vec3(world[i]);
+    const float length = glm::length(axis);
+    if (!(length > 0.0f) || !std::isfinite(length)) {
+      return std::nullopt;
+    }
+    axes[static_cast<size_t>(i)] = axis / length;
+    extents[static_cast<size_t>(i)] = 0.5f * bounds.size()[i] * length;
+  }
+  const size_t thin =
+      static_cast<size_t>(std::ranges::min_element(extents) - extents.begin());
+  const size_t up = thin == 1 ? 2 : 1;
+  const size_t right = 3 - thin - up;
+  glm::vec3 normal = axes[thin];
+  if (glm::dot(normal, firing_position - center) < 0.0f) {
+    normal = -normal;
+  }
+  return weapon::Target{
+      .center = center,
+      .normal = normal,
+      .up = axes[up],
+      .half_extents = {extents[right], extents[up]},
+      .range_m = glm::length(center - firing_position),
+  };
+}
+
 [[nodiscard]] std::string WindowTitle(const std::string& scene_path) {
   return "Project Blue \xE2\x80\x94 " + core::FileName(scene_path);
+}
+
+// Returns the milliseconds since `start`.
+[[nodiscard]] double MillisecondsSince(
+    std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - start)
+      .count();
 }
 
 // Returns "<verb> <path> (<elapsed> ms)" with the time since `start`.
 [[nodiscard]] std::string TimedStatus(
     std::string_view verb, const std::string& path,
     std::chrono::steady_clock::time_point start) {
-  const double milliseconds = std::chrono::duration<double, std::milli>(
-                                  std::chrono::steady_clock::now() - start)
-                                  .count();
-  return std::format("{} {} ({:.1f} ms)", verb, path, milliseconds);
+  return std::format("{} {} ({:.1f} ms)", verb, path, MillisecondsSince(start));
 }
 
 }  // namespace
@@ -398,82 +430,66 @@ MakeViewmodels() {
 std::optional<CliOptions> ParseCommandLine(int argc, const char* const argv[]) {
   CliOptions options;
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--help") == 0 ||
-        std::strcmp(argv[i], "-h") == 0) {
+    const std::string_view argument = argv[i];
+    if (argument == "--help" || argument == "-h") {
       options.show_help = true;
       return options;
     }
-    const bool is_scene = std::strcmp(argv[i], "--scene") == 0;
-    const bool is_import = std::strcmp(argv[i], "--import") == 0;
-    if ((!is_scene && !is_import) || i + 1 >= argc) {
+    const bool is_scene = argument == "--scene";
+    const bool is_window_pos = argument == "--window-pos";
+    if ((!is_scene && !is_window_pos) || i + 1 >= argc) {
       return std::nullopt;
     }
-    const std::string value = argv[++i];
+    const std::string_view value = argv[++i];
     if (is_scene) {
-      options.scene_path = value;
-    } else {
-      options.imports.push_back(value);
+      options.scene_path = std::string(value);
+      continue;
+    }
+    options.window_position = platform::ParseWindowPair(value);
+    if (!options.window_position) {
+      return std::nullopt;
     }
   }
   return options;
 }
 
-App::App(const CliOptions& options)
-    : window_("Project Blue", kInitialWidth, kInitialHeight),
+App::App(const CliOptions& options,
+         std::chrono::steady_clock::time_point process_start)
+    : window_("Project Blue", kInitialWidth, kInitialHeight,
+              options.window_position),
       renderer_(window_, ShaderDirectory(), kShaderCompileMode),
-      mesh_cache_(renderer_),
-      model_cache_(renderer_),
-      material_cache_(renderer_),
+      gpu_backend_(renderer_),
+      prefab_cache_(gpu_backend_),
+      world_(prefab_cache_),
       physics_world_(physics_runtime_),
-      scene_physics_(physics_world_),
+      world_physics_(physics_world_),
       overlay_(window_, renderer_),
-      scene_path_(options.scene_path.value_or(kDefaultScenePath)),
+      scene_path_(options.scene_path.value_or(AssetPath(kDefaultScene))),
+      scene_name_(core::FileName(scene_path_)),
       settings_path_(InputSettingsPath()),
+      weapons_(LoadWeaponAssets(prefab_cache_)),
       loadout_(MakeLoadout()),
-      viewmodels_(MakeViewmodels()),
-      rifle_mesh_path_(SamplePath(kRifleModel)) {
-  CreateEffectMaterials();
-  LoadPistolModel();
-  BuildWeaponMaterialSlots();
+      viewmodels_(MakeViewmodels(weapons_)),
+      rifle_pose_(prefab_cache_, weapons_.rifle),
+      pistol_animator_(&weapons_.pistol_hierarchy, &weapons_.pistol_fire_clip,
+                       weapons_.pistol_tuning),
+      pistol_world_(weapons_.pistol_hierarchy.nodes.size(), glm::mat4(1.0f)),
+      process_start_(process_start) {
+  const asset::MeshData cube = asset::MakeCube();
+  effect_cube_ = {.id = renderer_.UploadMesh(cube), .bounds = cube.bounds};
+  tracer_material_ = renderer_.CreateMaterial(TracerMaterial());
+  impact_material_ = renderer_.CreateMaterial(ImpactMaterial());
   settings_ = input::LoadInputSettings(settings_path_);
   input_.set_bindings(settings_.bindings);
   help_text_ = BuildHelpText(settings_.bindings);
   SDL_SetWindowTitle(window_.handle(), WindowTitle(scene_path_).c_str());
-  InitializeScene(options);
-  LoadEnvironment(/*force=*/false);
-  camera_.SetFromSceneCamera(scene_.camera);
-  RebuildPhysics();
-  FindTargets();
-  PlacePlayerAtSceneCamera();
+  RecordPrefabWriteTimes();
+  if (!LoadScene()) {
+    core::log::Fatal("{}", status_);
+  }
+  PlaceDebugCameraAtStart();
+  PlacePlayerAtStart();
   ApplyWeaponToPlayer();
-}
-
-void App::CreateEffectMaterials() {
-  tracer_material_ = renderer_.CreateMaterial(TracerMaterial());
-  impact_material_ = renderer_.CreateMaterial(ImpactMaterial());
-  target_material_ = renderer_.CreateMaterial(TargetMaterial());
-}
-
-void App::LoadPistolModel() {
-  pistol_model_ = model_cache_.Get(SamplePath(kPistolModel));
-  if (pistol_model_ == nullptr) {
-    return;  // The cache logged why.
-  }
-  pistol_fire_clip_ = animation::MergeClips(pistol_model_->clips,
-                                            std::string(kPistolFireClipName));
-  pistol_animator_.emplace(&pistol_model_->hierarchy, &pistol_fire_clip_);
-  pistol_world_.assign(pistol_model_->hierarchy.nodes.size(), glm::mat4(1.0f));
-  for (const render::UploadedPart& part : pistol_model_->parts) {
-    const std::string_view node_name =
-        pistol_model_->hierarchy.nodes[static_cast<size_t>(part.node)].name;
-    if (std::ranges::find(kPistolHiddenNodes, node_name) ==
-        std::ranges::end(kPistolHiddenNodes)) {
-      pistol_parts_.push_back(part);
-    }
-  }
-  if (pistol_fire_clip_.channels.empty()) {
-    core::log::Warn("Pistol model has no animation: it will not cycle");
-  }
 }
 
 void App::ResetLoadout() {
@@ -481,16 +497,14 @@ void App::ResetLoadout() {
   for (weapon::Viewmodel& viewmodel : viewmodels_) {
     viewmodel.Reset();
   }
-  if (pistol_animator_) {
-    pistol_animator_->Reset();
-  }
+  pistol_animator_.Reset();
   ApplyWeaponToPlayer();
 }
 
 void App::OnWeaponChanged() {
   active_viewmodel().Reset();
-  if (loadout_.active() == weapon::WeaponSlot::kPistol && pistol_animator_) {
-    pistol_animator_->Reset();
+  if (loadout_.active() == weapon::WeaponSlot::kPistol) {
+    pistol_animator_.Reset();
   }
   ApplyWeaponToPlayer();
 }
@@ -503,15 +517,15 @@ void App::ApplyWeaponToPlayer() {
   player_.set_tuning(tuning);
 }
 
-void App::PlacePlayerAtSceneCamera() {
-  const scene::SceneCamera& camera = scene_.camera;
-  const camera::LookAngles look =
-      camera::LookTowards(camera.position, camera.target);
+void App::PlacePlayerAtStart() {
+  const scene::PlayerStart& start = scene_.player_start;
+  const camera::LookAngles look{.yaw = start.yaw_radians,
+                                .pitch = start.pitch_radians};
   const std::optional<physics::RayHit> floor = physics_world_.CastRay(
-      camera.position, glm::vec3(0.0f, -1.0f, 0.0f), kSpawnProbeDistance);
+      start.position, glm::vec3(0.0f, -1.0f, 0.0f), kSpawnProbeDistance);
   const glm::vec3 feet =
       floor ? floor->point
-            : camera.position -
+            : start.position -
                   glm::vec3(0.0f, player_.tuning().eye_height_standing, 0.0f);
 
   if (player_.spawned()) {
@@ -529,18 +543,15 @@ void App::PlacePlayerAtSceneCamera() {
   }
 }
 
+void App::PlaceDebugCameraAtStart() {
+  const scene::PlayerStart& start = scene_.player_start;
+  camera_.SetPose(start.position,
+                  {.yaw = start.yaw_radians, .pitch = start.pitch_radians});
+}
+
 void App::RebuildPhysics() {
-  const physics::RebuildSummary summary = scene_physics_.Rebuild(
-      scene_,
-      [this](std::string_view mesh_path) -> std::optional<physics::MeshView> {
-        const std::optional<render::CachedMesh> mesh =
-            mesh_cache_.Get(mesh_path);
-        if (!mesh) {
-          return std::nullopt;
-        }
-        return physics::MeshView{.bounds = mesh->bounds,
-                                 .mesh = mesh->cpu_mesh};
-      });
+  const world::PhysicsBuildSummary summary =
+      world_physics_.Build(scene_, world_);
   core::log::Info("Physics: {} bodies created, {} failed", summary.created,
                   summary.failed);
   player_.OnWorldRebuilt();
@@ -551,17 +562,18 @@ void App::PushObject() {
   const glm::vec3 forward = eye.forward;
   const std::optional<physics::RayHit> hit =
       physics_world_.CastRay(eye.position, forward, kPushReach);
-  const std::optional<size_t> entity =
+  const std::optional<scene::InstanceId> instance =
       hit && physics_world_.IsDynamic(hit->body)
-          ? scene_physics_.EntityFor(hit->body)
+          ? world_physics_.InstanceFor(hit->body)
           : std::nullopt;
-  if (!entity) {
+  if (!instance) {
     status_ = "Push: nothing in reach";
     return;
   }
   physics_world_.AddImpulseAtPoint(hit->body, forward * kPushImpulse,
                                    hit->point);
-  status_ = "Pushed " + scene_.entities[*entity].name;
+  const scene::Instance* pushed = scene::FindInstance(scene_, *instance);
+  status_ = "Pushed " + (pushed != nullptr ? pushed->name : std::string("?"));
 }
 
 void App::UpdateWeapon(const input::InputFrame& input, float step) {
@@ -606,8 +618,8 @@ void App::UpdateWeapon(const input::InputFrame& input, float step) {
   player_.AddLookKick(kick.x, kick.y);
 
   // The holstered pistol keeps its last pose; it is reset when drawn.
-  if (loadout_.active() == weapon::WeaponSlot::kPistol && pistol_animator_) {
-    pistol_animator_->Update(events.shots, firearm.bolt_locked_back(), step);
+  if (loadout_.active() == weapon::WeaponSlot::kPistol) {
+    pistol_animator_.Update(events.shots, firearm.bolt_locked_back(), step);
   }
 }
 
@@ -649,10 +661,10 @@ void App::FireBullet(float age) {
 
 void App::RecordHit(const weapon::Impact& impact) {
   ++impacts_total_;
-  if (const std::optional<size_t> entity =
-          scene_physics_.EntityFor(impact.body)) {
+  if (const std::optional<scene::InstanceId> instance =
+          world_physics_.InstanceFor(impact.body)) {
     for (size_t i = 0; i < targets_.size(); ++i) {
-      if (targets_[i].entity == *entity) {
+      if (targets_[i].instance == *instance) {
         // The range is the shooter's actual distance, wherever they fired
         // from.
         weapon::Target target = targets_[i].target;
@@ -687,159 +699,137 @@ void App::ClearBullets() {
 void App::FindTargets() {
   targets_.clear();
   target_names_.clear();
-  const glm::vec3 firing_position = scene_.camera.position;
-  for (size_t i = 0; i < scene_.entities.size(); ++i) {
-    const scene::Entity& entity = scene_.entities[i];
-    if (!entity.name.starts_with(kTargetNamePrefix)) {
+  const glm::vec3 firing_position = scene_.player_start.position;
+  for (const world::Placement& placement : world_.placements()) {
+    if (placement.parent != -1) {
+      continue;  // Nested prefabs are part of their instance's plate.
+    }
+    const scene::Instance* instance =
+        scene::FindInstance(scene_, placement.owner);
+    if (instance == nullptr || !instance->name.starts_with(kTargetNamePrefix)) {
       continue;
     }
     if (targets_.size() >= static_cast<size_t>(kMaxTargets)) {
       core::log::Warn("More than {} targets; '{}' is not logged", kMaxTargets,
-                      entity.name);
+                      instance->name);
       continue;
     }
-    // A plate is the builtin unit cube scaled thin along its local z; its
-    // face normal is whichever of +-z faces the firing position.
-    const scene::Transform& transform = entity.transform;
-    glm::vec3 normal = transform.rotation * glm::vec3(0.0f, 0.0f, 1.0f);
-    if (glm::dot(normal, firing_position - transform.position) < 0.0f) {
-      normal = -normal;
+    const std::optional<weapon::Target> target =
+        PlateTarget(prefab_cache_.prefab(placement.prefab).bounds,
+                    placement.world, firing_position);
+    if (!target) {
+      core::log::Warn("Target '{}' has no usable bounds", instance->name);
+      continue;
     }
-    targets_.push_back({
-        .entity = i,
-        .target = {.center = transform.position,
-                   .normal = normal,
-                   .up = transform.rotation * glm::vec3(0.0f, 1.0f, 0.0f),
-                   .half_extents = 0.5f * glm::vec2(transform.scale),
-                   .range_m =
-                       glm::length(transform.position - firing_position)},
-    });
-    target_names_.push_back(entity.name);
+    targets_.push_back({.instance = instance->id, .target = *target});
+    target_names_.push_back(instance->name);
   }
 }
 
-void App::InitializeScene(const CliOptions& options) {
-  if (options.scene_path && platform::PathExists(scene_path_)) {
-    auto loaded = scene::LoadScene(scene_path_);
-    if (loaded.ok()) {
-      scene_ = std::move(loaded).value();
-      status_ = "Loaded " + scene_path_;
-      return;
-    }
-    core::log::Error("Failed to load '{}': {}", scene_path_,
+bool App::LoadScene() {
+  const auto start = std::chrono::steady_clock::now();
+  core::Result<scene::SceneData, scene::MscnError> loaded =
+      scene::LoadMscn(scene_path_);
+  if (!loaded.ok()) {
+    core::log::Error("Cannot load {}: {}", scene_path_,
                      scene::ToString(loaded.error()));
-    status_ = std::string("Load failed: ") + scene::ToString(loaded.error());
+    status_ = std::format("Cannot load {}: {}", scene_name_,
+                          scene::ToString(loaded.error()));
+    return false;
   }
+  scene_ = std::move(loaded).value();
+  post_settings_.exposure_ev = scene_.environment.exposure_ev;
+  RebuildWorld();
+  RecordPrefabWriteTimes();  // Prefabs the scene loaded for the first time.
+  core::log::Info("{}", TimedStatus("Loaded", scene_path_, start));
+  status_ = TimedStatus("Loaded", scene_name_, start);
+  return true;
+}
 
-  scene_.camera.position = kFiringPosition;
-  scene_.camera.target = kFiringPosition + kDownRange;
+void App::RebuildWorld() {
+  for (const world::WorldIssue& issue : world_.Build(scene_)) {
+    core::log::Warn("{}: instance {}: {}", scene_path_, issue.instance,
+                    issue.message);
+  }
+  LoadEnvironment(/*force=*/false);
+  RebuildPhysics();
+  FindTargets();
+}
 
-  // One plane rather than several: overlapping coplanar planes would flicker.
-  // Its static box is 0.1 m thick (see physics::internal::BuildBox), 48 x 724
-  // m: fine for Jolt, and float spacing at 700 m is under 0.1 mm.
-  scene::Transform ground;
-  ground.position.z = 0.5f * (kGroundBackZ + kGroundFrontZ);
-  ground.scale = glm::vec3(kGroundWidth / kBuiltinPlaneSize, 1.0f,
-                           (kGroundBackZ - kGroundFrontZ) / kBuiltinPlaneSize);
-  scene_.entities.push_back({
-      .name = "ground",
-      .mesh_path = "builtin:plane",
-      .transform = ground,
-      .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
-                               .shape = scene::ShapeType::kBox},
-      .material_path = SamplePath(kGroundMaterial),
-  });
-
-  // Static and collided against triangle by triangle, so the player can walk
-  // around it and through its openings.
-  scene::Transform house;
-  house.position = kHousePosition;
-  scene_.entities.push_back({
-      .name = "house",
-      .mesh_path = SamplePath(kHouseModel),
-      .transform = house,
-      .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
-                               .shape = scene::ShapeType::kTriangleMesh},
-  });
-
-  AddRangeTargets();
-  AddPreviewSpheres();
-  ApplyDefaultLighting();
-
-  if (options.imports.empty()) {
-    // Unit cube centred at the origin, dropped from 3 m at a tilt.
-    scene::Transform cube;
-    cube.position.y = 3.0f;
-    cube.rotation = glm::angleAxis(glm::radians(30.0f),
-                                   glm::normalize(glm::vec3(1.0f, 0.0f, 1.0f)));
-    scene_.entities.push_back({
-        .name = "cube",
-        .mesh_path = "builtin:cube",
-        .transform = cube,
-        .body = scene::RigidBody{.motion = scene::MotionType::kDynamic,
-                                 .shape = scene::ShapeType::kBox},
-    });
-  } else {
-    AddImports(options.imports);
+void App::RecordPrefabWriteTimes() {
+  for (size_t i = prefab_write_times_.size(); i < prefab_cache_.size(); ++i) {
+    prefab_write_times_.push_back(platform::LastWriteTime(
+        prefab_cache_.key(static_cast<world::PrefabId>(i))));
   }
 }
 
-void App::AddRangeTargets() {
-  const glm::vec3 right =
-      glm::normalize(glm::cross(kDownRange, camera::kWorldUp));
-  for (const RangeTarget& target : kRangeTargets) {
-    scene::Transform transform;
-    transform.position =
-        kFiringPosition + kDownRange * target.range + right * target.offset;
-    transform.position.y = kTargetHeight;
-    // The cube's faces are axis aligned, so with kDownRange along -Z the
-    // thin axis already faces the firing line.
-    transform.scale = glm::vec3(target.size, kTargetThickness);
-    scene_.entities.push_back({
-        .name = std::format("{}{:.0f} m", kTargetNamePrefix, target.range),
-        .mesh_path = "builtin:cube",
-        .transform = transform,
-        .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
-                                 .shape = scene::ShapeType::kBox},
-        .material_path = SamplePath(kTargetMaterial),
-    });
-  }
-}
-
-void App::AddPreviewSpheres() {
-  for (size_t row = 0; row < std::size(kPreviewKinds); ++row) {
-    for (size_t i = 0; i < std::size(kPreviewRoughnessTags); ++i) {
-      const std::string_view kind = kPreviewKinds[row];
-      const std::string_view tag = kPreviewRoughnessTags[i];
-      scene::Transform transform;
-      transform.position =
-          kPreviewFirstSphere +
-          glm::vec3(kPreviewSpacing * static_cast<float>(i), 0.0f,
-                    -kPreviewRowSpacing * static_cast<float>(row));
-      scene_.entities.push_back({
-          .name = std::format("preview {} r{}", kind, tag),
-          .mesh_path = "builtin:sphere",
-          .transform = transform,
-          .body = scene::RigidBody{.motion = scene::MotionType::kStatic,
-                                   .shape = scene::ShapeType::kSphere},
-          .material_path = SamplePath(
-              std::format("{}{}_r{}.bmat", kPreviewMaterialDir, kind, tag)),
-      });
+int App::ReloadChangedPrefabs() {
+  int replaced = 0;
+  bool weapons_changed = false;
+  for (size_t i = 0; i < prefab_write_times_.size(); ++i) {
+    const auto id = static_cast<world::PrefabId>(i);
+    const std::string path = prefab_cache_.key(id);
+    const std::optional<int64_t> write_time = platform::LastWriteTime(path);
+    if (!write_time || write_time == prefab_write_times_[i]) {
+      continue;
     }
+    core::Result<prefab::Prefab, prefab::PrefabError> loaded =
+        prefab::LoadPrefab(path);
+    if (!loaded.ok()) {
+      // Possibly still being written: the next F9 tries again.
+      core::log::Error("Cannot reload {}: {}", path,
+                       prefab::ToString(loaded.error()));
+      continue;
+    }
+    prefab_cache_.Replace(id, std::move(loaded).value());
+    prefab_write_times_[i] = write_time;
+    weapons_changed =
+        weapons_changed || id == weapons_.rifle || id == weapons_.pistol;
+    core::log::Info("Reloaded {}", path);
+    ++replaced;
   }
+  if (weapons_changed) {
+    RereadWeapons();
+  }
+  return replaced;
 }
 
-void App::ApplyDefaultLighting() {
-  scene_.environment = {
-      .hdri_path = SamplePath(kDefaultHdri),
-      .intensity = scene::kDefaultEnvironmentIntensity,
-      .rotation_radians = scene::kDefaultEnvironmentRotation,
-      .exposure_ev = scene::kDefaultExposureEv,
-  };
-  scene_.sun.direction = scene::kDefaultSunDirection;
-  scene_.sun.color = scene::kDefaultSunColor;
-  scene_.sun.intensity = scene::kDefaultSunIntensity;
-  scene_.light.intensity = scene::kDefaultPointLightIntensity;
+void App::RereadWeapons() {
+  core::Result<WeaponAssets, std::string> assets =
+      ReadWeaponAssets(prefab_cache_, weapons_.rifle, weapons_.pistol);
+  if (!assets.ok()) {
+    core::log::Error("Keeping the previous weapon calibration: {}",
+                     assets.error());
+    return;
+  }
+  weapons_ = std::move(assets).value();
+  viewmodels_ = MakeViewmodels(weapons_);
+  rifle_pose_ = world::PrefabPose(prefab_cache_, weapons_.rifle);
+  pistol_animator_ = weapon::WeaponAnimator(&weapons_.pistol_hierarchy,
+                                            &weapons_.pistol_fire_clip,
+                                            weapons_.pistol_tuning);
+  pistol_world_.assign(weapons_.pistol_hierarchy.nodes.size(), glm::mat4(1.0f));
+}
+
+void App::ReloadScene() {
+  // Replaced prefabs invalidate the world's draws and bodies: the world is
+  // rebuilt below either way.
+  const int replaced = ReloadChangedPrefabs();
+  if (!LoadScene()) {
+    if (replaced > 0) {
+      RebuildWorld();  // The previous scene, on the new prefabs.
+    }
+    return;
+  }
+  ClearBullets();  // Their impacts would name bodies that are gone.
+  // A reload is a fresh start: both weapons full, the rifle in hand.
+  ResetLoadout();
+  PlaceDebugCameraAtStart();
+  PlacePlayerAtStart();
+  if (replaced > 0) {
+    status_ += std::format(", {} prefab{} reloaded", replaced,
+                           replaced == 1 ? "" : "s");
+  }
 }
 
 void App::LoadEnvironment(bool force) {
@@ -865,7 +855,6 @@ void App::LoadEnvironment(bool force) {
     image =
         lighting::MakeDefaultEnvironment(kDefaultSkyWidth, kDefaultSkyHeight);
   }
-  environment_sun_ = lighting::EstimateSun(*image);
   renderer_.SetEnvironment(*image, environment.intensity,
                            environment.rotation_radians);
   environment_source_ = environment.hdri_path;
@@ -874,205 +863,6 @@ void App::LoadEnvironment(bool force) {
                                         ? std::string("(default sky)")
                                         : environment.hdri_path,
                                     start));
-}
-
-std::optional<render::MaterialId> App::EntityMaterial(
-    const scene::Entity& entity) {
-  if (!entity.material_path.empty()) {
-    if (const std::optional<render::MaterialId> material =
-            material_cache_.Get(entity.material_path)) {
-      return material;
-    }
-  }
-  // Scenes saved before material files: plates are found by name, like
-  // FindTargets().
-  if (entity.name.starts_with(kTargetNamePrefix)) {
-    return target_material_;
-  }
-  return std::nullopt;
-}
-
-void App::BuildWeaponMaterialSlots() {
-  const auto add_model = [this](std::string_view weapon,
-                                const std::string& model_path,
-                                std::span<const render::MaterialId> ids) {
-    for (const render::MaterialId id : ids) {
-      const std::string& name = renderer_.material(id).name;
-      weapon_slots_.push_back(
-          {.label = std::format("{}: {}", weapon, name),
-           .id = id,
-           .save_path = material::SidecarMaterialPath(model_path, name)});
-    }
-  };
-  if (const std::optional<render::CachedMesh> rifle =
-          mesh_cache_.Get(rifle_mesh_path_)) {
-    add_model("M16", rifle_mesh_path_, rifle->materials);
-  }
-  if (pistol_model_ != nullptr) {
-    add_model("Glock", SamplePath(kPistolModel), pistol_model_->materials);
-  }
-  for (const render::MaterialId id :
-       {tracer_material_, impact_material_, target_material_}) {
-    const std::string& name = renderer_.material(id).name;
-    weapon_slots_.push_back(
-        {.label = std::format("Effect: {}", name),
-         .id = id,
-         .save_path = SamplePath(std::format(
-             "materials/{}.bmat", material::SanitizeMaterialName(name)))});
-  }
-}
-
-void App::UpdateEntityMaterialSlots() {
-  entity_slots_.clear();
-  const std::optional<size_t> selected = editor_.selected_entity();
-  if (!selected || *selected >= scene_.entities.size()) {
-    return;
-  }
-  const scene::Entity& entity = scene_.entities[*selected];
-  if (const std::optional<render::MaterialId> material =
-          EntityMaterial(entity)) {
-    const std::string& name = renderer_.material(*material).name;
-    entity_slots_.push_back(
-        {.label = std::format("{} (whole entity)", name),
-         .id = *material,
-         .save_path = !entity.material_path.empty()
-                          ? entity.material_path
-                          : SamplePath(std::format(
-                                "materials/{}.bmat",
-                                material::SanitizeMaterialName(name)))});
-    return;
-  }
-  const std::optional<render::CachedMesh> mesh =
-      mesh_cache_.Get(entity.mesh_path);
-  if (!mesh) {
-    return;
-  }
-  // The mesh's own materials, shared by every entity drawing that mesh.
-  const bool builtin = entity.mesh_path.starts_with(scene::kBuiltinMeshPrefix);
-  for (const render::MaterialId id : mesh->materials) {
-    const std::string& name = renderer_.material(id).name;
-    entity_slots_.push_back(
-        {.label = std::format("{} (model)", name),
-         .id = id,
-         .save_path =
-             builtin
-                 ? SamplePath(std::format("materials/{}.bmat",
-                                          material::SanitizeMaterialName(name)))
-                 : material::SidecarMaterialPath(entity.mesh_path, name)});
-  }
-}
-
-void App::PickEntity() {
-  const ViewPose eye = CurrentView();
-  const std::optional<physics::RayHit> hit =
-      physics_world_.CastRay(eye.position, eye.forward, kPickReach);
-  const std::optional<size_t> entity =
-      hit ? scene_physics_.EntityFor(hit->body) : std::nullopt;
-  if (!entity) {
-    status_ = "Pick: no entity in the middle of the view";
-    return;
-  }
-  editor_.Select(*entity);
-  status_ = "Picked " + scene_.entities[*entity].name;
-}
-
-void App::UpdateEditor() {
-  if (!overlay_.visible() || mouse_captured_) {
-    return;
-  }
-  UpdateEntityMaterialSlots();
-  const ui::EditorActions actions = editor_.Draw({
-      .scene = scene_,
-      .renderer = renderer_,
-      .material_files = material_cache_,
-      .post = post_settings_,
-      .entity_slots = entity_slots_,
-      .weapon_slots = weapon_slots_,
-      .environment_has_sun = environment_sun_.found,
-  });
-  if (actions.pick_entity) {
-    PickEntity();
-  }
-  if (actions.load_environment) {
-    LoadEnvironment(/*force=*/true);
-  } else if (actions.environment_params_changed) {
-    renderer_.SetEnvironmentParams(scene_.environment.intensity,
-                                   scene_.environment.rotation_radians);
-  }
-  const glm::quat rotation = glm::angleAxis(scene_.environment.rotation_radians,
-                                            glm::vec3(0.0f, 1.0f, 0.0f));
-  if (actions.align_sun && environment_sun_.found) {
-    // The environment's sun as the rotated sky shows it.
-    scene_.sun.direction = rotation * environment_sun_.direction;
-    scene_.sun.color = environment_sun_.color;
-  }
-  if (actions.sun_intensity_from_environment && environment_sun_.found) {
-    scene_.sun.intensity =
-        environment_sun_.intensity * scene_.environment.intensity;
-  }
-}
-
-void App::AddImports(const std::vector<std::string>& imports) {
-  const float centered_offset =
-      (static_cast<float>(imports.size()) - 1.0f) * 0.5f;
-  for (size_t i = 0; i < imports.size(); ++i) {
-    const std::string& mesh_path = imports[i];
-    const std::optional<render::CachedMesh> mesh = mesh_cache_.Get(mesh_path);
-    if (!mesh) {
-      continue;  // The cache already logged why.
-    }
-    const glm::vec3 ground{
-        (static_cast<float>(i) - centered_offset) * kImportSpacing, 0.0f, 0.0f};
-    scene::Transform transform = scene::FitOnGround(
-        mesh->bounds.min, mesh->bounds.max, kImportTargetSize, ground);
-    transform.position.y += kImportDropHeight;
-    scene_.entities.push_back({
-        .name = core::FileStem(imports[i]),
-        .mesh_path = mesh_path,
-        .transform = transform,
-        .body = scene::RigidBody{.motion = scene::MotionType::kDynamic,
-                                 .shape = scene::ShapeType::kConvexHull,
-                                 .mass = kImportMass},
-    });
-  }
-}
-
-void App::SaveCurrentScene() {
-  // The scene holds the current (interpolated) poses. Velocities are not part
-  // of the file, so loaded bodies start at rest.
-  scene_.camera = view_mode_ == ViewMode::kPlayer
-                      ? player_.view().ToSceneCamera(settings_.fov_degrees)
-                      : camera_.ToSceneCamera();
-  const auto start = std::chrono::steady_clock::now();
-  const auto result = scene::SaveScene(scene_, scene_path_);
-  if (result.ok()) {
-    status_ = TimedStatus("Saved", scene_path_, start);
-    core::log::Info("{}", status_);
-  } else {
-    status_ = std::string("Save failed: ") + scene::ToString(result.error());
-    core::log::Error("{}", status_);
-  }
-}
-
-void App::ReloadCurrentScene() {
-  const auto start = std::chrono::steady_clock::now();
-  auto loaded = scene::LoadScene(scene_path_);
-  if (loaded.ok()) {
-    scene_ = std::move(loaded).value();
-    LoadEnvironment(/*force=*/false);
-    camera_.SetFromSceneCamera(scene_.camera);
-    RebuildPhysics();
-    ClearBullets();  // Their impacts would name bodies that are gone.
-    // A reload is a fresh start: both weapons full, the rifle in hand.
-    ResetLoadout();
-    FindTargets();
-    PlacePlayerAtSceneCamera();
-    status_ = TimedStatus("Loaded", scene_path_, start);
-    core::log::Info("{}", status_);
-  } else {
-    status_ = std::string("Load failed: ") + scene::ToString(loaded.error());
-    core::log::Error("{}", status_);
-  }
 }
 
 int App::Run() {
@@ -1125,10 +915,11 @@ int App::Run() {
     }
 
     // The world clamps long frames itself. Poses must be synced before the
-    // draw items and the overlay read the scene; the player's eye follows its
-    // interpolated character.
+    // draw items and the overlay read the world; the player's eye follows
+    // its interpolated character.
     physics_world_.Update(frame_seconds);
-    scene_physics_.SyncToScene(scene_);
+    world_physics_.SyncToWorld(world_);
+    world_.Update(step);
     player_.UpdateView(settings_, step);
 
     // The rifle follows the final eye of this frame. Bullets spawned now fly
@@ -1167,24 +958,23 @@ int App::Run() {
                     .cascade_debug = cascade_debug_},
         .weapon = MakeWeaponOverlayInfo(),
         .hit_log = MakeHitLogOverlayInfo(),
-        // The player aims with the rifle's sights only; the dot is a tool of
-        // the fly camera, which pushes objects with it.
+        // The player aims with the weapons' sights only; the dot is a tool
+        // of the fly camera, which pushes objects with it.
         .show_crosshair = view_mode_ == ViewMode::kFly,
-        .entity_count = scene_.entities.size(),
+        .entity_count = scene_.instances.size(),
         .draw_calls = stats.draw_calls,
         .culled_draws = stats.culled_draws,
         .shadow_draw_calls = stats.shadow_draw_calls,
         .shadow_culled_draws = stats.shadow_culled_draws,
         .triangles = stats.triangles,
-        .scene_path = scene_path_,
+        .scene_name = scene_name_,
         .status = status_,
         .shader_error = renderer_.last_shader_error(),
         .help = help_text_,
     };
     const ui::BuildResult ui =
         overlay_.Build(frame_seconds * 1000.0f, renderer_.gpu_frame_ms(),
-                       scene_info, settings_);
-    UpdateEditor();
+                       scene_info, settings_, post_settings_);
     ImDrawData* const ui_draw_data = overlay_.Render();
     if (ui.settings_changed) {
       SaveSettings();
@@ -1195,6 +985,11 @@ int App::Run() {
       shots_fired_ = 0;
     }
     renderer_.DrawFrame(BuildSceneView(), ui_draw_data);
+    if (!first_frame_logged_) {
+      first_frame_logged_ = true;
+      core::log::Info("Startup: {:.0f} ms from process start to first frame",
+                      MillisecondsSince(process_start_));
+    }
   }
   return 0;
 }
@@ -1247,10 +1042,10 @@ void App::HandleAction(input::Action action) {
       overlay_.ToggleVisible();
       break;
     case Action::kSaveScene:
-      SaveCurrentScene();
+      status_ = "Scenes are edited and saved in blue-editor";
       break;
     case Action::kLoadScene:
-      ReloadCurrentScene();
+      ReloadScene();
       break;
     case Action::kToggleVsync:
       renderer_.SetVsync(!renderer_.vsync());
@@ -1404,19 +1199,11 @@ void App::AppendWeaponDraws() {
   if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
     if (loadout_.active() == weapon::WeaponSlot::kPistol) {
       AppendPistolDraws();
-    } else if (const std::optional<render::CachedMesh> rifle =
-                   mesh_cache_.Get(rifle_mesh_path_)) {
-      draws_.push_back({.mesh = rifle->id,
-                        .transform = active_viewmodel().model_matrix(),
-                        .bounds = rifle->bounds,
-                        .submeshes = rifle->submeshes});
+    } else {
+      rifle_pose_.AppendDraws(active_viewmodel().model_matrix(), draws_);
     }
   }
 
-  const std::optional<render::CachedMesh> cube = mesh_cache_.Get(kBulletMesh);
-  if (!cube) {
-    return;
-  }
   for (const weapon::Projectile& bullet : projectiles_.projectiles()) {
     const float speed = glm::length(bullet.velocity);
     const float length = std::min(speed * kTracerSeconds, bullet.distance);
@@ -1425,33 +1212,38 @@ void App::AppendWeaponDraws() {
     }
     const glm::vec3 direction = bullet.velocity / speed;
     draws_.push_back(
-        {.mesh = cube->id,
+        {.mesh = effect_cube_.id,
          .transform =
              BoxAlong(bullet.position - direction * (length * 0.5f), direction,
                       {kTracerThickness, kTracerThickness, length}),
-         .bounds = cube->bounds,
+         .bounds = effect_cube_.bounds,
          .material_override = tracer_material_});
   }
   for (size_t i = 0; i < impact_mark_count_; ++i) {
-    draws_.push_back({.mesh = cube->id,
+    draws_.push_back({.mesh = effect_cube_.id,
                       .transform = impact_marks_[i],
-                      .bounds = cube->bounds,
+                      .bounds = effect_cube_.bounds,
                       .material_override = impact_material_});
   }
 }
 
 void App::AppendPistolDraws() {
-  if (pistol_model_ == nullptr || !pistol_animator_) {
-    return;
-  }
-  pistol_animator_->ComputeWorld(active_viewmodel().model_matrix(),
-                                 pistol_world_);
-  for (const render::UploadedPart& part : pistol_parts_) {
+  // The animator poses the pistol's own hierarchy (a copy of the prefab's,
+  // so the cached prefab's meshes and their nodes match it).
+  const glm::mat4 root = active_viewmodel().model_matrix();
+  pistol_animator_.ComputeWorld(root, pistol_world_);
+  const prefab::Prefab& pistol = prefab_cache_.prefab(weapons_.pistol);
+  const world::PrefabGpu& gpu = prefab_cache_.gpu(weapons_.pistol);
+  for (size_t i = 0; i < pistol.meshes.size(); ++i) {
+    const prefab::Mesh& mesh = pistol.meshes[i];
     draws_.push_back(
-        {.mesh = part.mesh,
-         .transform = pistol_world_[static_cast<size_t>(part.node)],
-         .bounds = part.bounds,
-         .submeshes = part.submeshes});
+        {.mesh = gpu.meshes[i],
+         .transform = mesh.node < 0 || static_cast<size_t>(mesh.node) >=
+                                           pistol_world_.size()
+                          ? root
+                          : pistol_world_[static_cast<size_t>(mesh.node)],
+         .bounds = mesh.bounds,
+         .submeshes = gpu.submeshes[i]});
   }
 }
 
@@ -1461,16 +1253,7 @@ render::SceneView App::BuildSceneView() {
                        static_cast<float>(std::max(extent.height, 1u));
 
   draws_.clear();
-  for (const scene::Entity& entity : scene_.entities) {
-    if (const std::optional<render::CachedMesh> mesh =
-            mesh_cache_.Get(entity.mesh_path)) {
-      draws_.push_back({.mesh = mesh->id,
-                        .transform = entity.transform.Matrix(),
-                        .bounds = mesh->bounds,
-                        .submeshes = mesh->submeshes,
-                        .material_override = EntityMaterial(entity)});
-    }
-  }
+  world_.AppendDraws(draws_);
   AppendWeaponDraws();
 
   const ViewPose eye = CurrentView();
@@ -1481,17 +1264,14 @@ render::SceneView App::BuildSceneView() {
   view.camera.near_plane = kNearPlane;
   view.camera.projection = camera::ReversedInfinitePerspective(
       view.camera.vertical_fov_radians, aspect, kNearPlane);
-  view.light = {.position = scene_.light.position,
-                .color = scene_.light.color,
-                .intensity = scene_.light.intensity};
-  view.ambient = scene_.ambient;
+  view.point_lights = world_.point_lights();
+  view.ambient = kAmbient;
   view.sun = scene_.sun;
   view.shadows_enabled = shadows_enabled_;
   view.cascade_debug = cascade_debug_;
   view.draws = draws_;
   view.sight = CurrentSight();
   view.post = post_settings_;
-  view.post.exposure_ev = scene_.environment.exposure_ev;
   return view;
 }
 

@@ -5,24 +5,16 @@
 
 #include <array>
 #include <cstddef>
-#include <functional>
+#include <cstdint>
+#include <optional>
 #include <span>
-#include <unordered_map>
+#include <string_view>
+#include <vector>
 
-#include "material/material.h"
 #include "render/image.h"
 #include "render/vulkan_context.h"
 
 namespace blue::render {
-
-// How a texture's texels are interpreted.
-enum class TextureKind {
-  kColor,  // sRGB-encoded colour (base colour, emissive): an _SRGB format.
-  kData,   // Linear data (normals, occlusion, metallic-roughness): _UNORM.
-  // Separate greyscale roughness and metallic maps packed into one glTF
-  // metallic-roughness texture (G roughness, B metallic): _UNORM.
-  kPackedMetallicRoughness,
-};
 
 // The 1 x 1 textures that stand in for an empty slot or a failed load.
 enum class DefaultTexture {
@@ -32,16 +24,65 @@ enum class DefaultTexture {
   kCount,
 };
 
+// Texel encoding of an already-encoded texture (TextureCache::Upload()).
+// Block-compressed formats store 4 x 4 blocks of 16 bytes; a mip smaller
+// than a block still takes one whole block.
+enum class TextureFormat : uint8_t {
+  kBc7Srgb,     // Colour (base colour, emissive).
+  kBc7Unorm,    // Linear data, e.g. packed occlusion/roughness/metallic.
+  kBc5Unorm,    // Two channels: tangent-space normal XY, Z reconstructed.
+  kRgba8Srgb,   // Uncompressed colour, for tiny or odd-sized textures.
+  kRgba8Unorm,  // Uncompressed linear data.
+};
+
+// Returns the Vulkan format of `format`.
+[[nodiscard]] VkFormat ToVkFormat(TextureFormat format);
+
+// Returns the byte size of one `width` x `height` mip in `format` (whole
+// 4 x 4 blocks for BC formats).
+[[nodiscard]] size_t MipByteSize(TextureFormat format, uint32_t width,
+                                 uint32_t height);
+
+// Handle of a texture uploaded with TextureCache::Upload(); stays valid for
+// the cache's lifetime.
+enum class TextureId : uint32_t {};
+
+// One already-encoded texture with its ready mip chain, for
+// TextureCache::Upload(). Everything is borrowed for the call.
+struct TextureUpload {
+  TextureFormat format = TextureFormat::kRgba8Unorm;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  // Level 0 first, each level half the size of the previous one (rounded
+  // down, at least 1), each exactly MipByteSize() bytes; 1 to
+  // MipLevelCount() levels.
+  std::span<const std::span<const std::byte>> mips;
+  std::string_view name;  // For logs.
+};
+
+// Uploaded textures for the slots of one material. An empty slot gets the
+// slot's default (white; flat normal for the normal map). For a cooked
+// packed ORM texture (R occlusion, G roughness, B metallic) put it in
+// metallic_roughness, leave occlusion empty and set
+// MaterialDesc::occlusion_in_metallic_roughness.
+struct MaterialTextures {
+  std::optional<TextureId> base_color;
+  std::optional<TextureId> metallic_roughness;
+  std::optional<TextureId> normal;
+  std::optional<TextureId> occlusion;
+  std::optional<TextureId> emissive;
+};
+
 struct TextureStats {
   size_t count = 0;        // Loaded textures, defaults excluded.
   VkDeviceSize bytes = 0;  // Their device memory, mips included.
 };
 
-// Decodes material textures (asset::LoadTextures) and uploads them as
-// sampled images with full mip chains, once per (source, kind). A texture
-// that fails to load is logged once and served as its default from then on.
-// Textures stay resident for the cache's lifetime. Borrows `context`, which
-// must outlive the cache. Neither copyable nor movable. Not thread-safe.
+// The renderer's textures: the 1 x 1 defaults and textures uploaded already
+// encoded (Upload()), each resident until taken out with TakeUploaded().
+// Nothing is decoded here: textures are cooked into .pbo files. Borrows
+// `context`, which must outlive the cache. Neither copyable nor movable.
+// Not thread-safe.
 class TextureCache {
  public:
   explicit TextureCache(const VulkanContext& context);
@@ -49,22 +90,33 @@ class TextureCache {
   TextureCache(const TextureCache&) = delete;
   TextureCache& operator=(const TextureCache&) = delete;
 
-  // Loads every texture `materials` reference that is not cached yet:
-  // decoding runs on worker threads (each model file is parsed once), the
-  // uploads on this thread. Logs the count and time. Optional: Get() loads
-  // on demand, but one batch is much faster for a model's materials.
-  void Preload(std::span<const material::MaterialDesc> materials);
-
-  // Returns the view of `ref` as `kind` (kColor or kData), loading it on
-  // first use, or the view of `fallback` when `ref` is empty or failed.
-  [[nodiscard]] VkImageView Get(const material::TextureRef& ref,
-                                TextureKind kind, DefaultTexture fallback);
-
-  // Returns the metallic-roughness view of `desc`: its packed texture when
-  // set, else its separate roughness / metallic maps packed into one (see
-  // asset::PackMetallicRoughness()), else white.
-  [[nodiscard]] VkImageView GetMetallicRoughness(
-      const material::MaterialDesc& desc);
+  // Uploads already-encoded textures with their mip chains as sampled
+  // images: one staging buffer and one submission for the whole batch, no
+  // decoding and no mip generation. Returns their ids in the order of
+  // `textures`. Blocks until the copies finished; logs the count, bytes and
+  // time. A malformed description (no mips, wrong mip size or count) is
+  // fatal: validate file data before.
+  [[nodiscard]] std::vector<TextureId> Upload(
+      std::span<const TextureUpload> textures);
+  // Returns the view of an uploaded texture, or the white default for an
+  // unknown or taken id.
+  [[nodiscard]] VkImageView view(TextureId id) const {
+    const auto index = static_cast<size_t>(id);
+    return index < uploaded_.size() &&
+                   uploaded_[index].handle() != VK_NULL_HANDLE
+               ? uploaded_[index].view()
+               : default_view(DefaultTexture::kWhite);
+  }
+  // Moves uploaded texture `id` out of the cache (for deferred destruction,
+  // see Renderer::ReleaseTextures()) and returns it; its slot stays empty
+  // and the id is never reused. Returns an empty Image for an unknown or
+  // already taken id.
+  [[nodiscard]] Image TakeUploaded(TextureId id);
+  // Returns the view of `id`, or of `fallback` when `id` is empty.
+  [[nodiscard]] VkImageView ViewOr(std::optional<TextureId> id,
+                                   DefaultTexture fallback) const {
+    return id ? view(*id) : default_view(fallback);
+  }
 
   [[nodiscard]] VkImageView default_view(DefaultTexture texture) const {
     return defaults_[static_cast<size_t>(texture)].view();
@@ -72,30 +124,10 @@ class TextureCache {
   [[nodiscard]] TextureStats stats() const { return stats_; }
 
  private:
-  // Identifies one uploaded texture: `primary` (and, for packed
-  // metallic-roughness, `secondary` = metallic; primary = roughness) in a
-  // kind.
-  struct Key {
-    material::TextureRef primary;
-    material::TextureRef secondary;
-    TextureKind kind = TextureKind::kColor;
-
-    friend bool operator==(const Key&, const Key&) = default;
-  };
-  struct KeyHash {
-    [[nodiscard]] size_t operator()(const Key& key) const;
-  };
-
-  // Decodes and uploads every key of `keys` that is not cached yet.
-  void Load(std::span<const Key> keys);
-  // Returns the view of the cached `key`, or `fallback` if it failed.
-  [[nodiscard]] VkImageView ViewOf(const Key& key,
-                                   DefaultTexture fallback) const;
-
   const VulkanContext& context_;
   std::array<Image, static_cast<size_t>(DefaultTexture::kCount)> defaults_;
-  // An empty Image marks a failed load.
-  std::unordered_map<Key, Image, KeyHash> textures_;
+  // Textures from Upload(), indexed by TextureId.
+  std::vector<Image> uploaded_;
   TextureStats stats_;
 };
 

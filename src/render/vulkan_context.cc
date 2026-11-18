@@ -89,10 +89,12 @@ bool SupportsRequiredFeatures(VkPhysicalDevice device) {
   vkGetPhysicalDeviceFeatures2(device, &features);
   // Depth clamp keeps shadow casters in front of a cascade's near plane.
   // Demote-to-helper (what discard compiles to for alpha-masked materials)
-  // is mandatory in Vulkan 1.3, but checked like the rest.
+  // is mandatory in Vulkan 1.3, but checked like the rest. BC compression
+  // is what cooked prefab textures (BC7, BC5) are stored in; every desktop
+  // GPU has it.
   return features13.dynamicRendering && features13.synchronization2 &&
          features13.shaderDemoteToHelperInvocation &&
-         features.features.depthClamp;
+         features.features.depthClamp && features.features.textureCompressionBC;
 }
 
 // Returns a family that can both render and present; true for every desktop
@@ -268,8 +270,8 @@ void VulkanContext::SelectPhysicalDevice() {
 
   if (!best) {
     core::log::Fatal(
-        "No GPU supports Vulkan 1.3 with dynamic rendering and "
-        "synchronization2");
+        "No GPU supports Vulkan 1.3 with dynamic rendering, synchronization2, "
+        "depth clamp and BC texture compression (textureCompressionBC)");
   }
   physical_device_ = best->device;
   properties_ = best->properties;
@@ -307,7 +309,8 @@ void VulkanContext::CreateDevice() {
       .pNext = &features13,
       .features = {.depthClamp = VK_TRUE,
                    .samplerAnisotropy =
-                       sampler_anisotropy_ ? VK_TRUE : VK_FALSE},
+                       sampler_anisotropy_ ? VK_TRUE : VK_FALSE,
+                   .textureCompressionBC = VK_TRUE},
   };
 
   const VkDeviceCreateInfo create_info{

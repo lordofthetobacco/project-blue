@@ -24,6 +24,7 @@ enum class GpuScope {
   kScene,         // The HDR scene pass: meshes, sky and the reflex sight.
   kBloom,         // Downsample / upsample chain; absent when off.
   kTonemap,       // Bloom mix, exposure and tonemapping into the LDR image.
+  kOverlay,       // Editor debug lines and selection outline on the LDR image.
   kPresent,       // LDR image to the swapchain, with FXAA when on.
   kUi,            // The ImGui overlay.
   kCount,         // Number of scopes; not a scope.

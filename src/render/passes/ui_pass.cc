@@ -6,14 +6,33 @@
 
 namespace blue::render {
 
-void RecordUiPass(const FrameContext& ctx, ImDrawData* ui) {
-  if (ui != nullptr) {
+void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
+                  UiBackground background) {
+  const bool clear = background == UiBackground::kClear;
+  if (clear) {
+    // Nothing to wait for but the acquire semaphore, which the submission
+    // waits for at the color attachment output stage.
+    ImageBarrier(
+        ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
+        {VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_NONE},
+        kColorAttachmentWrite, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+  } else if (ui != nullptr) {
+    // Rendering scopes do not order attachment accesses between them.
+    ImageBarrier(ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
+                 kColorAttachmentWrite, kColorAttachmentReadWrite,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+  }
+  if (ui != nullptr || clear) {
     const VkRenderingAttachmentInfo color_attachment{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView = ctx.swapchain_view,
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+        .loadOp =
+            clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}},
     };
     const VkRenderingInfo rendering_info{
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -22,13 +41,10 @@ void RecordUiPass(const FrameContext& ctx, ImDrawData* ui) {
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_attachment,
     };
-    // Rendering scopes do not order attachment accesses between them.
-    ImageBarrier(ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
-                 kColorAttachmentWrite, kColorAttachmentReadWrite,
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     vkCmdBeginRendering(ctx.cmd, &rendering_info);
-    ImGui_ImplVulkan_RenderDrawData(ui, ctx.cmd);
+    if (ui != nullptr) {
+      ImGui_ImplVulkan_RenderDrawData(ui, ctx.cmd);
+    }
     vkCmdEndRendering(ctx.cmd);
   }
   ImageBarrier(ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,

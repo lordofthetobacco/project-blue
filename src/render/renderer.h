@@ -19,17 +19,20 @@
 #include "lighting/cascades.h"
 #include "material/material.h"
 #include "platform/window.h"
+#include "render/buffer.h"
 #include "render/draw_list.h"
 #include "render/environment.h"
 #include "render/frame_config.h"
 #include "render/frame_globals.h"
 #include "render/gpu_timer.h"
+#include "render/image.h"
 #include "render/material_system.h"
 #include "render/mesh.h"
 #include "render/passes/bloom_pass.h"
 #include "render/passes/depth_prepass.h"
 #include "render/passes/frame_context.h"
 #include "render/passes/mesh_pass.h"
+#include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/reticle_pass.h"
 #include "render/passes/shadow_pass.h"
@@ -57,7 +60,10 @@
 //                        SkyboxPass, ReticlePass -> EndScenePass
 //   bloom                BloomPass         hdr -> bloom mip chain
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
-//   present              PresentPass       ldr -> swapchain (FXAA)
+//   overlay              OverlayPass       debug lines + selection outline
+//                                          -> ldr (editor; skipped if empty)
+//   present              PresentPass       ldr -> swapchain (FXAA), or ->
+//                                          the editor viewport image
 //   ui                   RecordUiPass      ImGui on the swapchain, -> present
 //
 // The visible submeshes are culled and sorted once per frame (DrawList) and
@@ -88,12 +94,51 @@
 
 namespace blue::render {
 
+// The editor viewport's offscreen image (Renderer::PrepareViewport()): the
+// tonemapped scene, R8G8B8A8 (_SRGB when the swapchain is), in
+// SHADER_READ_ONLY_OPTIMAL whenever the UI pass samples it.
+struct ViewportImage {
+  VkImageView view = VK_NULL_HANDLE;
+  VkExtent2D extent{};
+  // Changes whenever the image is recreated (0: none yet); UI code
+  // registers the view again when it changes.
+  uint64_t generation = 0;
+};
+
+// A copy of the editor viewport image read back to the CPU
+// (Renderer::RequestViewportReadback()).
+struct ViewportPixels {
+  uint32_t width = 0;
+  uint32_t height = 0;
+  // width * height * 4 bytes, R8G8B8A8, top row first; the colour values
+  // are sRGB-encoded (what the UI shows).
+  std::vector<std::byte> rgba;
+};
+
+// Where a viewport readback is (Renderer::TakeViewportReadback()).
+enum class ReadbackStatus {
+  kPending,  // Not rendered yet, or the GPU has not finished that frame.
+  kReady,    // The pixels were returned (only once per ticket).
+  kUnknown,  // No such ticket (never requested, or already taken).
+};
+
 // Draws scenes with a forward PBR pipeline into an HDR target, tonemaps and
 // presents them to a window. Owns meshes, materials and textures. Borrows
 // `window`, which must outlive the renderer. Startup failures are fatal.
 // Neither copyable nor movable. Not thread-safe.
+//
+// Two outputs: DrawFrame() presents the scene to the window (the game);
+// PrepareViewport() + DrawViewportFrame() render it into an offscreen image
+// that the UI shows in a panel, and the UI alone to the window (the editor).
+// Once PrepareViewport() was called the render targets follow the viewport
+// size instead of the window's.
 class Renderer {
  public:
+  // A viewport size change recreates the image and render targets at most
+  // once per this many frames; in between the last image is shown
+  // stretched, so dragging a panel edge does not stall every frame.
+  static constexpr uint64_t kViewportResizeFrames = 4;
+
   // Compiles the GLSL shaders in `shader_dir` with `shader_mode` and watches
   // them for changes (see ReloadChangedShaders()). A shader that does not
   // compile at startup is fatal.
@@ -107,20 +152,73 @@ class Renderer {
   // Renders and presents one frame. `ui` is drawn on top when non-null.
   void DrawFrame(const SceneView& view, ImDrawData* ui);
 
-  // Uploads `data` and returns its handle. Meshes stay resident for the whole
-  // session; unloading is out of scope.
+  // Editor output. Makes the scene render into an offscreen image of `size`
+  // pixels (each at least 1) and returns it. Call once per frame before
+  // building the UI that shows it (ui::ImGuiLayer::ViewportTexture()), with
+  // the size the viewport panel had last frame. On a size change the image
+  // and the render targets are recreated (waiting for the frames in flight,
+  // not for the whole device), at most every kViewportResizeFrames frames;
+  // the returned image keeps its old extent until then. Images of earlier
+  // generations are destroyed here: the UI must not use their views after
+  // the call.
+  [[nodiscard]] ViewportImage PrepareViewport(VkExtent2D size);
+  // Returns the image of the last PrepareViewport() (empty before).
+  [[nodiscard]] const ViewportImage& viewport() const { return viewport_; }
+  // Renders `view` into the viewport image, then `ui` (when non-null; it
+  // usually shows that image) over a cleared window, and presents. Requires
+  // a PrepareViewport() call before.
+  void DrawViewportFrame(const SceneView& view, ImDrawData* ui);
+  // Asks for a copy of the viewport image as the next DrawViewportFrame()
+  // renders it (scene and overlays, no UI) and returns a ticket (never 0).
+  // The copy is recorded into that frame and read once the GPU has finished
+  // it, a few frames later: poll TakeViewportReadback() once per frame. No
+  // device wait; the host-visible buffer lives only until the pixels are
+  // taken. A skipped frame (minimized window) delays the copy.
+  [[nodiscard]] uint64_t RequestViewportReadback();
+  // Moves the pixels of `ticket` into `pixels` when they are ready
+  // (kReady); otherwise leaves `pixels` alone.
+  [[nodiscard]] ReadbackStatus TakeViewportReadback(uint64_t ticket,
+                                                    ViewportPixels& pixels);
+
+  // Uploads `data` and returns its handle. Meshes stay resident until
+  // ReleaseMesh().
   [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data);
 
-  // Decodes and uploads the textures `materials` reference in one batch
-  // (parallel decode). Optional before CreateMaterial(), which would load
-  // them one by one.
-  void PreloadTextures(std::span<const material::MaterialDesc> materials) {
-    textures_.Preload(materials);
+  // Releasing GPU resources. Each call takes effect at once for new frames
+  // and destroys the GPU objects only once no frame in flight can use them.
+  // Ids are never reused: a released slot stays a tombstone, so a stale id
+  // cannot alias a newer resource. Unknown or already released ids are
+  // ignored. Rules for stale ids in a SceneView: a DrawItem whose mesh was
+  // released is skipped (not drawn, no error); a released material draws as
+  // kDefaultMaterial. Releasing a texture that a live material still
+  // samples is a caller error (release the materials first). Call between
+  // frames.
+  void ReleaseMesh(MeshId id);
+  void ReleaseTextures(std::span<const TextureId> ids);
+  void ReleaseMaterial(MaterialId id) { materials_.Release(id); }
+  // Returns the view of uploaded texture `id` (the white default when it is
+  // unknown or released), e.g. to show it in the UI.
+  [[nodiscard]] VkImageView texture_view(TextureId id) const {
+    return textures_.view(id);
   }
-  // Creates a material (textures load on first use) and returns its handle.
-  // Materials stay resident for the whole session.
+
+  // Creates an untextured material (every slot its default; TextureRefs
+  // in `desc` are ignored) and returns its handle.
   [[nodiscard]] MaterialId CreateMaterial(const material::MaterialDesc& desc) {
     return materials_.Create(desc);
+  }
+
+  // Uploads already-encoded textures with ready mip chains (cooked prefab
+  // textures: BC7 / BC5 / RGBA8) in one batch; see TextureCache::Upload().
+  [[nodiscard]] std::vector<TextureId> UploadTextures(
+      std::span<const TextureUpload> textures) {
+    return textures_.Upload(textures);
+  }
+  // Creates a material whose texture slots are the uploaded `textures`; the
+  // TextureRef paths of `desc` are ignored. Update(id, desc) keeps them.
+  [[nodiscard]] MaterialId CreateMaterial(const material::MaterialDesc& desc,
+                                          const MaterialTextures& textures) {
+    return materials_.Create(desc, textures);
   }
   // Replaces material `id` by `desc` from the next frame on (live editing);
   // frames in flight keep the old version. Call between frames.
@@ -142,6 +240,12 @@ class Renderer {
                       float rotation_radians) {
     context_.WaitIdle();
     environment_.Set(equirect, intensity, rotation_radians);
+  }
+  // Restores the built-in neutral default sky (intensity 1, no rotation).
+  // Waits for the GPU like SetEnvironment().
+  void ResetEnvironment() {
+    context_.WaitIdle();
+    environment_.Set({}, 1.0f, 0.0f);
   }
   // Changes the intensity and rotation of the current environment; cheap.
   void SetEnvironmentParams(float intensity, float rotation_radians) {
@@ -189,10 +293,26 @@ class Renderer {
     VkSemaphore image_acquired = VK_NULL_HANDLE;
   };
 
+  // Where a frame's tonemapped scene goes.
+  enum class Output {
+    kSwapchain,  // The window (DrawFrame()).
+    kViewport,   // viewport_image_, with the UI alone on the window.
+  };
+
   void CreateFrames();
+  // Destroys the retired meshes and images no frame in flight can use any
+  // more. Call after the current frame's fence was waited on.
+  void DestroyRetired();
   // Points the passes that read render targets at the current ones.
   void BindTargets();
   [[nodiscard]] bool RebuildSwapchain();
+  // Blocks until no frame in flight runs on the GPU any more (their fences),
+  // so that render targets and their descriptor sets can be replaced.
+  void WaitForFramesInFlight() const;
+  // Recreates the viewport image and the render targets at `size`.
+  void ResizeViewport(VkExtent2D size);
+  // The body of DrawFrame() and DrawViewportFrame().
+  void DrawFrameTo(const SceneView& view, ImDrawData* ui, Output output);
 
   // Acquires the next swapchain image for `frame`. Returns nullopt, marking
   // the swapchain dirty, when it is out of date and nothing can be drawn.
@@ -202,11 +322,16 @@ class Renderer {
   // Records every pass of the frame described by `ctx` (see the top of this
   // file).
   void RecordCommands(const Frame& frame, const FrameContext& ctx,
-                      ImDrawData* ui);
+                      ImDrawData* ui, Output output);
+  // Records the copy of the viewport image (COLOR_ATTACHMENT_OPTIMAL after
+  // the present pass, and again afterwards) for every readback not recorded
+  // yet.
+  void RecordViewportReadbacks(VkCommandBuffer cmd);
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
 
   const platform::Window& window_;
+  std::string shader_dir_;
   VulkanContext context_;
   bool vsync_ = true;
   bool swapchain_dirty_ = false;
@@ -220,6 +345,16 @@ class Renderer {
   Environment environment_;
   // Declared before the passes that borrow it.
   std::vector<Mesh> meshes_;
+  // Released GPU objects waiting until no frame in flight uses them
+  // (ReleaseMesh(), ReleaseTextures()); declared after the context so they
+  // are destroyed before it.
+  template <typename T>
+  struct Retired {
+    T object;
+    uint64_t last_frame = 0;  // The last frame serial that may use it.
+  };
+  std::vector<Retired<Mesh>> retired_meshes_;
+  std::vector<Retired<Image>> retired_images_;
   DrawList draw_list_;
 
   ShadowPass shadow_pass_;
@@ -230,7 +365,27 @@ class Renderer {
   ReticlePass reticle_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
+  OverlayPass overlay_pass_;
   PresentPass present_pass_;
+  // The present pass into viewport_image_'s format; created by the first
+  // PrepareViewport().
+  std::optional<PresentPass> viewport_present_pass_;
+
+  // Editor viewport output (PrepareViewport()); empty in the game.
+  Image viewport_image_;
+  ViewportImage viewport_;
+  // frame_serial_ at the last viewport recreation.
+  uint64_t viewport_resized_at_ = 0;
+  // Requested viewport copies (RequestViewportReadback()).
+  struct Readback {
+    uint64_t ticket = 0;
+    // The frame that records the copy; 0 until recorded.
+    uint64_t frame_serial = 0;
+    VkExtent2D extent{};
+    Buffer buffer;
+  };
+  std::vector<Readback> readbacks_;
+  uint64_t next_readback_ticket_ = 1;
 
   std::array<Frame, kFramesInFlight> frames_;
   size_t frame_index_ = 0;

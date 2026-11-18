@@ -138,6 +138,26 @@ class Image {
                                        ImageDesc desc,
                                        std::span<const std::byte> texels);
 
+// One image of a CreateImagesFromMipChains() batch.
+struct MipChainUpload {
+  // A single-layer 2D image; mip_levels must equal mips.size().
+  ImageDesc desc;
+  // The bytes of each level, level 0 first, in the copy layout of
+  // desc.format (tightly packed rows, or rows of 4 x 4 blocks for
+  // block-compressed formats). Borrowed for the call.
+  std::span<const std::span<const std::byte>> mips;
+};
+
+// Creates sampled images from ready mip chains, block-compressed formats
+// included: every level of every image goes through one staging buffer and
+// one submission, with no blits; blocks until the copies finished. Level
+// sizes are the caller's contract (see TextureCache::Upload(), which
+// validates them). The usage flags the upload needs are added. Leaves every
+// image in SHADER_READ_ONLY_OPTIMAL. Returns the images in the order of
+// `uploads`.
+[[nodiscard]] std::vector<Image> CreateImagesFromMipChains(
+    const VulkanContext& context, std::span<const MipChainUpload> uploads);
+
 }  // namespace blue::render
 
 #endif  // BLUE_RENDER_IMAGE_H_

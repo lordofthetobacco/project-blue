@@ -59,6 +59,9 @@ void RenderTargets::Resize(VkExtent2D extent) {
   ssao_ = MakeTarget(context_, half_extent_, kSsaoFormat,
                      kSampledTarget | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
+  selection_mask_ =
+      MakeTarget(context_, extent, kSelectionMaskFormat, kSampledTarget);
+
   bloom_mip_views_.clear();
   const uint32_t levels =
       std::min(kMaxBloomLevels, MipLevelCount(half_extent_));
@@ -74,7 +77,7 @@ void RenderTargets::Resize(VkExtent2D extent) {
 void RenderTargets::InitializeLayouts() {
   context_.SubmitImmediate([this](VkCommandBuffer cmd) {
     for (const Image* image :
-         {&hdr_, &ldr_, &ssao_raw_, &ssao_blur_, &bloom_}) {
+         {&hdr_, &ldr_, &ssao_raw_, &ssao_blur_, &bloom_, &selection_mask_}) {
       ImageBarrier(cmd, image->handle(), VK_IMAGE_ASPECT_COLOR_BIT, kNoAccess,
                    kFragmentSampledRead, VK_IMAGE_LAYOUT_UNDEFINED,
                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

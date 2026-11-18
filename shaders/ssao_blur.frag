@@ -28,12 +28,17 @@ void main()
     const vec2 centerSample = texelFetch(aoImage, center, 0).rg;
     const float centerDepth = centerSample.g;
 
-    float sum = centerSample.r * kWeights[0];
+    const float centerVisibility =
+        centerSample.r >= 0.0 && centerSample.r <= 1.0 ? centerSample.r : 1.0;
+    float sum = centerVisibility * kWeights[0];
     float weightSum = kWeights[0];
     for (int i = 1; i <= kRadius; ++i) {
         for (int side = -1; side <= 1; side += 2) {
             const ivec2 texel = clamp(center + params.axis * (i * side), ivec2(0), size - 1);
             const vec2 tap = texelFetch(aoImage, texel, 0).rg;
+            if (!(tap.r >= 0.0 && tap.r <= 1.0)) {
+                continue;  // Never spread a broken (NaN) value.
+            }
             const float depthWeight =
                 exp(-abs(tap.g - centerDepth) / (kDepthTolerance * centerDepth + 1.0e-3));
             const float weight = kWeights[i] * depthWeight;

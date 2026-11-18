@@ -31,6 +31,8 @@ namespace blue::render {
 //   ldr:       the tonemapped image, R8G8B8A8_UNORM holding sRGB-encoded
 //              colour with luma in alpha (what FXAA reads). Copied to the
 //              swapchain.
+//   selection_mask: R8_UNORM coverage of the selected draws, which the
+//              overlay pass outlines (editor only; untouched otherwise).
 //
 // After creation (and every Resize) all sampled images are in
 // SHADER_READ_ONLY_OPTIMAL with undefined contents, except `ssao` (white)
@@ -44,6 +46,7 @@ class RenderTargets {
   static constexpr VkFormat kSsaoRawFormat = VK_FORMAT_R16G16_SFLOAT;
   static constexpr VkFormat kSsaoFormat = VK_FORMAT_R8_UNORM;
   static constexpr VkFormat kBloomFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  static constexpr VkFormat kSelectionMaskFormat = VK_FORMAT_R8_UNORM;
   // Most bloom mips; fewer for tiny windows.
   static constexpr uint32_t kMaxBloomLevels = 6;
 
@@ -67,6 +70,7 @@ class RenderTargets {
   [[nodiscard]] const Image& ssao_blur() const { return ssao_blur_; }
   [[nodiscard]] const Image& ssao() const { return ssao_; }
   [[nodiscard]] const Image& bloom() const { return bloom_; }
+  [[nodiscard]] const Image& selection_mask() const { return selection_mask_; }
   [[nodiscard]] uint32_t bloom_levels() const { return bloom_.mip_levels(); }
   // The view of bloom mip `level` alone (< bloom_levels()).
   [[nodiscard]] VkImageView bloom_mip_view(uint32_t level) const {
@@ -89,6 +93,7 @@ class RenderTargets {
   Image ssao_blur_;
   Image ssao_;
   Image bloom_;
+  Image selection_mask_;
   // Destroyed before bloom_ is replaced (Resize clears them first).
   std::vector<ImageView> bloom_mip_views_;
 };

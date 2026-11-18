@@ -52,6 +52,7 @@ glm::vec4 VertexTangent(const aiMesh& mesh, unsigned i, glm::vec3 normal) {
 void AppendMesh(const aiMesh& mesh, MeshData& data) {
   const auto base = static_cast<Index>(data.vertices.size());
   const aiVector3D* uvs = mesh.mTextureCoords[0];
+  const aiVector3D* uvs1 = mesh.mTextureCoords[1];
   for (unsigned i = 0; i < mesh.mNumVertices; ++i) {
     glm::vec3 normal = ToVec3(mesh.mNormals[i]);
     const float length = glm::length(normal);
@@ -59,9 +60,12 @@ void AppendMesh(const aiMesh& mesh, MeshData& data) {
                                                     : glm::vec3(0, 1, 0);
     const glm::vec2 uv =
         uvs != nullptr ? glm::vec2(uvs[i].x, 1.0f - uvs[i].y) : glm::vec2(0);
+    const glm::vec2 uv1 =
+        uvs1 != nullptr ? glm::vec2(uvs1[i].x, 1.0f - uvs1[i].y) : uv;
     data.vertices.push_back({.position = ToVec3(mesh.mVertices[i]),
                              .normal = normal,
-                             .uv = uv,
+                             .uv0 = uv,
+                             .uv1 = uv1,
                              .tangent = VertexTangent(mesh, i, normal)});
   }
   for (const aiFace& face : std::span(mesh.mFaces, mesh.mNumFaces)) {

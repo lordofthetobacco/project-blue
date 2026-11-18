@@ -12,12 +12,13 @@
 
 namespace blue::asset {
 
-TEST_CASE("Vertex has the 48-byte layout the renderer uploads") {
-  CHECK(sizeof(Vertex) == 48);
+TEST_CASE("Vertex has the 56-byte layout the renderer uploads") {
+  CHECK(sizeof(Vertex) == 56);
   CHECK(offsetof(Vertex, position) == 0);
   CHECK(offsetof(Vertex, normal) == 12);
-  CHECK(offsetof(Vertex, uv) == 24);
-  CHECK(offsetof(Vertex, tangent) == 32);
+  CHECK(offsetof(Vertex, uv0) == 24);
+  CHECK(offsetof(Vertex, uv1) == 32);
+  CHECK(offsetof(Vertex, tangent) == 40);
 }
 
 TEST_CASE("MakePlane builds one upward-facing quad") {
@@ -33,8 +34,8 @@ TEST_CASE("MakePlane builds one upward-facing quad") {
     CHECK(vertex.normal == glm::vec3(0.0f, 1.0f, 0.0f));
     CHECK(vertex.position.y == 0.0f);
     // UVs are in metres from the -X/-Z corner.
-    CHECK(vertex.uv.x == doctest::Approx(vertex.position.x + 6.0f));
-    CHECK(vertex.uv.y == doctest::Approx(vertex.position.z + 6.0f));
+    CHECK(vertex.uv0.x == doctest::Approx(vertex.position.x + 6.0f));
+    CHECK(vertex.uv0.y == doctest::Approx(vertex.position.z + 6.0f));
   }
   for (Index index : plane.indices) {
     CHECK(index < plane.vertices.size());
@@ -68,8 +69,8 @@ TEST_CASE("MakeCube is a closed cube with outward counter-clockwise faces") {
     CHECK(glm::dot(geometric, a.normal) > 0.0f);
   }
   for (const Vertex& vertex : cube.vertices) {
-    CHECK(glm::all(glm::greaterThanEqual(vertex.uv, glm::vec2(0.0f))));
-    CHECK(glm::all(glm::lessThanEqual(vertex.uv, glm::vec2(1.0f))));
+    CHECK(glm::all(glm::greaterThanEqual(vertex.uv0, glm::vec2(0.0f))));
+    CHECK(glm::all(glm::lessThanEqual(vertex.uv0, glm::vec2(1.0f))));
   }
   testing::CheckTangentFrames(cube);
 }
@@ -81,9 +82,9 @@ TEST_CASE("Tangent frames follow u to the right and v down the image") {
   constexpr glm::vec3 kNormal{0.0f, 0.0f, 1.0f};
   constexpr glm::vec4 kTangent{1.0f, 0.0f, 0.0f, -1.0f};
   quad.vertices = {
-      {{0, 1, 0}, kNormal, {0, 0}, kTangent},
-      {{0, 0, 0}, kNormal, {0, 1}, kTangent},
-      {{1, 0, 0}, kNormal, {1, 1}, kTangent},
+      {{0, 1, 0}, kNormal, {0, 0}, {0, 0}, kTangent},
+      {{0, 0, 0}, kNormal, {0, 1}, {0, 1}, kTangent},
+      {{1, 0, 0}, kNormal, {1, 1}, {1, 1}, kTangent},
   };
   quad.indices = {0, 1, 2};
   testing::CheckTangentFrames(quad);
@@ -106,10 +107,10 @@ TEST_CASE("MakeSphere is a closed sphere with outward faces and UVs") {
     CHECK(glm::length(vertex.position) == doctest::Approx(0.5f));
     CHECK(glm::all(glm::lessThanEqual(
         glm::abs(vertex.normal - vertex.position * 2.0f), glm::vec3(1e-5f))));
-    CHECK(vertex.uv.x >= 0.0f);
-    CHECK(vertex.uv.x <= 1.0f);
+    CHECK(vertex.uv0.x >= 0.0f);
+    CHECK(vertex.uv0.x <= 1.0f);
     // v = 0 at the north pole.
-    CHECK(vertex.uv.y ==
+    CHECK(vertex.uv0.y ==
           doctest::Approx(std::acos(vertex.normal.y) / 3.14159265f)
               .epsilon(1e-4));
   }
@@ -137,6 +138,14 @@ TEST_CASE("ComputeBounds encloses every vertex") {
   const Bounds bounds = ComputeBounds(cube.vertices);
   CHECK(bounds.min == glm::vec3(-0.5f));
   CHECK(bounds.max == glm::vec3(0.5f));
+}
+
+TEST_CASE("Built-in meshes copy uv0 into uv1") {
+  for (const MeshData& mesh : {MakeCube(), MakePlane(3.0f), MakeSphere(8)}) {
+    for (const Vertex& vertex : mesh.vertices) {
+      CHECK(vertex.uv1 == vertex.uv0);
+    }
+  }
 }
 
 }  // namespace blue::asset

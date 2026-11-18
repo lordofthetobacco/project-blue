@@ -30,8 +30,8 @@ inline float TangentAgreement(const asset::MeshData& mesh) {
     const asset::Vertex& c = mesh.vertices[mesh.indices[i + 2]];
     const glm::vec3 e1 = b.position - a.position;
     const glm::vec3 e2 = c.position - a.position;
-    const glm::vec2 d1 = b.uv - a.uv;
-    const glm::vec2 d2 = c.uv - a.uv;
+    const glm::vec2 d1 = b.uv0 - a.uv0;
+    const glm::vec2 d2 = c.uv0 - a.uv0;
     const float determinant = d1.x * d2.y - d2.x * d1.y;
     if (std::abs(determinant) < 1.0e-10f ||
         glm::length(glm::cross(e1, e2)) < 1.0e-10f) {

@@ -19,10 +19,13 @@ namespace {
 static_assert(offsetof(MaterialParams, emissive) == 16);
 static_assert(offsetof(MaterialParams, surface) == 32);
 static_assert(offsetof(MaterialParams, uv_alpha) == 48);
-static_assert(sizeof(MaterialParams) == 64);
+static_assert(offsetof(MaterialParams, options) == 64);
+static_assert(sizeof(MaterialParams) == 80);
 
 constexpr uint32_t kParamsBinding = 0;
 constexpr uint32_t kTextureCount = 5;  // Bindings 1-5.
+static_assert(kTextureCount == material::kTextureSlotCount,
+              "One texture binding per material::TextureSlot");
 constexpr uint32_t kSetsPerPool = 64;
 
 VkDescriptorSetLayout CreateLayout(VkDevice device) {
@@ -69,6 +72,29 @@ VkDescriptorPool CreatePool(VkDevice device) {
   return pool;
 }
 
+// Returns MaterialParams::options.x of `desc`.
+uint32_t UvSetBits(const material::MaterialDesc& desc) {
+  uint32_t bits = 0;
+  for (size_t slot = 0; slot < desc.uv_set.size(); ++slot) {
+    if (desc.uv_set[slot] != 0) {
+      bits |= 1u << slot;
+    }
+  }
+  return bits;
+}
+
+// Returns MaterialParams::options.y of `desc`.
+uint32_t MaterialFlags(const material::MaterialDesc& desc) {
+  uint32_t flags = 0;
+  if (desc.normal_encoding == material::NormalEncoding::kRg) {
+    flags |= kMaterialFlagNormalRg;
+  }
+  if (desc.occlusion_in_metallic_roughness) {
+    flags |= kMaterialFlagOcclusionInMetallicRoughness;
+  }
+  return flags;
+}
+
 }  // namespace
 
 MaterialVariant VariantOf(const material::MaterialDesc& desc) {
@@ -87,6 +113,7 @@ MaterialParams MakeMaterialParams(const material::MaterialDesc& desc) {
       .surface = glm::vec4(desc.metallic, desc.roughness, desc.normal_scale,
                            desc.occlusion_strength),
       .uv_alpha = glm::vec4(desc.uv_scale, desc.alpha_cutoff, 0.0f),
+      .options = glm::uvec4(UvSetBits(desc), MaterialFlags(desc), 0, 0),
   };
 }
 
@@ -110,7 +137,18 @@ MaterialId MaterialSystem::Create(const material::MaterialDesc& desc) {
   added.desc = material::Sanitize(desc);
   added.variant = VariantOf(added.desc);
   added.binding = AcquireBinding();
-  Write(added.binding, added.desc);
+  Write(added.binding, added);
+  return static_cast<MaterialId>(materials_.size() - 1);
+}
+
+MaterialId MaterialSystem::Create(const material::MaterialDesc& desc,
+                                  const MaterialTextures& textures) {
+  Material& added = materials_.emplace_back();
+  added.desc = material::Sanitize(desc);
+  added.textures = textures;
+  added.variant = VariantOf(added.desc);
+  added.binding = AcquireBinding();
+  Write(added.binding, added);
   return static_cast<MaterialId>(materials_.size() - 1);
 }
 
@@ -119,15 +157,34 @@ void MaterialSystem::Update(MaterialId id, const material::MaterialDesc& desc) {
   if (index >= materials_.size()) {
     core::log::Fatal("Update of unknown material {}", index);
   }
+  if (materials_[index].released) {
+    core::log::Warn("Update of released material {} ignored", index);
+    return;
+  }
   Material& updated = materials_[index];
   Binding fresh = AcquireBinding();
   updated.desc = material::Sanitize(desc);
   updated.variant = VariantOf(updated.desc);
-  Write(fresh, updated.desc);
+  Write(fresh, updated);
   // Frames up to the current one may have recorded the old set.
   retired_.push_back(
       {.binding = std::exchange(updated.binding, std::move(fresh)),
        .last_frame = frame_serial_});
+}
+
+void MaterialSystem::Release(MaterialId id) {
+  const auto index = static_cast<size_t>(id);
+  if (id == kDefaultMaterial || index >= materials_.size() ||
+      materials_[index].released) {
+    return;
+  }
+  Material& released = materials_[index];
+  released.released = true;
+  released.textures.reset();
+  // Frames up to the current one may have recorded its set.
+  retired_.push_back(
+      {.binding = std::move(released.binding), .last_frame = frame_serial_});
+  released.binding = Binding{};
 }
 
 void MaterialSystem::BeginFrame(uint64_t frame_serial) {
@@ -173,22 +230,24 @@ VkDescriptorSet MaterialSystem::AllocateSet() {
   return set;
 }
 
-void MaterialSystem::Write(const Binding& binding,
-                           const material::MaterialDesc& desc) {
-  const MaterialParams params = MakeMaterialParams(desc);
+std::array<VkImageView, material::kTextureSlotCount>
+MaterialSystem::TextureViews(const Material& material) const {
+  const MaterialTextures uploaded =
+      material.textures.value_or(MaterialTextures{});
+  return {
+      textures_.ViewOr(uploaded.base_color, DefaultTexture::kWhite),
+      textures_.ViewOr(uploaded.metallic_roughness, DefaultTexture::kWhite),
+      textures_.ViewOr(uploaded.normal, DefaultTexture::kFlatNormal),
+      textures_.ViewOr(uploaded.occlusion, DefaultTexture::kWhite),
+      textures_.ViewOr(uploaded.emissive, DefaultTexture::kWhite),
+  };
+}
+
+void MaterialSystem::Write(const Binding& binding, const Material& material) {
+  const MaterialParams params = MakeMaterialParams(material.desc);
   std::memcpy(binding.params.mapped(), &params, sizeof(params));
 
-  const std::array<VkImageView, kTextureCount> views{
-      textures_.Get(desc.base_color_texture, TextureKind::kColor,
-                    DefaultTexture::kWhite),
-      textures_.GetMetallicRoughness(desc),
-      textures_.Get(desc.normal_texture, TextureKind::kData,
-                    DefaultTexture::kFlatNormal),
-      textures_.Get(desc.occlusion_texture, TextureKind::kData,
-                    DefaultTexture::kWhite),
-      textures_.Get(desc.emissive_texture, TextureKind::kColor,
-                    DefaultTexture::kWhite),
-  };
+  const std::array<VkImageView, kTextureCount> views = TextureViews(material);
   const VkDescriptorBufferInfo buffer_info{
       .buffer = binding.params.handle(),
       .offset = 0,

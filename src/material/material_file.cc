@@ -23,12 +23,12 @@ constexpr std::string_view kEmbeddedSuffix = ".embedded";
 constexpr std::string_view kExtension = ".bmat";
 
 // A texture slot: its .bmat key and the MaterialDesc member it maps to.
-struct TextureSlot {
+struct TextureKey {
   std::string_view key;
   TextureRef MaterialDesc::* member;
 };
 
-constexpr std::array<TextureSlot, 7> kTextureSlots = {{
+constexpr std::array<TextureKey, 7> kTextureSlots = {{
     {"base_color_texture", &MaterialDesc::base_color_texture},
     {"metallic_roughness_texture", &MaterialDesc::metallic_roughness_texture},
     {"roughness_texture", &MaterialDesc::roughness_texture},
@@ -110,7 +110,7 @@ bool ApplyTextureLine(MaterialDesc& desc, std::string_view key,
   if (embedded) {
     key.remove_suffix(kEmbeddedSuffix.size());
   }
-  for (const TextureSlot& slot : kTextureSlots) {
+  for (const TextureKey& slot : kTextureSlots) {
     if (slot.key != key) {
       continue;
     }
@@ -197,6 +197,29 @@ void ApplyLine(MaterialDesc& desc, std::string_view line,
     } else {
       invalid();
     }
+  } else if (key == "uv_set") {
+    // One UV set (0 or 1) per texture slot, in TextureSlot order.
+    if (const auto v = ParseFloats<kTextureSlotCount>(value)) {
+      for (size_t i = 0; i < kTextureSlotCount; ++i) {
+        desc.uv_set[i] = (*v)[i] >= 0.5f ? 1 : 0;
+      }
+    } else {
+      invalid();
+    }
+  } else if (key == "normal_encoding") {
+    if (value == "rgb") {
+      desc.normal_encoding = NormalEncoding::kRgb;
+    } else if (value == "rg") {
+      desc.normal_encoding = NormalEncoding::kRg;
+    } else {
+      invalid();
+    }
+  } else if (key == "occlusion_in_metallic_roughness") {
+    if (const std::optional<bool> parsed = ParseBool(value)) {
+      desc.occlusion_in_metallic_roughness = *parsed;
+    } else {
+      invalid();
+    }
   } else if (!ApplyTextureLine(desc, key, value, directory, path)) {
     core::log::Warn("{}: unknown key '{}'", path, key);
   }
@@ -274,8 +297,21 @@ core::Result<void, MaterialFileError> SaveMaterialFile(
       desc.normal_scale, desc.occlusion_strength, desc.uv_scale.x,
       desc.uv_scale.y, desc.alpha_mode == AlphaMode::kMask ? "mask" : "opaque",
       desc.alpha_cutoff, desc.double_sided);
+  // Written only when they differ from the defaults, so older files and
+  // tools see no change.
+  if (desc.uv_set != MaterialDesc{}.uv_set) {
+    const auto& uv = desc.uv_set;
+    text += std::format("uv_set = {} {} {} {} {}\n", uv[0], uv[1], uv[2], uv[3],
+                        uv[4]);
+  }
+  if (desc.normal_encoding == NormalEncoding::kRg) {
+    text += "normal_encoding = rg\n";
+  }
+  if (desc.occlusion_in_metallic_roughness) {
+    text += "occlusion_in_metallic_roughness = true\n";
+  }
   const std::string directory = core::ParentPath(path);
-  for (const TextureSlot& slot : kTextureSlots) {
+  for (const TextureKey& slot : kTextureSlots) {
     const TextureRef& ref = desc.*slot.member;
     if (ref.empty()) {
       continue;

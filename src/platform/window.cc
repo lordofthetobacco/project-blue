@@ -3,18 +3,62 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
+#include <charconv>
+#include <cstddef>
+#include <optional>
+#include <string_view>
+#include <system_error>
+
 #include "core/log.h"
 
 namespace blue::platform {
+namespace {
 
-Window::Window(const char* title, int width, int height) {
+// Parses all of `text` as a decimal int.
+bool ParseInt(std::string_view text, int& value) {
+  const char* const end = text.data() + text.size();
+  const std::from_chars_result result =
+      std::from_chars(text.data(), end, value);
+  return !text.empty() && result.ec == std::errc() && result.ptr == end;
+}
+
+}  // namespace
+
+std::optional<WindowPair> ParseWindowPair(std::string_view text) {
+  const size_t comma = text.find(',');
+  WindowPair pair;
+  if (comma == std::string_view::npos ||
+      !ParseInt(text.substr(0, comma), pair.x) ||
+      !ParseInt(text.substr(comma + 1), pair.y)) {
+    return std::nullopt;
+  }
+  return pair;
+}
+
+Window::Window(const char* title, int width, int height,
+               std::optional<WindowPair> position) {
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     core::log::Fatal("SDL_Init failed: {}", SDL_GetError());
   }
 
-  constexpr SDL_WindowFlags kFlags =
-      SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-  window_ = SDL_CreateWindow(title, width, height, kFlags);
+  const SDL_PropertiesID properties = SDL_CreateProperties();
+  SDL_SetStringProperty(properties, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
+  SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
+  SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER,
+                        height);
+  for (const char* flag : {SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN,
+                           SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN,
+                           SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN}) {
+    SDL_SetBooleanProperty(properties, flag, true);
+  }
+  if (position) {
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_X_NUMBER,
+                          position->x);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_Y_NUMBER,
+                          position->y);
+  }
+  window_ = SDL_CreateWindowWithProperties(properties);
+  SDL_DestroyProperties(properties);
   if (window_ == nullptr) {
     core::log::Fatal("SDL_CreateWindow failed: {}", SDL_GetError());
   }

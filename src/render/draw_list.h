@@ -34,7 +34,8 @@ class DrawList {
  public:
   // Rebuilds the list from the items of `view` whose `world_bounds` (parallel
   // to view.draws) intersect `frustum`; counts the others in
-  // stats.culled_draws. Material ids must be valid in `materials`.
+  // stats.culled_draws. Items whose mesh is unknown or released are
+  // skipped; unknown or released materials draw as kDefaultMaterial.
   void Build(const SceneView& view, std::span<const camera::Aabb> world_bounds,
              const camera::Frustum& frustum, const MaterialSystem& materials,
              const std::vector<Mesh>& meshes, RenderStats& stats);

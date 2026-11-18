@@ -49,10 +49,14 @@ MeshData MakeCube() {
     const glm::vec4 tangent(right, -1.0f);
 
     const auto base = static_cast<Index>(mesh.vertices.size());
-    mesh.vertices.push_back({center - r - u, face.normal, {0, 1}, tangent});
-    mesh.vertices.push_back({center + r - u, face.normal, {1, 1}, tangent});
-    mesh.vertices.push_back({center + r + u, face.normal, {1, 0}, tangent});
-    mesh.vertices.push_back({center - r + u, face.normal, {0, 0}, tangent});
+    mesh.vertices.push_back(
+        {center - r - u, face.normal, {0, 1}, {0, 1}, tangent});
+    mesh.vertices.push_back(
+        {center + r - u, face.normal, {1, 1}, {1, 1}, tangent});
+    mesh.vertices.push_back(
+        {center + r + u, face.normal, {1, 0}, {1, 0}, tangent});
+    mesh.vertices.push_back(
+        {center - r + u, face.normal, {0, 0}, {0, 0}, tangent});
 
     constexpr std::array<Index, 6> kQuadIndices = {0, 1, 2, 2, 3, 0};
     for (const Index offset : kQuadIndices) {
@@ -72,10 +76,10 @@ MeshData MakePlane(float size) {
 
   MeshData mesh;
   mesh.vertices = {
-      {{-h, 0.0f, -h}, kUp, {0.0f, 0.0f}, kTangent},
-      {{-h, 0.0f, h}, kUp, {0.0f, size}, kTangent},
-      {{h, 0.0f, h}, kUp, {size, size}, kTangent},
-      {{h, 0.0f, -h}, kUp, {size, 0.0f}, kTangent},
+      {{-h, 0.0f, -h}, kUp, {0.0f, 0.0f}, {0.0f, 0.0f}, kTangent},
+      {{-h, 0.0f, h}, kUp, {0.0f, size}, {0.0f, size}, kTangent},
+      {{h, 0.0f, h}, kUp, {size, size}, {size, size}, kTangent},
+      {{h, 0.0f, -h}, kUp, {size, 0.0f}, {size, 0.0f}, kTangent},
   };
   mesh.indices = {0, 1, 2, 2, 3, 0};
   mesh.submeshes = WholeMesh(mesh);
@@ -117,7 +121,7 @@ MeshData MakeSphere(int segments) {
       const float w =
           glm::dot(glm::cross(normal, tangent), south) >= 0.0f ? 1.0f : -1.0f;
       mesh.vertices.push_back(
-          {normal * kRadius, normal, {u, v}, glm::vec4(tangent, w)});
+          {normal * kRadius, normal, {u, v}, {u, v}, glm::vec4(tangent, w)});
     }
   }
   const auto row = static_cast<Index>(slices + 1);

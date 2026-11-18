@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
+#include <string_view>
 #include <utility>
 
 #include <glm/ext/quaternion_common.hpp>
@@ -166,16 +168,52 @@ void SampleClip(const Clip& clip, float time, std::span<Transform> pose) {
 Clip MergeClips(std::span<const Clip> clips, std::string name) {
   Clip merged{.name = std::move(name)};
   size_t channel_count = 0;
+  size_t event_count = 0;
   for (const Clip& clip : clips) {
     channel_count += clip.channels.size();
+    event_count += clip.events.size();
   }
   merged.channels.reserve(channel_count);
+  merged.events.reserve(event_count);
+  merged.loop = !clips.empty();
   for (const Clip& clip : clips) {
     merged.duration = std::max(merged.duration, clip.duration);
     merged.channels.insert(merged.channels.end(), clip.channels.begin(),
                            clip.channels.end());
+    merged.events.insert(merged.events.end(), clip.events.begin(),
+                         clip.events.end());
+    merged.loop = merged.loop && clip.loop;
   }
+  std::ranges::stable_sort(merged.events, {}, &ClipEvent::time);
   return merged;
+}
+
+void AddEvent(Clip& clip, ClipEvent event) {
+  const auto position =
+      std::ranges::upper_bound(clip.events, event.time, {}, &ClipEvent::time);
+  clip.events.insert(position, std::move(event));
+}
+
+const ClipEvent* FindEvent(const Clip& clip, std::string_view name) {
+  const auto found = std::ranges::find(clip.events, name, &ClipEvent::name);
+  return found == clip.events.end() ? nullptr : &*found;
+}
+
+bool IsValid(const Clip& clip) {
+  if (!std::isfinite(clip.duration) || clip.duration < 0.0f) {
+    return false;
+  }
+  const auto valid_channel = [](const Channel& channel) {
+    return IsValid(channel);
+  };
+  if (!std::ranges::all_of(clip.channels, valid_channel)) {
+    return false;
+  }
+  const auto finite_time = [](const ClipEvent& event) {
+    return std::isfinite(event.time);
+  };
+  return std::ranges::all_of(clip.events, finite_time) &&
+         std::ranges::is_sorted(clip.events, {}, &ClipEvent::time);
 }
 
 }  // namespace blue::animation

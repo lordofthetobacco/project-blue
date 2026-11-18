@@ -76,7 +76,14 @@ void main()
     const vec3 up = position - ViewPosition(center - ivec2(0, 2));
     const vec3 dx = abs(right.z) < abs(left.z) ? right : left;
     const vec3 dy = abs(down.z) < abs(up.z) ? down : up;
-    vec3 normal = normalize(cross(dx, dy));
+    // A degenerate neighbourhood (zero or non-finite cross product) falls
+    // back to a normal facing the camera instead of producing NaN, which the
+    // blur would spread into square blocks.
+    vec3 normal = cross(dx, dy);
+    const float normalLengthSq = dot(normal, normal);
+    normal = normalLengthSq > 1.0e-30 && !isinf(normalLengthSq)
+                 ? normal * inversesqrt(normalLengthSq)
+                 : -normalize(position);
     if (dot(normal, position) > 0.0) {
         normal = -normal;  // Face the camera (at the origin).
     }
@@ -128,6 +135,12 @@ void main()
         const float range = smoothstep(0.0, 1.0, radius / abs(position.z - sceneZ));
         occlusion += occluded * range;
     }
-    const float visibility = 1.0 - occlusion / float(kSampleCount);
-    outResult = vec4(pow(visibility, params.params.y), distance, 0.0, 0.0);
+    // clamp() and the NaN check keep a broken sample from poisoning the
+    // blur and the shading (NaN compares false: it becomes fully open).
+    float visibility = pow(clamp(1.0 - occlusion / float(kSampleCount), 0.0, 1.0),
+                           params.params.y);
+    if (!(visibility >= 0.0 && visibility <= 1.0)) {
+        visibility = 1.0;
+    }
+    outResult = vec4(visibility, distance, 0.0, 0.0);
 }

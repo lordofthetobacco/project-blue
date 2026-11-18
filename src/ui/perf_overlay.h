@@ -17,6 +17,8 @@
 #include "input/input_settings.h"
 #include "platform/window.h"
 #include "render/renderer.h"
+#include "render/scene_view.h"
+#include "ui/imgui_layer.h"
 #include "weapon/target_log.h"
 
 namespace blue::ui {
@@ -119,7 +121,9 @@ struct SceneOverlayInfo {
   uint32_t shadow_draw_calls = 0;
   uint32_t shadow_culled_draws = 0;
   uint64_t triangles = 0;
-  std::string_view scene_path;
+  // Shown as is: pass the scene's file name (the full path is in the log)
+  // so the window stays narrow.
+  std::string_view scene_name;
   std::string_view status;
   // Compiler message of the shader that failed to reload; empty when all
   // shaders are fine. Only its first line is shown, in red.
@@ -137,65 +141,57 @@ struct BuildResult {
 };
 
 // Dear ImGui performance overlay: FPS, CPU/GPU frame time, frame-time graph,
-// device info, player settings. Owns the ImGui context and backends. Borrows
-// `window` and `renderer`, which must outlive it. The UI scales with the
-// window: full size at kReferenceHeight logical pixels, times the monitor's
-// DPI scale, so it keeps the same share of the screen when the window is
-// resized or moved between displays. Neither copyable nor movable. Not
-// thread-safe.
+// device info, player settings. Owns the ImGui layer (context and backends).
+// Borrows `window` and `renderer`, which must outlive it. The UI scales
+// with the window (UiScaleMode::kWindowHeight), so it keeps the same share of
+// the screen when the window is resized or moved between displays. Neither
+// copyable nor movable. Not thread-safe.
 class PerfOverlay {
  public:
-  // Logical window height at which the UI is drawn at its designed size.
-  static constexpr float kReferenceHeight = 1080.0f;
-  static constexpr float kMinUiScale = 0.5f;
-  static constexpr float kMaxUiScale = 4.0f;
-
   PerfOverlay(const platform::Window& window, const render::Renderer& renderer);
-  ~PerfOverlay();
 
   PerfOverlay(const PerfOverlay&) = delete;
   PerfOverlay& operator=(const PerfOverlay&) = delete;
 
   // Forwards an SDL event to ImGui.
-  void ProcessEvent(const SDL_Event& event);
+  void ProcessEvent(const SDL_Event& event) { layer_.ProcessEvent(event); }
   void ToggleVisible() { visible_ = !visible_; }
   [[nodiscard]] bool visible() const { return visible_; }
 
   // Records this frame's timings, starts the ImGui frame and builds the
   // overlay: the stats and settings windows while visible, plus the
   // crosshair if requested. Edits in the settings window are written
-  // straight into `settings`. More windows (ui::EditorPanels) may be emitted
-  // after it; Render() ends the frame.
+  // straight into `settings` and `post` (exposure and post-processing,
+  // applied live and not saved). More windows may be emitted after it;
+  // Render() ends the frame.
   [[nodiscard]] BuildResult Build(float cpu_frame_ms,
                                   std::optional<double> gpu_frame_ms,
                                   const SceneOverlayInfo& scene_info,
-                                  input::InputSettings& settings);
+                                  input::InputSettings& settings,
+                                  render::PostSettings& post);
   // Ends the ImGui frame Build() started and returns its draw data.
-  [[nodiscard]] ImDrawData* Render();
+  [[nodiscard]] ImDrawData* Render() { return layer_.EndFrame(); }
 
   // Whether ImGui is using the mouse / keyboard right now (hovering or
   // dragging a widget). The app keeps such events away from the game.
-  [[nodiscard]] bool WantsMouse() const;
-  [[nodiscard]] bool WantsKeyboard() const;
+  [[nodiscard]] bool WantsMouse() const { return layer_.WantsMouse(); }
+  [[nodiscard]] bool WantsKeyboard() const { return layer_.WantsKeyboard(); }
 
  private:
-  // Recomputes the UI scale from the window and DPI and, if it changed,
-  // rebuilds the style around it. Call between frames.
-  void UpdateScale();
   // Each Draw* helper emits one section of the overlay window.
   void DrawTimings(float cpu_frame_ms) const;
   void DrawDeviceInfo() const;
   // Emits the settings window; returns true when an edit of `settings` was
-  // completed.
-  [[nodiscard]] bool DrawSettings(input::InputSettings& settings) const;
+  // completed. Edits of `post` apply at once.
+  [[nodiscard]] bool DrawSettings(input::InputSettings& settings,
+                                  render::PostSettings& post) const;
   // Emits the hit log window; returns true when Clear was pressed.
   [[nodiscard]] bool DrawHitLog(const HitLogOverlayInfo& info) const;
 
-  const platform::Window& window_;
   const render::Renderer& renderer_;
+  ImGuiLayer layer_;
   FrameTimeHistory cpu_history_;
   std::optional<double> gpu_frame_ms_;
-  float ui_scale_ = 0.0f;  // 0 until the first UpdateScale().
   bool visible_ = true;
 };
 

@@ -1,6 +1,9 @@
 #ifndef BLUE_MATERIAL_MATERIAL_H_
 #define BLUE_MATERIAL_MATERIAL_H_
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include <glm/vec2.hpp>
@@ -16,6 +19,24 @@ namespace blue::material {
 enum class AlphaMode {
   kOpaque,  // Alpha is ignored.
   kMask,    // Fragments with alpha < alpha_cutoff are discarded.
+};
+
+// Texture slots of a material in shader binding order (bindings 1-5 of
+// render::MaterialSystem's set). roughness_texture and metallic_texture feed
+// kMetallicRoughness.
+enum class TextureSlot {
+  kBaseColor,
+  kMetallicRoughness,
+  kNormal,
+  kOcclusion,
+  kEmissive,
+};
+inline constexpr size_t kTextureSlotCount = 5;
+
+// How normal_texture stores the tangent-space normal.
+enum class NormalEncoding {
+  kRgb,  // xyz in RGB.
+  kRg,   // xy in RG (BC5); z is reconstructed as sqrt(1 - x^2 - y^2).
 };
 
 // Where a texture's image comes from. Either an image file (`path`), or an
@@ -52,6 +73,14 @@ struct MaterialDesc {
   AlphaMode alpha_mode = AlphaMode::kOpaque;
   float alpha_cutoff = 0.5f;
   bool double_sided = false;
+  // UV set (0 = uv0, 1 = uv1 of asset::Vertex) each texture slot samples,
+  // indexed by TextureSlot.
+  std::array<uint8_t, kTextureSlotCount> uv_set{};
+  NormalEncoding normal_encoding = NormalEncoding::kRgb;
+  // Cooked ORM packing: occlusion is the R channel of
+  // metallic_roughness_texture (R occlusion, G roughness, B metallic) and
+  // occlusion_texture is ignored.
+  bool occlusion_in_metallic_roughness = false;
 
   TextureRef base_color_texture;  // sRGB RGBA
   // Linear, glTF packing: G = roughness, B = metallic.

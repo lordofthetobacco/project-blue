@@ -1,14 +1,17 @@
 #ifndef BLUE_RENDER_SCENE_VIEW_H_
 #define BLUE_RENDER_SCENE_VIEW_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include "asset/mesh_data.h"
+#include "render/debug_lines.h"
 #include "scene/scene.h"
 
 // What the application hands the renderer for one frame: camera, lights,
@@ -27,13 +30,24 @@ struct Camera {
 
 // Light intensities follow one convention throughout the renderer: color *
 // intensity is the radiance a white Lambertian surface facing the light
-// reflects (for the point light: at 1 m). So intensity 1 lights a white
+// reflects (for a point light: at 1 m). So intensity 1 lights a white
 // surface to exactly 1 before exposure, as in the pre-PBR shading.
+//
+// Point lights fall off with the inverse square of the distance d. A light
+// with a positive `range` r is also faded by the window
+// (1 - (d / r)^4)^2, clamped to [0, 1], so it reaches exactly zero at r and
+// can be culled beyond it; range <= 0 means unlimited (pure inverse square,
+// never culled). Point lights cast no shadows.
 struct PointLight {
   glm::vec3 position{0.0f};
   glm::vec3 color{1.0f};
   float intensity = 1.0f;
+  float range = 0.0f;  // m
 };
+
+// The most point lights a frame shades; SceneView::point_lights beyond it
+// (after culling) are dropped, the dimmest at the camera first.
+inline constexpr size_t kMaxPointLights = 32;
 
 // Handle to a mesh owned by the renderer.
 enum class MeshId : uint32_t {};
@@ -59,7 +73,7 @@ struct DrawItem {
   // Local-space bounds of the mesh; culled against the camera and the shadow
   // cascades after `transform`.
   asset::Bounds bounds;
-  // One draw per element; usually owned by a MeshCache or ModelCache and
+  // One draw per element; usually owned by the world::PrefabCache and
   // borrowed for the Renderer::DrawFrame call. Empty draws the whole mesh
   // with kDefaultMaterial (or `material_override`).
   std::span<const SubmeshDraw> submeshes;
@@ -130,11 +144,13 @@ struct PostSettings {
   bool fxaa_enabled = true;
 };
 
-// Everything the renderer needs to draw one frame. `draws` is borrowed and
-// only needs to stay valid for the Renderer::DrawFrame call.
+// Everything the renderer needs to draw one frame. The spans are borrowed
+// and only need to stay valid for the Renderer::DrawFrame call.
 struct SceneView {
   Camera camera;
-  PointLight light;
+  // Culled against the camera frustum each frame (lights with a range);
+  // at most kMaxPointLights of the visible ones are shaded.
+  std::span<const PointLight> point_lights;
   // Flat ambient radiance, see AmbientLight() in shaders/pbr.glsl.
   glm::vec3 ambient{0.03f};
   scene::SunLight sun;
@@ -146,6 +162,16 @@ struct SceneView {
   // Drawn after the draw items when present.
   std::optional<ReticleSight> sight;
   PostSettings post;
+
+  // Editor overlays, drawn over the tonemapped image; empty spans cost
+  // nothing. Line vertex pairs (DebugLines::tested() / on_top()): `lines`
+  // are hidden by the scene in front of them, `overlay_lines` are not.
+  std::span<const LineVertex> lines;
+  std::span<const LineVertex> overlay_lines;
+  // Indices into `draws` of the selected items, outlined in
+  // `selection_color` (display space; dimmed where the item is hidden).
+  std::span<const uint32_t> selected_draws;
+  glm::vec4 selection_color{1.0f, 0.6f, 0.1f, 1.0f};
 };
 
 }  // namespace blue::render

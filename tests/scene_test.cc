@@ -21,12 +21,6 @@ TEST_CASE("transform matrix is translate * rotate * scale") {
   CHECK(transform.Matrix() == expected);
 }
 
-TEST_CASE("scene defaults to earth gravity and entities have no body") {
-  const Scene scene;
-  CHECK(scene.gravity == glm::vec3(0.0f, -9.81f, 0.0f));
-  CHECK_FALSE(Entity{}.body.has_value());
-}
-
 TEST_CASE("ValidateRigidBody accepts the defaults and each valid shape") {
   CHECK_FALSE(ValidateRigidBody(RigidBody{}).has_value());
 
@@ -97,17 +91,16 @@ TEST_CASE("ValidateRigidBody names the reason for an invalid body") {
 
 namespace blue::scene {
 
-TEST_CASE("scene defaults to a normalized, shadow-casting sun") {
-  const Scene scene;
-  CHECK(glm::length(scene.sun.direction) ==
-        doctest::Approx(1.0f).epsilon(1e-5));
+TEST_CASE("the sun defaults to a normalized, shadow-casting light") {
+  const SunLight sun;
+  CHECK(glm::length(sun.direction) == doctest::Approx(1.0f).epsilon(1e-5));
   const glm::vec3 expected = glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f));
-  CHECK(scene.sun.direction.x == doctest::Approx(expected.x).epsilon(1e-5));
-  CHECK(scene.sun.direction.y == doctest::Approx(expected.y).epsilon(1e-5));
-  CHECK(scene.sun.direction.z == doctest::Approx(expected.z).epsilon(1e-5));
-  CHECK(scene.sun.intensity == 3.0f);
-  CHECK(scene.sun.casts_shadows);
-  CHECK_FALSE(ValidateSunLight(scene.sun).has_value());
+  CHECK(sun.direction.x == doctest::Approx(expected.x).epsilon(1e-5));
+  CHECK(sun.direction.y == doctest::Approx(expected.y).epsilon(1e-5));
+  CHECK(sun.direction.z == doctest::Approx(expected.z).epsilon(1e-5));
+  CHECK(sun.intensity == 3.0f);
+  CHECK(sun.casts_shadows);
+  CHECK_FALSE(ValidateSunLight(sun).has_value());
 }
 
 TEST_CASE("ValidateSunLight accepts edge values and names invalid ones") {

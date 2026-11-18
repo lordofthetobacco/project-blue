@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "core/result.h"
-#include "material/material.h"
 
 // Image decoding for textures and environment maps (stb_image): PNG (8 and
 // 16 bit), JPEG, BMP, TGA and Radiance .hdr. Pixels are never flipped: row 0
@@ -37,7 +36,8 @@ enum class ImageError {
   kFileNotFound,  // The file cannot be read.
   kDecodeFailed,  // The data is not an image stb_image can decode.
   kTooLarge,      // The image exceeds kMaxImageDimension.
-  kNoTexture,     // The TextureRef is empty or names no embedded texture.
+  kNoTexture,     // The TextureRef is empty or names no embedded texture
+                  // (asset/texture_loader.h).
 };
 
 // Largest accepted width or height.
@@ -59,18 +59,6 @@ inline constexpr int kMaxImageDimension = 16384;
 // gamma 2.2 (an approximation of sRGB).
 [[nodiscard]] core::Result<ImageDataF, ImageError> LoadHdrFile(
     const std::string& path);
-
-// Loads the image `ref` names: an image file, or an embedded texture of a
-// model file (compressed PNG/JPEG data or assimp's raw BGRA texels). An
-// embedded load parses the whole model file again: prefer LoadTextures()
-// for several textures of one model.
-[[nodiscard]] core::Result<ImageData, ImageError> LoadTexture(
-    const material::TextureRef& ref);
-
-// Loads every texture in `refs`, parsing each referenced model file only
-// once. result[i] belongs to refs[i].
-[[nodiscard]] std::vector<core::Result<ImageData, ImageError>> LoadTextures(
-    std::span<const material::TextureRef> refs);
 
 // Packs separate greyscale roughness and metallic maps (R channel each) into
 // one glTF metallic-roughness image: G = roughness, B = metallic, R = 0,

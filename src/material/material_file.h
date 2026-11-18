@@ -26,7 +26,10 @@
 // base_color_texture, metallic_roughness_texture, roughness_texture,
 // metallic_texture, normal_texture, occlusion_texture, emissive_texture, each
 // with an optional "<slot>.embedded = <index>". Texture paths are stored
-// relative to the .bmat file's directory when possible.
+// relative to the .bmat file's directory when possible. Optional keys,
+// written only when they differ from the defaults: uv_set (5 values, 0 or 1,
+// in material::TextureSlot order), normal_encoding (rgb or rg) and
+// occlusion_in_metallic_roughness (true/false).
 
 namespace blue::material {
 

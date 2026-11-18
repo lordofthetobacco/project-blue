@@ -38,9 +38,10 @@ inline constexpr unsigned kBasePostProcess =
 // Returns the number of vertices of `meshes` together.
 [[nodiscard]] size_t VertexCount(std::span<const aiMesh* const> meshes);
 
-// Builds `meshes` into one MeshData: vertices with UV channel 0 flipped to
-// the top-left convention (assimp's glTF and OBJ importers both deliver
-// v = 0 at the bottom) and tangents orthonormalized against the normal, with
+// Builds `meshes` into one MeshData: vertices with UV channels 0 and 1
+// (uv0, uv1; uv1 = uv0 when the mesh has no second channel) flipped to the
+// top-left convention (assimp's glTF and OBJ importers both deliver v = 0 at
+// the bottom) and tangents orthonormalized against the normal, with
 // the handedness taken against the flipped v; meshes without UVs get zero
 // UVs and a deterministic tangent. Meshes are grouped by
 // `materials.Resolve()` so each material is one contiguous submesh. The

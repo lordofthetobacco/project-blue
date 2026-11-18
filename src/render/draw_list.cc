@@ -42,11 +42,16 @@ void DrawList::Build(const SceneView& view,
       continue;
     }
     const DrawItem& item = view.draws[i];
+    const auto mesh_index = static_cast<size_t>(item.mesh);
+    if (mesh_index >= meshes.size() || !meshes[mesh_index].resident()) {
+      continue;  // Released or unknown mesh: nothing to draw.
+    }
     const auto add = [&](uint32_t first_index, uint32_t index_count,
                          MaterialId material) {
       if (item.material_override) {
         material = *item.material_override;
       }
+      material = materials.Resolve(material);
       const MaterialVariant variant = materials.variant(material);
       entries_.push_back({
           .key = SortKey(variant, material, item.mesh),
@@ -58,8 +63,7 @@ void DrawList::Build(const SceneView& view,
       });
     };
     if (item.submeshes.empty()) {
-      add(0, meshes[static_cast<size_t>(item.mesh)].index_count(),
-          kDefaultMaterial);
+      add(0, meshes[mesh_index].index_count(), kDefaultMaterial);
     } else {
       for (const SubmeshDraw& submesh : item.submeshes) {
         add(submesh.first_index, submesh.index_count, submesh.material);

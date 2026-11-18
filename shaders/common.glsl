@@ -2,6 +2,14 @@
 // Included with #include "common.glsl".
 
 const int kCascadeCount = 4;
+// Must match render::kMaxPointLights.
+const int kMaxPointLights = 32;
+
+// Must match render::GpuPointLight.
+struct GpuPointLight {
+    vec4 positionInverseRangeSq;  // xyz: world position, w: 1 / range^2 (0: unlimited)
+    vec4 radiance;                // rgb: color * intensity
+};
 
 // Per-frame data, one uniform buffer per frame in flight. Must match
 // FrameUniforms in src/render/frame_globals.h (std140; the C++ side asserts
@@ -13,8 +21,6 @@ layout(set = 0, binding = 0) uniform FrameUniforms {
     mat4 inverseProjection;
     mat4 inverseViewProj;
     vec4 cameraPosition;
-    vec4 lightPosition;
-    vec4 lightColor;                          // rgb: color, a: intensity
     vec4 ambientColor;
     vec4 sunDirection;                        // xyz: direction the light travels
     vec4 sunColor;                            // rgb: color * intensity
@@ -27,6 +33,8 @@ layout(set = 0, binding = 0) uniform FrameUniforms {
     vec4 irradianceSh[9];                     // Environment irradiance, SH9, rgb
     vec4 environmentParams;                   // x: intensity, y: rotation (rad),
                                               // z: max prefiltered mip, w: 1 if bound
+    uvec4 pointLightCount;                    // x: valid entries of pointLights
+    GpuPointLight pointLights[kMaxPointLights]; // Culled on the CPU, unshadowed.
 } frame;
 
 // Cascaded sun shadow map, one layer per cascade; compares against the

@@ -156,8 +156,8 @@ TEST_CASE("ImportAnimatedModel loads the Glock 17 with its animations") {
   SUBCASE("UVs and tangent frames follow the top-left convention") {
     for (const ModelPart& part : model.parts) {
       for (const Vertex& vertex : part.mesh.vertices) {
-        CHECK(glm::all(glm::greaterThanEqual(vertex.uv, glm::vec2(-0.01f))));
-        CHECK(glm::all(glm::lessThanEqual(vertex.uv, glm::vec2(1.01f))));
+        CHECK(glm::all(glm::greaterThanEqual(vertex.uv0, glm::vec2(-0.01f))));
+        CHECK(glm::all(glm::lessThanEqual(vertex.uv0, glm::vec2(1.01f))));
       }
       // A few seams and mirrored islands disagree with the averaged
       // per-vertex frames; nearly every triangle must agree.

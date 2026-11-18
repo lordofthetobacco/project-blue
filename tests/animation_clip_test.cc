@@ -211,4 +211,65 @@ TEST_CASE("MergeClips concatenates channels and keeps the longest duration") {
   CHECK(MergeClips({}, "empty").channels.empty());
 }
 
+TEST_CASE("MergeClips merges events in time order and loops only if all do") {
+  Clip first{.name = "a", .duration = 1.0f, .loop = true};
+  AddEvent(first, {.name = "late", .time = 0.8f});
+  Clip second{.name = "b", .duration = 1.0f, .loop = true};
+  AddEvent(second, {.name = "early", .time = 0.1f});
+  AddEvent(second, {.name = "tie", .time = 0.8f});
+
+  std::array<Clip, 2> clips{first, second};
+  Clip merged = MergeClips(clips, "m");
+  REQUIRE(merged.events.size() == 3);
+  CHECK(merged.events[0].name == "early");
+  CHECK(merged.events[1].name == "late");  // ties keep clip order
+  CHECK(merged.events[2].name == "tie");
+  CHECK(merged.loop);
+  CHECK(IsValid(merged));
+
+  clips[1].loop = false;
+  CHECK_FALSE(MergeClips(clips, "m").loop);
+  CHECK_FALSE(MergeClips({}, "empty").loop);
+}
+
+TEST_CASE("AddEvent keeps events sorted and FindEvent looks them up by name") {
+  Clip clip{.name = "fire", .duration = 0.5f};
+  AddEvent(clip, {.name = "slide_lock", .time = 0.3f});
+  AddEvent(clip, {.name = "shot", .time = 0.0f});
+  AddEvent(clip, {.name = "eject", .time = 0.3f});
+
+  REQUIRE(clip.events.size() == 3);
+  CHECK(clip.events[0].name == "shot");
+  CHECK(clip.events[1].name == "slide_lock");
+  CHECK(clip.events[2].name == "eject");  // same time: after the earlier one
+
+  const ClipEvent* lock = FindEvent(clip, "slide_lock");
+  REQUIRE(lock != nullptr);
+  CHECK(lock->time == 0.3f);
+  CHECK(FindEvent(clip, "missing") == nullptr);
+}
+
+TEST_CASE("IsValid rejects bad durations, channels and unsorted events") {
+  Clip clip{.name = "c",
+            .duration = 1.0f,
+            .channels = {TwoKeyTranslation(Interpolation::kLinear)}};
+  CHECK(IsValid(clip));
+
+  Clip negative = clip;
+  negative.duration = -1.0f;
+  CHECK_FALSE(IsValid(negative));
+
+  Clip bad_channel = clip;
+  bad_channel.channels[0].values.pop_back();
+  CHECK_FALSE(IsValid(bad_channel));
+
+  Clip unsorted = clip;
+  unsorted.events = {{.name = "b", .time = 0.5f}, {.name = "a", .time = 0.1f}};
+  CHECK_FALSE(IsValid(unsorted));
+
+  Clip non_finite = clip;
+  non_finite.events = {{.name = "a", .time = std::nanf("")}};
+  CHECK_FALSE(IsValid(non_finite));
+}
+
 }  // namespace blue::animation
