@@ -368,6 +368,7 @@ target_link_libraries(blue_window PUBLIC blue_core SDL3::SDL3-static)
 add_library(blue_render STATIC
     src/render/buffer.mm
     src/render/debug_lines.cc
+    src/render/draw_list.mm
     src/render/encoders.mm
     src/render/environment.mm
     src/render/frame_globals.mm
@@ -389,7 +390,10 @@ add_library(blue_render STATIC
     src/render/texture_cache.mm
     src/render/texture_types.cc
     src/render/passes/bloom_pass.mm
+    src/render/passes/depth_prepass.mm
+    src/render/passes/mesh_pass.mm
     src/render/passes/present_pass.mm
+    src/render/passes/scene_pass.mm
     src/render/passes/skybox_pass.mm
     src/render/passes/tonemap_pass.mm
     src/render/passes/ui_pass.mm

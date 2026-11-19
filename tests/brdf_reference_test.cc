@@ -43,7 +43,7 @@ glm::vec3 Direction(float cosine, float azimuth) {
   return {sine * std::cos(azimuth), sine * std::sin(azimuth), cosine};
 }
 
-// The i-th of `count` Hammersley points (environment.glsl).
+// The i-th of `count` Hammersley points (environment.h).
 glm::vec2 Hammersley(uint32_t i, uint32_t count) {
   uint32_t bits = i;
   bits = (bits << 16u) | (bits >> 16u);
@@ -139,7 +139,7 @@ TEST_CASE("Sanitising maps NaN to 0 and infinities into range") {
 TEST_CASE("Specular occlusion stays in [0, 1] and follows ao on mirrors") {
   for (const float roughness : kRoughness) {
     for (int ao_step = -2; ao_step <= 10; ++ao_step) {
-      // Below 0: an occlusion strength above 1 (mesh.frag now clamps it).
+      // Below 0: an occlusion strength above 1 (mesh.frag.metal now clamps it).
       const float ao = static_cast<float>(ao_step) / 10.0f;
       float previous = -1.0f;
       for (const float n_dot_v : {1.0e-4f, 0.01f, 0.1f, 0.5f, 0.9f, 1.0f}) {
@@ -193,7 +193,7 @@ TEST_CASE(
 }
 
 TEST_CASE("GGX importance samples stay finite under inexact GPU division") {
-  constexpr uint32_t kCount = 1024;  // env_brdf_lut.frag's sample count
+  constexpr uint32_t kCount = 1024;  // env_brdf_lut.frag.metal's sample count
   constexpr int kLutSize = 256;      // render::Environment::kBrdfLutSize
   int broken_rows_before = 0;
   int last_broken_row = -1;

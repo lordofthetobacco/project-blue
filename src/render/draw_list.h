@@ -1,7 +1,7 @@
 #ifndef BLUE_RENDER_DRAW_LIST_H_
 #define BLUE_RENDER_DRAW_LIST_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <array>
 #include <cstdint>
@@ -50,29 +50,23 @@ class DrawList {
 struct DrawListPipelines {
   // Null skips the variant's entries.
   std::array<const Pipeline*, kMaterialVariantCount> pipelines{};
-  // Binds the material's set as set 1 for the variant's entries.
+  // Binds the entry's material (MaterialSystem::Bind()) for the variant's
+  // entries.
   std::array<bool, kMaterialVariantCount> bind_material{};
 };
 
-// Records `entries` (sorted by DrawList) with the pipeline of each entry's
-// variant: binds `frame_set` as set 0, the material set as set 1 where
-// requested, and pushes the item's model matrix (DrawConstants, 64 bytes,
-// vertex stage) before each item's first draw. Every pipeline must use the
-// DrawConstants push range. Adds to `stats` (draw calls and triangles) when
-// non-null. Must be recorded inside a rendering scope.
-void RecordDrawList(VkCommandBuffer cmd, std::span<const DrawEntry> entries,
-                    const DrawListPipelines& pipelines,
-                    VkDescriptorSet frame_set, const SceneView& view,
+// Records `entries` (sorted by DrawList) on `encoder` with the pipeline of
+// each entry's variant: binds the pipeline, the material where requested,
+// the mesh's vertex buffer, and sets the item's model matrix (DrawConstants,
+// 64 bytes) as vertex bytes at kBufferDraw before each item's first draw.
+// The caller has set the frame's globals on `encoder`
+// (FrameGlobals::Bind()). Adds to `stats` (draw calls and triangles) when
+// non-null.
+void RecordDrawList(id<MTLRenderCommandEncoder> encoder,
+                    std::span<const DrawEntry> entries,
+                    const DrawListPipelines& pipelines, const SceneView& view,
                     const MaterialSystem& materials,
                     const std::vector<Mesh>& meshes, RenderStats* stats);
-
-// The push constant range every DrawList pipeline declares: the model
-// matrix, read by the vertex stage (shaders/mesh.vert, shaders/depth.vert).
-inline constexpr VkPushConstantRange kDrawConstantsRange{
-    .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-    .offset = 0,
-    .size = 64,
-};
 
 }  // namespace blue::render
 

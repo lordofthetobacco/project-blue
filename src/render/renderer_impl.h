@@ -14,9 +14,11 @@
 #include <vector>
 
 #include "asset/mesh_data.h"
+#include "camera/frustum.h"
 #include "core/extent.h"
 #include "platform/window.h"
 #include "render/buffer.h"
+#include "render/draw_list.h"
 #include "render/environment.h"
 #include "render/frame_config.h"
 #include "render/frame_globals.h"
@@ -26,7 +28,9 @@
 #include "render/mesh.h"
 #include "render/metal_context.h"
 #include "render/passes/bloom_pass.h"
+#include "render/passes/depth_prepass.h"
 #include "render/passes/frame_context.h"
+#include "render/passes/mesh_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/skybox_pass.h"
 #include "render/passes/tonemap_pass.h"
@@ -46,9 +50,8 @@
 // --------------------
 // RendererImpl::RecordCommands() is the wiring: it records the passes in
 // order into the frame's one command buffer, each wrapped in a GPU timer
-// scope. The target design (Stages 4-5 of the Metal port bring back the
-// passes before bloom; until then the scene is the sky alone, see
-// RecordCommands()):
+// scope. The target design (Stage 5 of the Metal port brings back the
+// shadow, SSAO, reticle and overlay passes; see RecordCommands()):
 //
 //   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
@@ -158,6 +161,8 @@ struct RendererImpl {
   // Records every pass of the frame described by `ctx` (see the top of this
   // file); acquires the drawable on the way.
   void RecordCommands(FrameContext& ctx, ImDrawData* ui, Output output);
+  // Computes the world-space bounds of every draw item into world_bounds_.
+  void ComputeWorldBounds(const SceneView& view);
   // Records the copy of the viewport image, after it was rendered, for every
   // readback not recorded yet.
   void RecordViewportReadbacks(const FrameContext& ctx);
@@ -186,10 +191,10 @@ struct RendererImpl {
   // after the context so they are destroyed before it.
   std::vector<Retired<Mesh>> retired_meshes_;
   std::vector<Retired<Image>> retired_images_;
-  // TODO(metal-stage4): DrawList draw_list_;
+  DrawList draw_list_;
 
-  // TODO(metal-stage4): DepthPrepass depth_prepass_, MeshPass mesh_pass_
-  // (before skybox_pass_).
+  DepthPrepass depth_prepass_;
+  MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
@@ -214,8 +219,9 @@ struct RendererImpl {
   size_t frame_index_ = 0;
   // Number of the frame being recorded; counts every recorded frame from 1.
   uint64_t frame_serial_ = 0;
-  // TODO(metal-stage4): world_bounds_, the world-space bounds of the current
-  // frame's draw items, parallel to SceneView::draws.
+  // World-space bounds of the current frame's draw items, parallel to
+  // SceneView::draws.
+  std::vector<camera::Aabb> world_bounds_;
   RenderStats stats_;
   GpuTimer gpu_timer_;
 };

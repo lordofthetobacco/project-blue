@@ -12,12 +12,14 @@
 
 #include <glm/vec4.hpp>
 
+#include "camera/frustum.h"
 #include "core/log.h"
 #include "material/material.h"
 #include "platform/window.h"
 #include "render/encoders.h"
 #include "render/frame_uniforms.h"
 #include "render/metal_check.h"
+#include "render/passes/scene_pass.h"
 #include "render/passes/ui_pass.h"
 #include "render/renderer_impl.h"
 
@@ -29,9 +31,6 @@ namespace {
 // output (BGRA8Unorm_sRGB), so the UI shows it as the game window would.
 constexpr MTLPixelFormat kViewportFormat = MTLPixelFormatRGBA8Unorm_sRGB;
 
-// Linear radiance where nothing (not even the sky) is drawn.
-constexpr MTLClearColor kSceneClearColor{0.015, 0.018, 0.022, 1.0};
-
 // Neutral grey dielectric: what kDefaultMaterial looks like.
 material::MaterialDesc DefaultMaterialDesc() {
   material::MaterialDesc desc;
@@ -39,30 +38,6 @@ material::MaterialDesc DefaultMaterialDesc() {
   desc.base_color = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
   desc.roughness = 0.6f;
   return desc;
-}
-
-// TODO(metal-stage4b): becomes BeginScenePass / EndScenePass with the mesh
-// pass before the skybox. Opens the scene encoder: the HDR target cleared,
-// the scene depth cleared to 0 (reversed Z: infinitely far), both stored,
-// with the frame's globals bound.
-id<MTLRenderCommandEncoder> BeginTemporaryScenePass(const FrameContext& ctx) {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
-  MTLRenderPassColorAttachmentDescriptor* color =
-      descriptor.colorAttachments[0];
-  color.texture = ctx.targets.hdr().texture();
-  color.loadAction = MTLLoadActionClear;
-  color.storeAction = MTLStoreActionStore;
-  color.clearColor = kSceneClearColor;
-  MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
-  depth.texture = ctx.targets.depth().texture();
-  depth.loadAction = MTLLoadActionClear;
-  depth.storeAction = MTLStoreActionStore;
-  depth.clearDepth = 0.0;
-  id<MTLRenderCommandEncoder> encoder =
-      BeginRenderPass(ctx, descriptor, "scene");
-  ctx.globals.Bind(encoder, ctx.frame_index);
-  return encoder;
 }
 
 }  // namespace
@@ -83,6 +58,9 @@ RendererImpl::RendererImpl(const platform::Window& window,
       shader_programs_(context_, shader_mode_),
       environment_(context_, shader_programs_, shader_dir_, samplers_,
                    frame_globals_),
+      depth_prepass_(context_, shader_programs_, shader_dir_, materials_,
+                     meshes_),
+      mesh_pass_(context_, shader_programs_, shader_dir_, materials_, meshes_),
       skybox_pass_(context_, shader_programs_, shader_dir_, environment_),
       bloom_pass_(context_, shader_programs_, shader_dir_),
       tonemap_pass_(context_, shader_programs_, shader_dir_),
@@ -329,7 +307,12 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     environment_.FillUniforms(uniforms);
     frame_globals_.Write(frame_index_, uniforms);
 
+    ComputeWorldBounds(view);
+    const camera::Frustum camera_frustum(view.camera.projection *
+                                         view.camera.view);
     stats_ = {};
+    draw_list_.Build(view, world_bounds_, camera_frustum, materials_, meshes_,
+                     stats_);
     FrameContext ctx{
         .cmd = frame.command_buffer,
         .frame_index = frame_index_,
@@ -337,6 +320,9 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
         .view = view,
         .targets = targets_,
         .output_extent = swapchain_.extent(),
+        .world_bounds = world_bounds_,
+        .camera_frustum = camera_frustum,
+        .draw_list = draw_list_.entries(),
         .stats = stats_,
         .timer = gpu_timer_,
     };
@@ -350,6 +336,15 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   }
 }
 
+void RendererImpl::ComputeWorldBounds(const SceneView& view) {
+  world_bounds_.clear();
+  world_bounds_.reserve(view.draws.size());
+  for (const DrawItem& item : view.draws) {
+    world_bounds_.push_back(camera::TransformAabb(
+        {.min = item.bounds.min, .max = item.bounds.max}, item.transform));
+  }
+}
+
 void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
                                   Output output) {
   // Times `record` as `scope`.
@@ -359,10 +354,17 @@ void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
     gpu_timer_.EndScope(scope);
   };
 
+  // TODO(metal-stage5): the shadow cascades (GpuScope::kShadow) when
+  // shadows are on.
+  timed(GpuScope::kDepthPrepass, [&] { depth_prepass_.Record(ctx); });
+  // TODO(metal-stage5): SSAO (GpuScope::kSsao) when view.post.ssao_enabled;
+  // until then the occlusion stays the white RenderTargets::ssao().
   timed(GpuScope::kScene, [&] {
-    const id<MTLRenderCommandEncoder> encoder = BeginTemporaryScenePass(ctx);
+    const id<MTLRenderCommandEncoder> encoder = BeginScenePass(ctx);
+    mesh_pass_.Draw(ctx, encoder);
     skybox_pass_.Draw(ctx, encoder);
-    [encoder endEncoding];
+    // TODO(metal-stage5): reticle_pass_.Draw(ctx, encoder).
+    EndScenePass(encoder);
   });
   if (ctx.view.post.bloom_enabled) {
     timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });

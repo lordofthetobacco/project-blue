@@ -4,8 +4,11 @@
 #include "render/metal_types.h"
 
 #include <cstddef>
+#include <span>
 
+#include "camera/frustum.h"
 #include "core/extent.h"
+#include "render/draw_list.h"
 #include "render/frame_globals.h"
 #include "render/gpu_timer.h"
 #include "render/render_targets.h"
@@ -34,8 +37,12 @@ struct FrameContext {
   // The size in pixels of the window output (the swapchain extent).
   core::Extent2D output_extent{};
 
-  // TODO(metal-stage4): culling inputs (world_bounds, camera_frustum) and
-  // the sorted draw list (DrawList) of the camera passes.
+  // Culling inputs: world-space bounds of view.draws (parallel to it) and
+  // the camera frustum.
+  std::span<const camera::Aabb> world_bounds;
+  const camera::Frustum& camera_frustum;
+  // The visible submeshes, sorted (DrawList), for the camera passes.
+  std::span<const DrawEntry> draw_list;
   // TODO(metal-stage5): the sun's shadow cascades and `shadows`.
 
   RenderStats& stats;

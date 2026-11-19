@@ -112,7 +112,7 @@ TEST_CASE("SH9 follows the direction of a bright region") {
 TEST_CASE("The BRDF LUT's smoothest rows are finite and in [0, 1]") {
   // 64 rows at the GPU's 1024 samples: rows 0..4 lie below roughness 0.072,
   // where GGX sampling divides x by x (see ImportanceSampleGgx in
-  // shaders/environment.glsl).
+  // shaders/environment.h).
   constexpr int kSize = 64;
   const BrdfLut lut = GenerateBrdfLut(kSize, 1024);
   REQUIRE(lut.pixels.size() == size_t{kSize} * kSize * 2);

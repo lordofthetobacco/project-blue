@@ -1,0 +1,105 @@
+#include "render/passes/depth_prepass.h"
+
+#include <array>
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+
+#include "core/path.h"
+#include "render/draw_list.h"
+#include "render/encoders.h"
+#include "render/passes/scene_pass.h"
+#include "render/render_targets.h"
+
+namespace blue::render {
+
+namespace {
+
+// Reversed-Z: infinity is 0.
+constexpr double kDepthClearValue = 0.0;
+
+}  // namespace
+
+DepthPrepass::DepthPrepass(const MetalContext& context,
+                           ShaderPrograms& programs,
+                           const std::string& shader_dir,
+                           const MaterialSystem& materials,
+                           const std::vector<Mesh>& meshes)
+    : device_(context.device()), materials_(materials), meshes_(meshes) {
+  const std::string vertex_path =
+      core::JoinPath(shader_dir, "depth.vert.metal");
+  programs.Add(vertex_path, "",
+               [this](const shader::ShaderLibrary& vertex,
+                      const shader::ShaderLibrary* fragment) {
+                 return CreatePipelines(/*masked=*/false, vertex, fragment);
+               });
+  programs.Add(vertex_path,
+               core::JoinPath(shader_dir, "depth_masked.frag.metal"),
+               [this](const shader::ShaderLibrary& vertex,
+                      const shader::ShaderLibrary* fragment) {
+                 return CreatePipelines(/*masked=*/true, vertex, fragment);
+               });
+}
+
+std::optional<std::string> DepthPrepass::CreatePipelines(
+    bool masked, const shader::ShaderLibrary& vertex,
+    const shader::ShaderLibrary* fragment) {
+  // All of them are created before any is replaced, so a failure leaves the
+  // previous set intact.
+  std::array<std::unique_ptr<Pipeline>, kMaterialVariantCount> created;
+  for (size_t i = 0; i < kMaterialVariantCount; ++i) {
+    const auto variant = static_cast<MaterialVariant>(i);
+    if (IsMasked(variant) != masked) {
+      continue;
+    }
+    const GraphicsPipelineDesc desc{
+        .vertex = &vertex,
+        .fragment = fragment,
+        .vertex_descriptor = MeshVertexDescriptor(),
+        .depth_format = RenderTargets::kDepthFormat,
+        .cull_mode =
+            IsDoubleSided(variant) ? MTLCullModeNone : MTLCullModeBack,
+        .depth_compare = MTLCompareFunctionGreater,
+        .label = masked ? "depth prepass (masked)" : "depth prepass",
+    };
+    auto pipeline = Pipeline::Create(device_, desc);
+    if (!pipeline.ok()) {
+      return pipeline.error();
+    }
+    created[i] = std::move(pipeline).value();
+  }
+  for (size_t i = 0; i < kMaterialVariantCount; ++i) {
+    if (created[i] != nullptr) {
+      pipelines_[i] = std::move(created[i]);
+    }
+  }
+  return std::nullopt;
+}
+
+void DepthPrepass::Record(const FrameContext& ctx) const {
+  MTLRenderPassDescriptor* descriptor =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
+  depth.texture = ctx.targets.depth().texture();
+  depth.loadAction = MTLLoadActionClear;
+  depth.storeAction = MTLStoreActionStore;
+  depth.clearDepth = kDepthClearValue;
+
+  const id<MTLRenderCommandEncoder> encoder =
+      BeginRenderPass(ctx, descriptor, "depth prepass");
+  SetSceneViewport(encoder, ctx.targets.extent());
+  ctx.globals.Bind(encoder, ctx.frame_index);
+
+  DrawListPipelines pipelines;
+  for (size_t i = 0; i < kMaterialVariantCount; ++i) {
+    pipelines.pipelines[i] = pipelines_[i].get();
+    pipelines.bind_material[i] = IsMasked(static_cast<MaterialVariant>(i));
+  }
+  RecordDrawList(encoder, ctx.draw_list, pipelines, ctx.view, materials_,
+                 meshes_, /*stats=*/nullptr);
+  [encoder endEncoding];
+}
+
+}  // namespace blue::render

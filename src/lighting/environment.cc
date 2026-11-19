@@ -168,7 +168,7 @@ glm::vec2 IntegrateBrdf(float n_dot_v, float roughness, int sample_count) {
   for (uint32_t i = 0; i < count; ++i) {
     const glm::vec2 xi = Hammersley(i, count);
     // GGX importance sample of the half vector, as ImportanceSampleGgx in
-    // shaders/environment.glsl: cos^2 is clamped to [0, 1] before both
+    // shaders/environment.h: cos^2 is clamped to [0, 1] before both
     // square roots (for small alpha the quotient is x / x, which inexact
     // division can put above 1), and alpha 0 at xi.y = 1 is not 0 / 0.
     const float phi = 2.0f * kPi * xi.x;
@@ -288,7 +288,7 @@ BrdfLut GenerateBrdfLut(int size, int sample_count) {
       const float n_dot_v =
           (static_cast<float>(x) + 0.5f) / static_cast<float>(lut.size);
       // Scale and bias are fractions of the reflected energy (clamped like
-      // env_brdf_lut.frag's output).
+      // env_brdf_lut.frag.metal's output).
       const glm::vec2 value =
           glm::clamp(IntegrateBrdf(n_dot_v, roughness, samples), 0.0f, 1.0f);
       const size_t offset =

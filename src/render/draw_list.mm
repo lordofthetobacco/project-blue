@@ -3,18 +3,22 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include <glm/mat4x4.hpp>
+
+#include "shaders/bindings.h"
 
 namespace blue::render {
 
 namespace {
 
-// Must match DrawConstants in shaders/mesh.vert and shaders/depth.vert.
+// Must match DrawConstants in shaders/mesh.vert.metal and
+// shaders/depth.vert.metal.
 struct DrawConstants {
   glm::mat4 model;
 };
-static_assert(sizeof(DrawConstants) == kDrawConstantsRange.size);
+static_assert(sizeof(DrawConstants) == 64);
 
 // Sort key: variant in the top 2 bits, then 30 bits of material, then the
 // mesh, so draws group by pipeline, then material, then vertex buffers.
@@ -75,54 +79,45 @@ void DrawList::Build(const SceneView& view,
   });
 }
 
-void RecordDrawList(VkCommandBuffer cmd, std::span<const DrawEntry> entries,
-                    const DrawListPipelines& pipelines,
-                    VkDescriptorSet frame_set, const SceneView& view,
+void RecordDrawList(id<MTLRenderCommandEncoder> encoder,
+                    std::span<const DrawEntry> entries,
+                    const DrawListPipelines& pipelines, const SceneView& view,
                     const MaterialSystem& materials,
                     const std::vector<Mesh>& meshes, RenderStats* stats) {
   const Pipeline* bound_pipeline = nullptr;
-  VkDescriptorSet bound_material = VK_NULL_HANDLE;
+  std::optional<MaterialId> bound_material;
   const Mesh* bound_mesh = nullptr;
-  uint32_t pushed_item = UINT32_MAX;
+  uint32_t set_item = UINT32_MAX;
   for (const DrawEntry& entry : entries) {
     const auto variant = static_cast<size_t>(entry.variant);
     const Pipeline* pipeline = pipelines.pipelines[variant];
     if (pipeline == nullptr) {
       continue;
     }
+    // Encoder bindings survive pipeline changes, so the material and the
+    // model matrix stay set across them.
     if (pipeline != bound_pipeline) {
-      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        pipeline->handle());
-      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipeline->layout(), 0, 1, &frame_set, 0, nullptr);
+      pipeline->Bind(encoder);
       bound_pipeline = pipeline;
-      bound_material = VK_NULL_HANDLE;
-      pushed_item = UINT32_MAX;
     }
-    if (pipelines.bind_material[variant]) {
-      const VkDescriptorSet material_set =
-          materials.descriptor_set(entry.material);
-      if (material_set != bound_material) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipeline->layout(), 1, 1, &material_set, 0,
-                                nullptr);
-        bound_material = material_set;
-      }
+    if (pipelines.bind_material[variant] && bound_material != entry.material) {
+      materials.Bind(encoder, entry.material);
+      bound_material = entry.material;
     }
     const DrawItem& item = view.draws[entry.item];
     const Mesh& mesh = meshes[static_cast<size_t>(item.mesh)];
     if (&mesh != bound_mesh) {
-      mesh.Bind(cmd);
+      mesh.Bind(encoder);
       bound_mesh = &mesh;
     }
-    if (entry.item != pushed_item) {
+    if (entry.item != set_item) {
       const DrawConstants constants{.model = item.transform};
-      vkCmdPushConstants(cmd, pipeline->layout(),
-                         kDrawConstantsRange.stageFlags, 0, sizeof(constants),
-                         &constants);
-      pushed_item = entry.item;
+      [encoder setVertexBytes:&constants
+                       length:sizeof(constants)
+                      atIndex:kBufferDraw];
+      set_item = entry.item;
     }
-    Mesh::DrawRange(cmd, entry.first_index, entry.index_count);
+    mesh.DrawRange(encoder, entry.first_index, entry.index_count);
     if (stats != nullptr) {
       ++stats->draw_calls;
       stats->triangles += entry.index_count / 3;

@@ -8,10 +8,10 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
-// A CPU copy of the shading math in shaders/pbr.glsl, shaders/sanitize.glsl
-// and shaders/environment.glsl (ImportanceSampleGgx), for tests that sweep
-// it over every legal input and check that it stays finite. Functions have
-// the GLSL names and the same expressions, line for line: keep the two in
+// A CPU copy of the shading math in shaders/pbr.h, shaders/sanitize.h and
+// shaders/environment.h (ImportanceSampleGgx), for tests that sweep it over
+// every legal input and check that it stays finite. Functions have the
+// shader names and the same expressions, line for line: keep the two in
 // sync. Not used for rendering.
 namespace blue::render::brdf_reference {
 
@@ -20,7 +20,7 @@ inline constexpr float kMinPerceptualRoughness = 0.045f;
 inline constexpr float kDielectricF0 = 0.04f;
 inline constexpr float kMaxSceneRadiance = 4096.0f;
 
-// sanitize.glsl: NaN -> 0, then clamped to [0, max_value].
+// sanitize.h: NaN -> 0, then clamped to [0, max_value].
 inline float SanitizeColor(float value, float max_value) {
   return std::isnan(value) ? 0.0f : std::clamp(value, 0.0f, max_value);
 }
@@ -134,7 +134,7 @@ inline glm::vec3 AmbientWeights(const Surface& s, const glm::vec2& lut) {
 // off): tests pass one that returns 1 + ulp for equal operands.
 using Divide = float (*)(float numerator, float denominator);
 
-// environment.glsl: a GGX half vector around +Z for the uniform sample `xi`.
+// environment.h: a GGX half vector around +Z for the uniform sample `xi`.
 inline glm::vec3 ImportanceSampleGgx(const glm::vec2& xi, float alpha,
                                      Divide quotient) {
   const float phi = 2.0f * kPi * xi.x;

@@ -42,8 +42,8 @@ inline constexpr size_t kMaterialVariantCount = 4;
 // Returns the variant `desc` is drawn with.
 [[nodiscard]] MaterialVariant VariantOf(const material::MaterialDesc& desc);
 
-// Must match MaterialParams of the mesh fragment shader (float4 / uint4
-// members, so the C++ and MSL layouts agree without padding rules).
+// Must match MaterialParams in shaders/material.h (float4 / uint4 members,
+// so the C++ and MSL layouts agree without padding rules).
 struct MaterialParams {
   glm::vec4 base_color;  // linear RGBA factor
   glm::vec4 emissive;    // rgb: emissive * emissive_strength
@@ -55,8 +55,7 @@ struct MaterialParams {
   glm::uvec4 options;
 };
 
-// MaterialParams::options.y bits; must match the mesh shaders' material
-// header.
+// MaterialParams::options.y bits; must match shaders/material.h.
 inline constexpr uint32_t kMaterialFlagNormalRg = 1;
 inline constexpr uint32_t kMaterialFlagOcclusionInMetallicRoughness = 2;
 

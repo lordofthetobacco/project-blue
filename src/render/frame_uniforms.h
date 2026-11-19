@@ -15,15 +15,15 @@
 namespace blue::render {
 
 // One point light as the shaders read it. Must match GpuPointLight in
-// shaders/common.glsl (std140).
+// shaders/common.h (identical layout).
 struct GpuPointLight {
   // xyz: world position, w: 1 / range^2, or 0 for an unlimited range.
   glm::vec4 position_inverse_range_sq;
   glm::vec4 radiance;  // rgb: color * intensity, w: unused
 };
 
-// Must match FrameUniforms in shaders/common.glsl (std140; offsets are
-// asserted in the .cc).
+// Must match FrameUniforms in shaders/common.h (identical layout; offsets
+// are asserted in the .cc).
 struct FrameUniforms {
   glm::mat4 view_proj;
   glm::mat4 view;

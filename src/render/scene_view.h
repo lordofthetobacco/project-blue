@@ -125,7 +125,7 @@ enum class Tonemapper : int32_t {
 struct PostSettings {
   // Exposure in stops: the HDR image is scaled by 2^exposure_ev before
   // tonemapping. At 0 every tonemapper keeps mid grey (0.18) where it was
-  // before the HDR pipeline (shaders/tonemap.frag).
+  // before the HDR pipeline (shaders/tonemap.frag.metal).
   float exposure_ev = 0.0f;
   Tonemapper tonemapper = Tonemapper::kAcesFitted;
 
@@ -151,7 +151,7 @@ struct SceneView {
   // Culled against the camera frustum each frame (lights with a range);
   // at most kMaxPointLights of the visible ones are shaded.
   std::span<const PointLight> point_lights;
-  // Flat ambient radiance, see AmbientLight() in shaders/pbr.glsl.
+  // Flat ambient radiance, see AmbientLight() in shaders/pbr.h.
   glm::vec3 ambient{0.03f};
   scene::SunLight sun;
   // Shadows are skipped entirely when this is false or `sun` casts none.
