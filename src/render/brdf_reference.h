@@ -59,7 +59,7 @@ inline glm::vec3 FresnelSchlick(const glm::vec3& f0, float v_dot_h) {
   return f + f0 * (1.0f - f);
 }
 
-// The parts of the GLSL Surface that the BRDF reads.
+// The parts of the shaders' Surface (shaders/pbr.h) that the BRDF reads.
 struct Surface {
   glm::vec3 normal;
   glm::vec3 view;
@@ -130,8 +130,9 @@ inline glm::vec3 AmbientWeights(const Surface& s, const glm::vec2& lut) {
   return {single_scatter.x, (multi_scatter * multi_energy).x, diffuse_weight.x};
 }
 
-// Division as the GPU may do it (x * rcp(y), which Vulkan lets be 2.5 ulp
-// off): tests pass one that returns 1 + ulp for equal operands.
+// Division as the GPU may do it (x * rcp(y), which the Metal Shading
+// Language lets be 2.5 ulp off): tests pass one that returns 1 + ulp for
+// equal operands.
 using Divide = float (*)(float numerator, float denominator);
 
 // environment.h: a GGX half vector around +Z for the uniform sample `xi`.

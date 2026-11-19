@@ -1,8 +1,12 @@
-#version 450
+#include <metal_stdlib>
 
-#include "common.glsl"
-#include "reticle.glsl"
-#include "sanitize.glsl"
+#include "bindings.h"
+
+using namespace metal;
+
+#include "common.h"
+#include "reticle.h"
+#include "sanitize.h"
 
 // A collimated (reflex) sight: the dot is an image at infinity along the
 // optic axis, so whether a pixel shows it depends only on the direction from
@@ -11,22 +15,19 @@
 // slides across the lens yet stays on the same distant point, and once the
 // axis direction falls outside the window there is no fragment to light.
 
-layout(location = 0) in vec2 inLensPosition;
-layout(location = 1) in vec3 inWorldPosition;
-
-layout(location = 0) out vec4 outColor;
-
-void main()
+fragment float4 FragmentMain(ReticleVaryings varyings [[stage_in]],
+                             constant FrameUniforms& frame [[buffer(kBufferFrame)]],
+                             constant ReticleConstants& sight [[buffer(kBufferPass)]])
 {
-    const float lensRadius = length(inLensPosition);
+    const float lensRadius = length(varyings.lensPosition);
     const float rimWidth = max(fwidth(lensRadius), 1.0e-6);
-    const vec3 direction = normalize(inWorldPosition - frame.cameraPosition.xyz);
+    const float3 direction = normalize(varyings.worldPosition - frame.cameraPosition.xyz);
     // Angle one pixel spans, from how fast the direction changes on screen.
     const float pixelAngle = max(length(fwidth(direction)), 1.0e-7);
 
     // Antialiased rim of the window; zero outside the disc. No discard: the
-    // pass is additive, so black adds nothing, and discard would need the
-    // demote-to-helper device feature under this SPIR-V target.
+    // pass is additive, so black adds nothing, and a fragment shader that
+    // can discard keeps the tile GPU from removing hidden surfaces early.
     const float window = 1.0 - smoothstep(1.0 - rimWidth, 1.0, lensRadius);
 
     // Angle to the axis; the chord form stays accurate for tiny angles where
@@ -37,5 +38,5 @@ void main()
         1.0 - smoothstep(radius - 0.5 * pixelAngle, radius + 0.5 * pixelAngle, angle);
 
     // Additive: alpha is ignored by the blend.
-    outColor = vec4(SanitizeRadiance((sight.dotColor.rgb * dotMask + sight.tint.rgb) * window), 0.0);
+    return float4(SanitizeRadiance((sight.dotColor.rgb * dotMask + sight.tint.rgb) * window), 0.0);
 }

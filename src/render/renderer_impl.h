@@ -33,6 +33,7 @@
 #include "render/passes/mesh_pass.h"
 #include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
+#include "render/passes/reticle_pass.h"
 #include "render/passes/shadow_pass.h"
 #include "render/passes/skybox_pass.h"
 #include "render/passes/ssao_pass.h"
@@ -51,43 +52,61 @@
 //
 // How a frame is built
 // --------------------
-// RendererImpl::RecordCommands() is the wiring: it records the passes in
-// order into the frame's one command buffer, each wrapped in a GPU timer
-// scope (Stage 5b of the Metal port brings back the reticle pass):
+// RendererImpl::DrawFrameTo() waits for the frame slot's previous command
+// buffer, collects its GPU times, writes the frame's uniforms and calls
+// RecordCommands(), the wiring: it records the passes in order into the
+// frame's one command buffer, each between GpuTimer::BeginScope() and
+// EndScope() of its GpuScope. Every pass opens its own render encoders
+// (blit encoders for copies) through render/encoders.h:
 //
-//   shadow cascades      ShadowPass        (sun depth, 4 layers)
+//   shadow cascades      ShadowPass        sun depth, one encoder per
+//                                          cascade layer (4)
 //   depth pre-pass       DepthPrepass      draw list -> depth
-//   ssao                 SsaoPass          depth -> ssao (half res, blurred)
-//   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
-//                        SkyboxPass, ReticlePass -> EndScenePass
-//   bloom                BloomPass         hdr -> bloom mip chain
+//   ssao                 SsaoPass          depth -> ssao, half res:
+//                                          occlusion + two blur encoders
+//   scene (HDR)          BeginScenePass()  one encoder shared by MeshPass
+//                                          (depth Equal), SkyboxPass and
+//                                          ReticlePass -> EndScenePass()
+//   bloom                BloomPass         hdr -> bloom mips, an encoder per
+//                                          down- and up-sample step
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
 //   overlay              OverlayPass       debug lines + selection outline
 //                                          -> ldr (editor; skipped if empty)
 //   present              PresentPass       ldr -> drawable (FXAA), or ->
-//                                          the editor viewport image
-//   ui                   RecordUiPass      ImGui on the drawable
+//                                          the editor viewport image (plus
+//                                          a blit per viewport readback)
+//   ui                   RecordUiPass()    ImGui on the drawable
 //
 // The visible submeshes are culled and sorted once per frame (DrawList) and
 // shared by the depth pre-pass and the mesh pass. Disabled effects
-// (SceneView::post) are skipped entirely.
+// (SceneView::post) are skipped entirely; with SSAO off its target is
+// cleared to white once, outside any scope.
 //
 // A pass is a class (or a pair of functions) in src/render/passes/ with its
 // own shaders. It gets the shared state it needs in its constructor
 // (MetalContext, ShaderPrograms for hot-reloadable pipelines, ...) and
-// records with a FrameContext, opening its encoders through
-// render/encoders.h. To add one:
-//   1. Write passes/<name>_pass.{h,mm} and its shaders/<name>.*.metal.
-//   2. Add a GpuScope (render/gpu_scope.h) and a line in RecordCommands().
-//   3. Add the sources to CMakeLists.txt. Window-sized images belong in
-//      RenderTargets.
+// records with a FrameContext. To add one:
+//   1. Write passes/<name>_pass.{h,mm} and its shaders/<name>.vert.metal /
+//      <name>.frag.metal (shared declarations in shaders/<name>.h). A pass
+//      that runs one fragment shader over a whole target uses a
+//      FullscreenPass: textures at kTextureInput0 + n with the sampler at
+//      kSamplerInput (SetInputs()), constants at kBufferPass, vertex shader
+//      shaders/fullscreen.vert.metal. Every index comes from
+//      shaders/bindings.h; per-pass constants are a struct mirrored in C++
+//      with a static_assert on its size.
+//   2. Open encoders only through render/encoders.h (BeginRenderPass(),
+//      BeginBlit()), so that they are labelled and timed.
+//   3. Add a GpuScope (render/gpu_scope.h) and a timed(...) line in
+//      RecordCommands().
+//   4. Add the .mm to the blue_render list in CMakeLists.txt. Window-sized
+//      images belong in RenderTargets (re-bound in BindTargets()).
 // There are no image layouts, barriers or descriptor sets: Metal orders the
 // encoders of the single queue and tracks the hazards between them, and
-// passes bind their inputs on their encoders (indices in shaders/bindings.h).
-// The window's drawable is acquired as late as possible, just before the
-// first pass that renders to it; when none is available the passes that
-// need it are skipped and the frame is still committed. The editor viewport
-// image is RGBA8Unorm_sRGB, the same encoding as the drawable.
+// passes bind their inputs on their encoders. The window's drawable is
+// acquired as late as possible, just before the first pass that renders to
+// it; when none is available the passes that need it are skipped and the
+// frame is still committed. The editor viewport image is RGBA8Unorm_sRGB,
+// the same encoding as the drawable.
 
 namespace blue::render {
 
@@ -200,7 +219,7 @@ struct RendererImpl {
   SsaoPass ssao_pass_;
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
-  // TODO(metal-stage5): ReticlePass reticle_pass_.
+  ReticlePass reticle_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   OverlayPass overlay_pass_;

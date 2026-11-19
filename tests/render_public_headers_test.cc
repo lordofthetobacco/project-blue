@@ -1,6 +1,8 @@
-// Includes every public renderer header from plain C++. Code outside
-// src/render sees only these headers, so none of them may name the GPU API:
-// the build fails here if one of them pulls Vulkan in.
+// Includes every public renderer header from plain C++ (this file is not
+// Objective-C++). Code outside src/render sees only these headers, so none of
+// them may name the GPU API: the build fails here if one of them pulls Metal
+// in (render/metal_types.h stops a plain C++ compile with an #error, and
+// <Metal/Metal.h> itself does not compile as C++).
 
 #include <doctest/doctest.h>
 
@@ -15,8 +17,8 @@
 #include "render/scene_view.h"
 #include "render/texture_types.h"
 
-#if defined(VK_VERSION_1_0)
-#error "A public renderer header includes Vulkan"
+#if defined(MTL_EXTERN)  // <Metal/MTLDefines.h>
+#error "A public renderer header includes Metal"
 #endif
 
 namespace blue::core {

@@ -49,7 +49,7 @@ blue_target_defaults(blue_core)
 target_link_libraries(blue_core PUBLIC SDL3::SDL3-static)
 
 # Model Context Protocol server (Streamable HTTP on loopback, JSON-RPC, own JSON
-# type) used by the editor. Plain sockets; no editor, ImGui or Vulkan code.
+# type) used by the editor. Plain sockets; no editor, ImGui or Metal code.
 add_library(blue_mcp STATIC
     src/mcp/http.cc
     src/mcp/json.cc
@@ -394,6 +394,7 @@ add_library(blue_render STATIC
     src/render/passes/mesh_pass.mm
     src/render/passes/overlay_pass.mm
     src/render/passes/present_pass.mm
+    src/render/passes/reticle_pass.mm
     src/render/passes/scene_pass.mm
     src/render/passes/shadow_pass.mm
     src/render/passes/skybox_pass.mm

@@ -2,9 +2,8 @@
 // <metal_stdlib>, "bindings.h" and the using-directive; it includes common.h
 // itself. Helpers take `thread const FrameResources&` (common.h).
 //
-// The one coordinate difference from the Vulkan version: Metal's texture
-// origin is the top-left corner while light-space NDC y points up, so the
-// shadow-map v is 0.5 - 0.5 * y (the shadow pass renders with a plain
+// Metal's texture origin is the top-left corner while light-space NDC y
+// points up, so the shadow-map v is 0.5 - 0.5 * y (the shadow pass renders with a plain
 // viewport and unchanged matrices).
 #ifndef BLUE_SHADERS_SHADOWS_H_
 #define BLUE_SHADERS_SHADOWS_H_

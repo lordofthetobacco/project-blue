@@ -37,7 +37,7 @@ namespace blue::lighting {
 
 // Nine SH coefficients (bands 0..2) of irradiance, RGB each, with the cosine
 // lobe convolution and the basis constants folded in, so that the
-// irradiance E(n) for unit normal n is (glsl):
+// irradiance E(n) for unit normal n is (as in shaders/pbr.h):
 //
 //   E = c[0]
 //     + c[1] * n.y + c[2] * n.z + c[3] * n.x

@@ -24,9 +24,9 @@ static inline float3 RotateY(float3 v, float angle)
 }
 
 // Returns the world direction of texel coordinate `uv` (0..1, top-left
-// origin) on cube face `face` (+X, -X, +Y, -Y, +Z, -Z), following the cube
-// map face selection rules, which Metal and Vulkan share (same face order,
-// same orientation of each face).
+// origin) on cube face `face` (+X, -X, +Y, -Y, +Z, -Z, Metal's slice order),
+// following the cube map face selection rules (the orientation of each face
+// in a texturecube).
 static inline float3 CubeFaceDirection(int face, float2 uv)
 {
     const float2 st = uv * 2.0 - 1.0;
@@ -66,9 +66,9 @@ static inline float2 Hammersley(uint i, uint count)
 // cos^2(theta) is clamped to [0, 1] before both square roots: for small
 // alpha the numerator and denominator round to the same float (alpha^4 * xi.y
 // is below half an ulp of 1), and GPU division (x * rcp(y) on some GPUs,
-// 2.5 ulp in Vulkan) can then return 1 + ulp, which made sinTheta =
-// sqrt(-tiny) = NaN and poisoned whole rows of the BRDF LUT. At alpha = 0 and
-// xi.y = 1 the quotient is 0 / 0.
+// 2.5 ulp in the Metal Shading Language) can then return 1 + ulp, which
+// made sinTheta = sqrt(-tiny) = NaN and poisoned whole rows of the BRDF
+// LUT. At alpha = 0 and xi.y = 1 the quotient is 0 / 0.
 static inline float3 ImportanceSampleGgx(float2 xi, float alpha)
 {
     const float phi = 2.0 * kEnvPi * xi.x;

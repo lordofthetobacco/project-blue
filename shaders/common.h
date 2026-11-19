@@ -69,8 +69,8 @@ static_assert(sizeof(FrameUniforms) == 1904,
 struct FrameResources {
     constant FrameUniforms* frame;
     // Cascaded sun shadow map, one layer per cascade; sample_compare against
-    // the reference depth with shadowSampler. A 1x1 map at depth 1 (lit)
-    // until the shadow pass binds its own.
+    // the reference depth with shadowSampler. Only sampled while
+    // frame.shadowParams.x is set (render::ShadowPass renders it then).
     metal::depth2d_array<float> shadowMap;
     metal::sampler shadowSampler;
     // Prefiltered specular environment (GGX, roughness across mips).

@@ -66,11 +66,13 @@ RendererImpl::RendererImpl(const platform::Window& window,
       ssao_pass_(context_, shader_programs_, shader_dir_),
       mesh_pass_(context_, shader_programs_, shader_dir_, materials_, meshes_),
       skybox_pass_(context_, shader_programs_, shader_dir_, environment_),
+      reticle_pass_(context_, shader_programs_, shader_dir_),
       bloom_pass_(context_, shader_programs_, shader_dir_),
       tonemap_pass_(context_, shader_programs_, shader_dir_),
       overlay_pass_(context_, shader_programs_, shader_dir_, meshes_),
       present_pass_(context_, shader_programs_, shader_dir_,
-                    swapchain_.format()) {
+                    swapchain_.format()),
+      gpu_timer_(context_) {
   const MaterialId default_material = materials_.Create(DefaultMaterialDesc());
   if (default_material != kDefaultMaterial) {
     core::log::Fatal("The default material must be created first");
@@ -296,7 +298,7 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
 
     Frame& frame = frames_[frame_index_];
     WaitForFrame(frame);
-    gpu_timer_.Collect(frame.command_buffer);
+    gpu_timer_.Collect(frame_index_, frame.command_buffer);
     ++frame_serial_;
     materials_.BeginFrame(frame_serial_);
     DestroyRetired();
@@ -382,7 +384,7 @@ void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
     const id<MTLRenderCommandEncoder> encoder = BeginScenePass(ctx);
     mesh_pass_.Draw(ctx, encoder);
     skybox_pass_.Draw(ctx, encoder);
-    // TODO(metal-stage5): reticle_pass_.Draw(ctx, encoder).
+    reticle_pass_.Draw(ctx, encoder);
     EndScenePass(encoder);
   });
   if (ctx.view.post.bloom_enabled) {

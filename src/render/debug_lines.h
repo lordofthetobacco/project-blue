@@ -15,7 +15,7 @@ namespace blue::render {
 
 // One end of a debug line: world-space position and an RGBA8 colour (R in
 // the low byte) in display space, i.e. sRGB-encoded as it appears on screen.
-// Must match the vertex input of render::OverlayPass (shaders/line.vert).
+// Must match the vertex input of render::OverlayPass (shaders/line.vert.metal).
 struct LineVertex {
   glm::vec3 position{0.0f};
   uint32_t color = 0;

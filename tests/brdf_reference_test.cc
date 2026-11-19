@@ -60,7 +60,8 @@ float ExactDivide(float numerator, float denominator) {
 }
 
 // A GPU-like division (x * rcp(y)) whose x / x comes out two ulp above 1 for
-// x != 1, which Vulkan's 2.5 ulp OpFDiv precision allows; 1 / 1 stays exact.
+// x != 1, which the 2.5 ulp division precision of the Metal Shading Language
+// allows; 1 / 1 stays exact.
 // (One ulp would round back to 1 in the correctly rounded CPU sqrt; GPU sqrt
 // is approximate as well.)
 float GpuDivide(float numerator, float denominator) {

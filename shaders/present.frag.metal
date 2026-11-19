@@ -15,7 +15,7 @@ using namespace metal;
 // the position along that span, and a separate sub-pixel term for
 // single-pixel features. Implemented here from that description.
 
-// Must match PresentConstants in src/render/passes/present_pass.cc
+// Must match PresentConstants in src/render/passes/present_pass.mm
 // (int32_t, int32_t, float, float: 16 bytes).
 struct PresentConstants {
     int decodeSrgb;     // 1: the target encodes, so output linear values

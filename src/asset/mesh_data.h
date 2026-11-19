@@ -16,7 +16,7 @@ namespace blue::asset {
 //
 // `uv0` and `uv1` are two texture coordinate sets; a material picks the set
 // each texture slot samples with. Meshes without a second set copy uv0 into
-// uv1. Both follow the glTF / Vulkan convention: (0, 0) is the top-left corner
+// uv1. Both follow the glTF / Metal convention: (0, 0) is the top-left corner
 // of the image and v grows downwards. The tangent frame belongs to uv0:
 // `tangent.xyz` is a unit vector orthogonal to `normal` pointing along +u0;
 // `tangent.w` is the handedness (+1 or -1) so that the bitangent (+v0

@@ -27,7 +27,7 @@ struct Aabb {
 [[nodiscard]] Aabb TransformAabb(const Aabb& local, const glm::mat4& transform);
 
 // The visible volume of a clip-space matrix, as inward-facing planes. Works
-// for perspective and orthographic projections with Vulkan clip conventions
+// for perspective and orthographic projections with Metal clip conventions
 // (x, y in [-w, w], z in [0, w]), including reversed-Z and infinite far
 // planes, whose degenerate far plane is simply dropped. Copyable.
 class Frustum {

@@ -4,11 +4,11 @@ using namespace metal;
 
 // One triangle that covers the whole viewport (render::FullscreenPass). No
 // vertex buffer: vertex i is at (-1, 1), (3, 1), (-1, -3). Metal's clip y
-// points up (clip y = 1 is the top row, unlike Vulkan), so y is flipped here
-// to keep uv (0, 0) at the top-left corner of the target, where texture
-// reads and writes start; the fullscreen fragment shaders' uv logic is the
-// same as under Vulkan. The flip mirrors the triangle's winding, which does
-// not matter because fullscreen pipelines cull nothing.
+// points up (clip y = 1 is the top row of the target) while uv, like texture
+// coordinates, starts at the top-left corner, so clip y = 1 - 2 uv.y: uv
+// (0, 0) is the top-left of the target, where texture reads and writes
+// start. The flip mirrors the triangle's winding, which does not matter
+// because fullscreen pipelines cull nothing.
 
 // Must match the varyings of every fullscreen fragment shader.
 struct FullscreenVaryings {

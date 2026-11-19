@@ -54,9 +54,9 @@ enum SamplerIndex {
 
 // Function constants: what a pipeline variant is specialized with.
 enum FunctionConstantIndex {
-  kConstantAlphaMask = 0,         // mesh.frag: alpha-tested material.
-  kConstantDoubleSided = 1,       // mesh.frag: flip back-face normals.
-  kConstantSelectionVisible = 2,  // selection_mask.frag: depth-tested copy.
+  kConstantAlphaMask = 0,         // mesh.frag.metal: alpha-tested material.
+  kConstantDoubleSided = 1,       // mesh.frag.metal: flip back-face normals.
+  kConstantSelectionVisible = 2,  // selection_mask.frag.metal: depth tested.
 };
 
 // Vertex attribute indices of asset::Vertex (and of LineVertex, which has a

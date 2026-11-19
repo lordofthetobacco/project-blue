@@ -54,7 +54,7 @@ static inline float FilterRoughness(float perceptualRoughness, float3 normal)
     const float3 dv = metal::dfdy(normal);
     const float variance = kSpecularAaVariance * (metal::dot(du, du) + metal::dot(dv, dv));
     const float alpha = perceptualRoughness * perceptualRoughness;
-    // `kernel` in the GLSL; a reserved word in MSL.
+    // Not `kernel`: a reserved word in MSL.
     const float filterKernel = metal::min(2.0 * variance, kSpecularAaThreshold);
     const float filteredAlpha = metal::clamp(alpha * alpha + filterKernel, 0.0, 1.0);
     return metal::sqrt(metal::sqrt(filteredAlpha));
