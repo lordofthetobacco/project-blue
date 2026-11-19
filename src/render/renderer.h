@@ -204,8 +204,8 @@ class Renderer {
 
   // Called by ui::ImGuiLayer only: starts / stops ImGui's renderer backend.
   // InitImGuiRenderer() needs a current ImGui context whose platform backend is
-  // already initialised. ShutdownImGuiRenderer() frees every ImGui texture
-  // (ui_texture(), viewport().texture); call it once the GPU is idle
+  // already initialised. ShutdownImGuiRenderer() destroys the backend's own
+  // objects (font atlas, pipelines); call it once the GPU is idle
   // (WaitIdle()).
   void InitImGuiRenderer() const;
   void ShutdownImGuiRenderer() const;

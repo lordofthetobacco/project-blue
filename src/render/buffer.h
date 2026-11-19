@@ -1,61 +1,55 @@
 #ifndef BLUE_RENDER_BUFFER_H_
 #define BLUE_RENDER_BUFFER_H_
 
-#include <vk_mem_alloc.h>
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <cstddef>
 #include <span>
 
-#include "render/vulkan_context.h"
+#include "render/metal_context.h"
 
 namespace blue::render {
 
-// GPU buffer backed by a VMA allocation. Move-only; a moved-from buffer is
-// empty. Not thread-safe.
+// A Metal buffer. Move-only; a moved-from buffer is empty (nil handle, size
+// 0, no mapping). Not thread-safe.
 class Buffer {
  public:
   enum class Access {
-    kGpuOnly,             // Device-local, filled through a staging upload.
-    kCpuSequentialWrite,  // Host-visible, persistently mapped, written often.
-    kCpuRead,             // Host-visible, persistently mapped, read back by
-                          // the CPU (call InvalidateForRead() first).
+    kGpuOnly,             // Private storage, filled through a staging upload.
+    kCpuSequentialWrite,  // Shared, write-combined: written often by the CPU,
+                          // never read back.
+    kCpuRead,             // Shared, cached: written by the GPU, read back by
+                          // the CPU once that work has completed.
   };
 
   Buffer() = default;
-  Buffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags usage,
-         Access access);
-  ~Buffer();
+  // Creates a buffer of `size` bytes, which must not be 0. `label` names it
+  // in GPU captures; nullptr gives a generic name.
+  Buffer(const MetalContext& context, size_t size, Access access,
+         const char* label = nullptr);
 
   Buffer(const Buffer&) = delete;
   Buffer& operator=(const Buffer&) = delete;
-  Buffer(Buffer&& other) noexcept;
-  Buffer& operator=(Buffer&& other) noexcept;
+  Buffer(Buffer&&) = default;
+  Buffer& operator=(Buffer&&) = default;
 
-  [[nodiscard]] VkBuffer handle() const { return buffer_; }
-  [[nodiscard]] VkDeviceSize size() const { return size_; }
-  // Returns the persistent mapping, or nullptr unless the buffer was created
-  // with Access::kCpuSequentialWrite or kCpuRead.
-  [[nodiscard]] void* mapped() const { return mapped_; }
-  // Makes GPU writes visible through mapped() (needed for non-coherent
-  // memory) once the writing work has finished. kCpuRead buffers only.
-  void InvalidateForRead() const;
+  [[nodiscard]] id<MTLBuffer> handle() const { return buffer_; }
+  [[nodiscard]] size_t size() const { return buffer_.length; }
+  // Returns the CPU address of the contents (always mapped, and coherent:
+  // memory is shared), or nullptr for Access::kGpuOnly.
+  [[nodiscard]] void* mapped() const { return buffer_.contents; }
 
  private:
-  void Release();
-
-  VmaAllocator allocator_ = VK_NULL_HANDLE;
-  VkBuffer buffer_ = VK_NULL_HANDLE;
-  VmaAllocation allocation_ = VK_NULL_HANDLE;
-  VkDeviceSize size_ = 0;
-  void* mapped_ = nullptr;
+  // Size and mapping are read from the buffer itself, so that the defaulted
+  // moves leave the moved-from buffer empty.
+  id<MTLBuffer> buffer_ = nil;
 };
 
-// Creates a device-local buffer and fills it with `data` through a staging
-// buffer. Blocks until the upload has finished.
-[[nodiscard]] Buffer CreateGpuBuffer(const VulkanContext& context,
+// Creates a private (kGpuOnly) buffer and fills it with `data`, which must not
+// be empty, through a staging buffer. Blocks until the upload has finished.
+[[nodiscard]] Buffer CreateGpuBuffer(const MetalContext& context,
                                      std::span<const std::byte> data,
-                                     VkBufferUsageFlags usage);
+                                     const char* label = nullptr);
 
 }  // namespace blue::render
 

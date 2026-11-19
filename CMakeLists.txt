@@ -1,18 +1,32 @@
 cmake_minimum_required(VERSION 3.25)
 
+# Set before project(). Metal 3 with MSL 3.2 (MTLMathMode, MTLLanguageVersion3_2) needs
+# macOS 15; the floating-point std::from_chars the engine parses numbers with needs 26.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
+
 project(project-blue
     VERSION 0.1.0
     DESCRIPTION "Lightweight extraction shooter"
     LANGUAGES C CXX)
 
+if(NOT APPLE)
+    message(FATAL_ERROR
+        "The metal branch renders with Apple's Metal and builds on macOS only; "
+        "Windows builds stay on main.")
+endif()
+
+# The Metal backend is Objective-C++ (ARC, see cmake/ProjectOptions.cmake).
+enable_language(OBJCXX)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_OBJCXX_STANDARD 20)
+set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+set(CMAKE_OBJCXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
-find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
 
 # ProjectOptions first: cmake/Dependencies.cmake uses its MSVC flag helpers.
 include(ProjectOptions)
@@ -298,43 +312,6 @@ blue_target_defaults(blue_weapon)
 
 target_link_libraries(blue_weapon PUBLIC blue_physics blue_camera blue_animation blue_prefab glm::glm)
 
-# shaderc for blue_shader. On Windows it is the SDK's DLL (shaderc_sharedd.dll in Debug,
-# shaderc_shared.dll otherwise): the static shaderc_combined libraries are built with C++
-# exceptions and would put their std::exception family definitions next to ours
-# (_HAS_EXCEPTIONS=0, a different layout) into one link, where the linker keeps one copy
-# depending on link order - the ODR clash that crashed assimp (see cmake/Dependencies.cmake).
-# Only shaderc's C API crosses the DLL boundary (shaderc.hpp is a header-only wrapper over
-# it; include results are allocated and freed on our side), so the DLL's CRT does not matter.
-# Executables linking blue_shader get the DLL copied next to them (blue_copy_runtime_dlls).
-# Elsewhere the static shaderc_combined is kept as before.
-if(WIN32)
-    cmake_path(GET Vulkan_INCLUDE_DIR PARENT_PATH blue_vulkan_sdk_dir)
-    set(blue_shaderc_files
-        "${blue_vulkan_sdk_dir}/Lib/shaderc_shared.lib"
-        "${blue_vulkan_sdk_dir}/Lib/shaderc_sharedd.lib"
-        "${blue_vulkan_sdk_dir}/Bin/shaderc_shared.dll"
-        "${blue_vulkan_sdk_dir}/Bin/shaderc_sharedd.dll")
-    foreach(file IN LISTS blue_shaderc_files)
-        if(NOT EXISTS "${file}")
-            message(FATAL_ERROR "Vulkan SDK file missing: ${file}")
-        endif()
-    endforeach()
-    add_library(blue_shaderc SHARED IMPORTED)
-    set_target_properties(blue_shaderc PROPERTIES
-        IMPORTED_CONFIGURATIONS "DEBUG;RELEASE"
-        IMPORTED_IMPLIB_DEBUG "${blue_vulkan_sdk_dir}/Lib/shaderc_sharedd.lib"
-        IMPORTED_LOCATION_DEBUG "${blue_vulkan_sdk_dir}/Bin/shaderc_sharedd.dll"
-        IMPORTED_IMPLIB_RELEASE "${blue_vulkan_sdk_dir}/Lib/shaderc_shared.lib"
-        IMPORTED_LOCATION_RELEASE "${blue_vulkan_sdk_dir}/Bin/shaderc_shared.dll"
-        MAP_IMPORTED_CONFIG_RELWITHDEBINFO RELEASE
-        MAP_IMPORTED_CONFIG_MINSIZEREL RELEASE
-        INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIR}"
-        INTERFACE_COMPILE_DEFINITIONS SHADERC_SHAREDLIB)
-    set(blue_shaderc_target blue_shaderc)
-else()
-    set(blue_shaderc_target Vulkan::shaderc_combined)
-endif()
-
 # Copies the DLLs `target` loads at run time next to it (Windows only; elsewhere they are
 # static or found by the loader).
 function(blue_copy_runtime_dlls target)
@@ -346,10 +323,12 @@ function(blue_copy_runtime_dlls target)
     endif()
 endfunction()
 
-# Runtime GLSL -> SPIR-V compilation (shaderc) and source change detection. No Vulkan device
-# needed. shaderc stays private: no shaderc type appears in the public headers.
+# Runtime Metal Shading Language compilation (include flattening, then the system's Metal
+# compiler) and source change detection. Metal stays private: no Objective-C type appears
+# in the public headers.
 add_library(blue_shader STATIC
-    src/shader/shader_compiler.cc
+    src/shader/shader_compiler.mm
+    src/shader/shader_preprocessor.cc
     src/shader/shader_watcher.cc
 )
 
@@ -363,10 +342,10 @@ blue_target_defaults(blue_shader)
 
 target_link_libraries(blue_shader
     PUBLIC blue_core
-    PRIVATE ${blue_shaderc_target}
+    PRIVATE "-framework Metal" "-framework Foundation"
 )
 
-# SDL3 window with a Vulkan surface; shared by the game and the editor.
+# SDL3 window with a Metal layer; shared by the game and the editor.
 add_library(blue_window STATIC
     src/platform/window.cc
 )
@@ -377,49 +356,39 @@ blue_target_defaults(blue_window)
 
 target_link_libraries(blue_window PUBLIC blue_core SDL3::SDL3-static)
 
-# The Vulkan renderer: device, swapchain, render targets, the frame's passes, meshes,
-# materials and textures. Linked by the game and the editor; draws to the swapchain or,
+# The Metal renderer: device, swapchain, render targets, the frame's passes, meshes,
+# materials and textures. Linked by the game and the editor; draws to the window's layer or,
 # for the editor viewport, to an offscreen image.
+#
+# Style exception: the project rules ask for .h/.cc pairs and no language extensions. Metal
+# is an Objective-C API, so the files that call it are Objective-C++ (.mm, ARC), and the
+# internal headers that name Metal types (they include render/metal_types.h) can only be
+# included from .mm files. The headers other targets include stay pure C++; see
+# tests/render_public_headers_test.cc.
 add_library(blue_render STATIC
-    src/render/vulkan_context.cc
-    src/render/swapchain.cc
-    src/render/barriers.cc
+    src/render/buffer.mm
     src/render/debug_lines.cc
-    src/render/draw_list.cc
-    src/render/environment.cc
-    src/render/buffer.cc
-    src/render/frame_globals.cc
+    src/render/encoders.mm
     src/render/frame_uniforms.cc
-    src/render/fullscreen_pass.cc
-    src/render/image.cc
-    src/render/material_system.cc
-    src/render/pipeline.cc
-    src/render/render_targets.cc
-    src/render/samplers.cc
-    src/render/shader_programs.cc
     src/render/gpu_scope.cc
-    src/render/gpu_timer.cc
-    src/render/mesh.cc
-    src/render/renderer.cc
-    src/render/texture_cache.cc
+    src/render/gpu_timer.mm
+    src/render/image.mm
+    src/render/material_system.mm
+    src/render/mesh.mm
+    src/render/metal_check.mm
+    src/render/metal_context.mm
+    src/render/render_targets.mm
+    src/render/renderer.mm
+    src/render/samplers.mm
+    src/render/swapchain.mm
+    src/render/texture_cache.mm
     src/render/texture_types.cc
-    src/render/passes/bloom_pass.cc
-    src/render/passes/depth_prepass.cc
-    src/render/passes/mesh_pass.cc
-    src/render/passes/overlay_pass.cc
-    src/render/passes/present_pass.cc
-    src/render/passes/reticle_pass.cc
-    src/render/passes/scene_pass.cc
-    src/render/passes/shadow_pass.cc
-    src/render/passes/ssao_pass.cc
-    src/render/passes/skybox_pass.cc
-    src/render/passes/tonemap_pass.cc
-    src/render/passes/ui_pass.cc
-    src/render/vma.cc
-    src/render/vk_check.cc
+    src/render/passes/ui_pass.mm
 )
 
 target_include_directories(blue_render PUBLIC src)
+# For "shaders/bindings.h", the indices shared with the Metal shaders.
+target_include_directories(blue_render PRIVATE ${CMAKE_SOURCE_DIR})
 
 blue_target_defaults(blue_render)
 
@@ -434,14 +403,16 @@ target_link_libraries(blue_render PUBLIC
     blue_lighting
     blue_camera
     blue_shader
-    Vulkan::Vulkan
     SDL3::SDL3-static
     glm::glm
-    GPUOpen::VulkanMemoryAllocator
     imgui
+    "-framework Metal"
+    "-framework QuartzCore"
+    "-framework CoreGraphics"
+    "-framework Foundation"
 )
 
-# Dear ImGui on SDL3 + Vulkan (ui::ImGuiLayer); shared by the game overlay and the editor.
+# Dear ImGui on SDL3 + Metal (ui::ImGuiLayer); shared by the game overlay and the editor.
 add_library(blue_ui STATIC
     src/ui/imgui_layer.cc
 )
@@ -502,10 +473,8 @@ target_link_libraries(project-blue PRIVATE
     blue_world
     blue_prefab
     blue_shader
-    Vulkan::Vulkan
     SDL3::SDL3-static
     glm::glm
-    GPUOpen::VulkanMemoryAllocator
     imgui
 )
 

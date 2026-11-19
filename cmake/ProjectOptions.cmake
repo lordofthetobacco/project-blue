@@ -112,6 +112,10 @@ function(blue_target_defaults target)
         if(NOT ARG_ALLOW_EXCEPTIONS_AND_RTTI)
             target_compile_options(${target} PRIVATE -fno-exceptions -fno-rtti)
         endif()
+        # Objective-C++ (the Metal backend) is always ARC: Metal objects are plain strong
+        # members, with no manual retain / release.
+        target_compile_options(${target} PRIVATE
+            $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
         if(type STREQUAL "EXECUTABLE")
             if(APPLE)
                 # Apple's ld: drop unreferenced sections, debug info and local symbols.

@@ -1,48 +1,48 @@
 #ifndef BLUE_RENDER_GPU_TIMER_H_
 #define BLUE_RENDER_GPU_TIMER_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <array>
 #include <cstddef>
-#include <cstdint>
 #include <optional>
 
-#include "render/frame_config.h"
 #include "render/gpu_scope.h"
-#include "render/vulkan_context.h"
 
 namespace blue::render {
 
-// Measures GPU time of named scopes using timestamp queries. One query pair
-// per scope and frame in flight; results are read back once that frame's
-// fence has signaled. Not thread-safe.
+// Measures the GPU time of a frame and of named scopes in it. The frame total
+// comes from the GPUStartTime / GPUEndTime of the frame's command buffer,
+// read once it has completed. Per-scope times will come from counter samples
+// attached to the encoders a scope opens (render/encoders.h); until then
+// every scope but kTotal reads nullopt. Not thread-safe.
 class GpuTimer {
  public:
   static constexpr size_t kScopeCount = kGpuScopeCount;
 
-  explicit GpuTimer(const VulkanContext& context);
-  ~GpuTimer();
+  GpuTimer() = default;
 
   GpuTimer(const GpuTimer&) = delete;
   GpuTimer& operator=(const GpuTimer&) = delete;
 
-  // Reads back the results of `frame`. Call after the frame's fence was waited
-  // on, before recording it again.
-  void Collect(size_t frame);
-  // Resets the queries of `frame`; must be recorded before any Begin() or
-  // End() of that frame, outside of a rendering pass.
-  void BeginFrame(VkCommandBuffer cmd, size_t frame);
-  // Records the start timestamp of `scope` of `frame` into `cmd`.
-  void Begin(VkCommandBuffer cmd, size_t frame, GpuScope scope);
-  // Records the end timestamp of `scope` of `frame` into `cmd`. Every Begin()
-  // needs a matching End() in the same frame.
-  void End(VkCommandBuffer cmd, size_t frame, GpuScope scope);
+  // Reads the times of the frame recorded into `command_buffer`, which must
+  // have completed. Call after waiting for a frame slot's previous command
+  // buffer, before recording into the slot again.
+  void Collect(id<MTLCommandBuffer> command_buffer);
 
-  [[nodiscard]] bool is_supported() const { return pool_ != VK_NULL_HANDLE; }
+  // Starts / ends `scope` in the frame being recorded: the encoders opened in
+  // between count towards it. Every BeginScope() needs a matching EndScope()
+  // in the same frame.
+  void BeginScope(GpuScope scope);
+  void EndScope(GpuScope scope);
+  // Called by render/encoders.h for every encoder of a frame before it is
+  // created: attaches the sample buffer of the current scope.
+  void AttachSamples(MTLRenderPassDescriptor* descriptor);
+  void AttachSamples(MTLBlitPassDescriptor* descriptor);
+
   // Returns the most recent GPU time of `scope`, or nullopt before the first
   // result, when the scope did not run in the last collected frame, or when
-  // timestamps are unsupported.
+  // it cannot be measured.
   [[nodiscard]] std::optional<double> last_ms(GpuScope scope) const {
     return last_ms_[static_cast<size_t>(scope)];
   }
@@ -52,12 +52,6 @@ class GpuTimer {
   }
 
  private:
-  VkDevice device_ = VK_NULL_HANDLE;
-  VkQueryPool pool_ = VK_NULL_HANDLE;
-  double ms_per_tick_ = 0.0;
-  uint64_t valid_mask_ = 0;
-  // A scope is pending from its End() until its result is collected.
-  std::array<std::array<bool, kScopeCount>, kFramesInFlight> pending_{};
   std::array<std::optional<double>, kScopeCount> last_ms_;
 };
 

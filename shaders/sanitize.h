@@ -1,6 +1,6 @@
 // Guards against non-finite values (NaN / Inf) in colour and direction math,
 // shared by every pass that writes or reads HDR radiance. Included with
-// #include "sanitize.glsl"; safe to include more than once.
+// #include "sanitize.h" after <metal_stdlib>; safe to include more than once.
 //
 // One NaN or Inf pixel in the HDR scene image is enough to ruin a frame: the
 // bloom down-sample spreads it through ever smaller mips (Inf - Inf and
@@ -8,11 +8,15 @@
 // the tonemapper turns NaN into black. So the scene passes write finite
 // radiance only, and the post passes treat a broken input as black.
 //
-// isnan() is spelled out because GLSL leaves min / max / clamp undefined for
-// NaN operands (SPIR-V FMin / FMax / FClamp): some GPUs return the other
-// operand, others propagate the NaN.
-#ifndef BLUE_SHADERS_SANITIZE_GLSL_
-#define BLUE_SHADERS_SANITIZE_GLSL_
+// isnan() is spelled out because min / max / clamp are not guaranteed to
+// handle NaN operands the same way on every GPU: some return the other
+// operand, others propagate the NaN. The shader compiler runs with
+// MTLMathModeSafe, which keeps isnan() / isinf() from being folded away.
+//
+// Functions are qualified with metal:: so that the header does not depend on
+// the including file's `using namespace metal;`.
+#ifndef BLUE_SHADERS_SANITIZE_H_
+#define BLUE_SHADERS_SANITIZE_H_
 
 // Largest radiance (before exposure) a scene pass writes to the RGBA16F HDR
 // target. The analytic sun is ~3.3 (scene/default_lighting.h): a sunlit white
@@ -23,41 +27,41 @@
 // margin to the fp16 maximum (65504) keeps the bloom chain finite: its
 // up-sample adds every level onto mip 0, at most
 // render::RenderTargets::kMaxBloomLevels (6) of them.
-const float kMaxSceneRadiance = 4096.0;
+constant float kMaxSceneRadiance = 4096.0;
 // Largest finite value written to a half-float environment cube.
-const float kMaxHalfRadiance = 65000.0;
+constant float kMaxHalfRadiance = 65000.0;
 
 // Returns `color` with NaN components replaced by 0 and every component
 // clamped to [0, maxValue] (+Inf becomes maxValue, -Inf 0).
-vec3 SanitizeColor(vec3 color, float maxValue)
+static inline float3 SanitizeColor(float3 color, float maxValue)
 {
-    color = mix(color, vec3(0.0), isnan(color));
-    return clamp(color, vec3(0.0), vec3(maxValue));
+    color = metal::select(color, float3(0.0), metal::isnan(color));
+    return metal::clamp(color, float3(0.0), float3(maxValue));
 }
 
-vec2 SanitizeColor(vec2 color, float maxValue)
+static inline float2 SanitizeColor(float2 color, float maxValue)
 {
-    color = mix(color, vec2(0.0), isnan(color));
-    return clamp(color, vec2(0.0), vec2(maxValue));
+    color = metal::select(color, float2(0.0), metal::isnan(color));
+    return metal::clamp(color, float2(0.0), float2(maxValue));
 }
 
-float SanitizeColor(float value, float maxValue)
+static inline float SanitizeColor(float value, float maxValue)
 {
-    return isnan(value) ? 0.0 : clamp(value, 0.0, maxValue);
+    return metal::isnan(value) ? 0.0 : metal::clamp(value, 0.0, maxValue);
 }
 
 // Scene radiance as the HDR target may hold it.
-vec3 SanitizeRadiance(vec3 color)
+static inline float3 SanitizeRadiance(float3 color)
 {
     return SanitizeColor(color, kMaxSceneRadiance);
 }
 
 // Returns `v` normalized, or `fallback` (unit) when `v` is too short or not
-// finite to have a direction (normalize(vec3(0)) is NaN).
-vec3 SafeNormalize(vec3 v, vec3 fallback)
+// finite to have a direction (normalize(float3(0)) is NaN).
+static inline float3 SafeNormalize(float3 v, float3 fallback)
 {
-    const float lengthSq = dot(v, v);
-    return lengthSq > 1.0e-20 && !isinf(lengthSq) ? v * inversesqrt(lengthSq) : fallback;
+    const float lengthSq = metal::dot(v, v);
+    return lengthSq > 1.0e-20 && !metal::isinf(lengthSq) ? v * metal::rsqrt(lengthSq) : fallback;
 }
 
-#endif  // BLUE_SHADERS_SANITIZE_GLSL_
+#endif  // BLUE_SHADERS_SANITIZE_H_

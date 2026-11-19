@@ -1,7 +1,7 @@
 #ifndef BLUE_RENDER_MATERIAL_SYSTEM_H_
 #define BLUE_RENDER_MATERIAL_SYSTEM_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <array>
 #include <cstddef>
@@ -13,11 +13,11 @@
 #include <glm/vec4.hpp>
 
 #include "material/material.h"
-#include "render/buffer.h"
+#include "render/metal_context.h"
 #include "render/samplers.h"
 #include "render/scene_view.h"
 #include "render/texture_cache.h"
-#include "render/vulkan_context.h"
+#include "shaders/bindings.h"
 
 namespace blue::render {
 
@@ -42,7 +42,8 @@ inline constexpr size_t kMaterialVariantCount = 4;
 // Returns the variant `desc` is drawn with.
 [[nodiscard]] MaterialVariant VariantOf(const material::MaterialDesc& desc);
 
-// Must match MaterialParams in shaders/mesh.frag (std140).
+// Must match MaterialParams of the mesh fragment shader (float4 / uint4
+// members, so the C++ and MSL layouts agree without padding rules).
 struct MaterialParams {
   glm::vec4 base_color;  // linear RGBA factor
   glm::vec4 emissive;    // rgb: emissive * emissive_strength
@@ -54,7 +55,8 @@ struct MaterialParams {
   glm::uvec4 options;
 };
 
-// MaterialParams::options.y bits; must match shaders/material.glsl.
+// MaterialParams::options.y bits; must match the mesh shaders' material
+// header.
 inline constexpr uint32_t kMaterialFlagNormalRg = 1;
 inline constexpr uint32_t kMaterialFlagOcclusionInMetallicRoughness = 2;
 
@@ -62,23 +64,29 @@ inline constexpr uint32_t kMaterialFlagOcclusionInMetallicRoughness = 2;
 [[nodiscard]] MaterialParams MakeMaterialParams(
     const material::MaterialDesc& desc);
 
-// The renderer's materials: per material a descriptor set (set 1 of the mesh
-// pipelines: binding 0 MaterialParams, bindings 1-5 base colour,
-// metallic-roughness, normal, occlusion and emissive textures) and its
-// parameter buffer. Empty texture slots use TextureCache defaults.
+// The renderer's materials. Per material it keeps what Bind() hands the
+// fragment stage: its MaterialParams (bytes at kBufferMaterial) and the
+// textures of its five slots (kTextureBaseColor onwards, in
+// material::TextureSlot order). Empty texture slots use TextureCache
+// defaults.
 //
-// Updating a material gives it a fresh set + buffer and retires the old pair
-// until no frame in flight can still read it (see BeginFrame()); retired
-// pairs are reused, so editing a material every frame allocates nothing once
-// warm. Sets come from fixed-size pools, a new pool is added when one fills.
+// Nothing here is a per-frame GPU allocation: setFragmentBytes copies the
+// parameters into the command buffer when Bind() is encoded, so Update()
+// and Release() take effect for frames recorded afterwards without
+// disturbing frames in flight. Textures a material drops (Release()) stay
+// alive while a frame in flight uses them because a command buffer retains
+// the textures its encoders reference until it completes (the renderer
+// creates retained-reference command buffers), and the renderer's retire
+// list keeps the released Images for kFramesInFlight frames besides.
 //
-// Borrows `context`, `textures` and `samplers`, which must outlive it.
-// Neither copyable nor movable. Not thread-safe.
+// Borrows `textures` and `samplers`, which must outlive it. Neither
+// copyable nor movable. Not thread-safe.
 class MaterialSystem {
  public:
-  MaterialSystem(const VulkanContext& context, TextureCache& textures,
+  // `context` is unused under Metal (no GPU objects are created here); it
+  // keeps the construction of every render object alike.
+  MaterialSystem(const MetalContext& context, const TextureCache& textures,
                  const Samplers& samplers);
-  ~MaterialSystem();
 
   MaterialSystem(const MaterialSystem&) = delete;
   MaterialSystem& operator=(const MaterialSystem&) = delete;
@@ -98,10 +106,9 @@ class MaterialSystem {
   // fatal.
   void Update(MaterialId id, const material::MaterialDesc& desc);
 
-  // Releases material `id`: its descriptor set and parameter buffer are
-  // retired until no frame in flight can use them (then reused), and the id
-  // is never handed out again. Draws naming it render with kDefaultMaterial
-  // (see Resolve()). kDefaultMaterial, unknown and already released ids are
+  // Releases material `id`: it drops its textures and the id is never
+  // handed out again. Draws naming it render with kDefaultMaterial (see
+  // Resolve()). kDefaultMaterial, unknown and already released ids are
   // ignored. Call between frames.
   void Release(MaterialId id);
   // Returns `id`, or kDefaultMaterial when `id` is unknown or released.
@@ -112,19 +119,19 @@ class MaterialSystem {
                : kDefaultMaterial;
   }
 
-  // Starts recording frame number `frame_serial` (1, 2, ...; one more per
-  // recorded frame). Call after that frame's fence was waited on, which
-  // guarantees frames up to frame_serial - kFramesInFlight have finished:
-  // their retired sets and buffers become reusable.
-  void BeginFrame(uint64_t frame_serial);
+  // Starts recording frame number `frame_serial` (1, 2, ...). Nothing is
+  // retired per frame under Metal (see the class comment), so this does
+  // nothing; it stays so that the renderer's frame protocol is unchanged.
+  void BeginFrame(uint64_t /*frame_serial*/) {}
 
-  [[nodiscard]] VkDescriptorSetLayout set_layout() const { return layout_; }
+  // Sets the parameters, the five slot textures and the material sampler
+  // (kSamplerMaterial) of material Resolve(`id`) on the fragment stage of
+  // `encoder`. kDefaultMaterial must have been created.
+  void Bind(id<MTLRenderCommandEncoder> encoder, MaterialId id) const;
+
   // The accessors below take a valid id (< count()); not checked. A
   // released id still answers (its last state) but must not be drawn:
   // pass ids through Resolve() first.
-  [[nodiscard]] VkDescriptorSet descriptor_set(MaterialId id) const {
-    return materials_[static_cast<size_t>(id)].binding.set;
-  }
   [[nodiscard]] MaterialVariant variant(MaterialId id) const {
     return materials_[static_cast<size_t>(id)].variant;
   }
@@ -134,45 +141,30 @@ class MaterialSystem {
   [[nodiscard]] size_t count() const { return materials_.size(); }
 
  private:
-  // The GPU-side state of one material version.
-  struct Binding {
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    Buffer params;
+  // What Bind() sets for one material.
+  struct GpuState {
+    MaterialParams params{};
+    std::array<id<MTLTexture>, kMaterialTextureCount> textures{};
   };
   struct Material {
     material::MaterialDesc desc;
     // Set for materials created from uploaded textures.
     std::optional<MaterialTextures> textures;
     MaterialVariant variant = MaterialVariant::kOpaque;
-    Binding binding;
+    GpuState gpu;
     bool released = false;
   };
-  struct Retired {
-    Binding binding;
-    uint64_t last_frame = 0;  // The last frame that may read it.
-  };
 
-  // Returns an unused binding: a recycled one or a new one.
-  [[nodiscard]] Binding AcquireBinding();
-  [[nodiscard]] VkDescriptorSet AllocateSet();
-  // Returns the image views of `material`'s texture slots (defaults for
-  // empty slots).
-  [[nodiscard]] std::array<VkImageView, material::kTextureSlotCount>
-  TextureViews(const Material& material) const;
-  // Writes the parameters and textures of `material` into `binding`.
-  void Write(const Binding& binding, const Material& material);
+  // Appends a material from `desc` and `textures`, returns its id.
+  [[nodiscard]] MaterialId Add(const material::MaterialDesc& desc,
+                               std::optional<MaterialTextures> textures);
+  // Returns the textures of `material`'s slots (defaults for empty slots).
+  [[nodiscard]] std::array<id<MTLTexture>, kMaterialTextureCount>
+  SlotTextures(const Material& material) const;
 
-  const VulkanContext& context_;
-  TextureCache& textures_;
+  const TextureCache& textures_;
   const Samplers& samplers_;
-  VkDescriptorSetLayout layout_ = VK_NULL_HANDLE;
-  std::vector<VkDescriptorPool> pools_;
-  uint32_t sets_in_last_pool_ = 0;
   std::vector<Material> materials_;
-  std::vector<Binding> free_;
-  std::vector<Retired> retired_;
-  // The frame being recorded (or last recorded), 0 before the first.
-  uint64_t frame_serial_ = 0;
 };
 
 }  // namespace blue::render

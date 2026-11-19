@@ -46,7 +46,7 @@ Window::Window(const char* title, int width, int height,
   SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
   SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER,
                         height);
-  for (const char* flag : {SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN,
+  for (const char* flag : {SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN,
                            SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN,
                            SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN}) {
     SDL_SetBooleanProperty(properties, flag, true);
@@ -62,9 +62,15 @@ Window::Window(const char* title, int width, int height,
   if (window_ == nullptr) {
     core::log::Fatal("SDL_CreateWindow failed: {}", SDL_GetError());
   }
+  metal_view_ = SDL_Metal_CreateView(window_);
+  if (metal_view_ == nullptr) {
+    core::log::Fatal("SDL_Metal_CreateView failed: {}", SDL_GetError());
+  }
 }
 
 Window::~Window() {
+  // The view is a subview of the window's content view: it goes first.
+  SDL_Metal_DestroyView(metal_view_);
   SDL_DestroyWindow(window_);
   SDL_Quit();
 }
@@ -75,6 +81,8 @@ core::Extent2D Window::PixelSize() const {
   SDL_GetWindowSizeInPixels(window_, &width, &height);
   return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
 }
+
+void* Window::metal_layer() const { return SDL_Metal_GetLayer(metal_view_); }
 
 float Window::DisplayScale() const {
   const float scale = SDL_GetWindowDisplayScale(window_);

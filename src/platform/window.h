@@ -1,6 +1,7 @@
 #ifndef BLUE_PLATFORM_WINDOW_H_
 #define BLUE_PLATFORM_WINDOW_H_
 
+#include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_video.h>
 
 #include <optional>
@@ -21,10 +22,10 @@ struct WindowPair {
 // --window-pos or --window-size. Returns nullopt for anything else.
 [[nodiscard]] std::optional<WindowPair> ParseWindowPair(std::string_view text);
 
-// Owns SDL initialization and the native window, created for the
-// renderer's graphics API (which reaches it through handle()). Failure to
-// initialize SDL or create the window is fatal. Neither copyable nor
-// movable. Not thread-safe.
+// Owns SDL initialization, the native window and the Metal view (with its
+// CAMetalLayer) the renderer draws into. Failure to initialize SDL or create
+// the window or its view is fatal. Neither copyable nor movable. Not
+// thread-safe.
 class Window {
  public:
   // Creates the window `width` x `height` points large, with its top-left
@@ -38,6 +39,10 @@ class Window {
   Window& operator=(const Window&) = delete;
 
   [[nodiscard]] SDL_Window* handle() const { return window_; }
+  // Returns the CAMetalLayer of the window's Metal view as an untyped
+  // pointer, so that this header stays plain C++. The renderer bridges it
+  // with `(__bridge CAMetalLayer*)`. Valid as long as the window lives.
+  [[nodiscard]] void* metal_layer() const;
 
   // Returns the size of the drawable area in pixels (may differ from the
   // window size on HiDPI).
@@ -55,6 +60,7 @@ class Window {
 
  private:
   SDL_Window* window_ = nullptr;
+  SDL_MetalView metal_view_ = nullptr;
 };
 
 }  // namespace blue::platform

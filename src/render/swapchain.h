@@ -1,68 +1,49 @@
 #ifndef BLUE_RENDER_SWAPCHAIN_H_
 #define BLUE_RENDER_SWAPCHAIN_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
-#include <cstdint>
-#include <vector>
-
-#include "render/vulkan_context.h"
+#include "core/extent.h"
+#include "platform/window.h"
+#include "render/metal_context.h"
 
 namespace blue::render {
 
-// Swapchain with its image views and one render-finished semaphore per image.
-// Borrows `context`, which must outlive it. Neither copyable nor movable. Not
-// thread-safe.
+// The window's CAMetalLayer, configured for the renderer: sRGB BGRA8
+// drawables that are only ever rendered to, at most 3 in flight, display sync
+// per vsync. The layer belongs to the window, which must outlive this object.
+// Move-only. Not thread-safe.
 class Swapchain {
  public:
-  Swapchain(const VulkanContext& context, VkExtent2D desired_extent,
-            bool vsync);
-  ~Swapchain();
+  // Configures the layer of `window` for the device of `context`. A zero
+  // `extent` is fatal.
+  Swapchain(const MetalContext& context, const platform::Window& window,
+            core::Extent2D extent, bool vsync);
 
   Swapchain(const Swapchain&) = delete;
   Swapchain& operator=(const Swapchain&) = delete;
+  Swapchain(Swapchain&&) = default;
+  Swapchain& operator=(Swapchain&&) = default;
 
-  // Rebuilds the swapchain for `desired_extent`. The caller must ensure the
-  // GPU no longer uses the current images. Returns false, leaving the current
-  // swapchain untouched, while the surface has a zero extent.
-  [[nodiscard]] bool Recreate(VkExtent2D desired_extent, bool vsync);
+  // Applies a new drawable size and display sync. Returns false, leaving the
+  // layer untouched, for a zero `extent` (e.g. a minimized window). Drawables
+  // acquired before keep their old size; the GPU may still be using them.
+  [[nodiscard]] bool Recreate(core::Extent2D extent, bool vsync);
 
-  [[nodiscard]] VkSwapchainKHR handle() const { return swapchain_; }
-  [[nodiscard]] VkFormat format() const { return format_; }
-  [[nodiscard]] VkExtent2D extent() const { return extent_; }
-  [[nodiscard]] VkPresentModeKHR present_mode() const { return present_mode_; }
-  [[nodiscard]] uint32_t min_image_count() const { return min_image_count_; }
-  [[nodiscard]] uint32_t image_count() const {
-    return static_cast<uint32_t>(images_.size());
-  }
-  [[nodiscard]] VkImage image(uint32_t index) const { return images_[index]; }
-  [[nodiscard]] VkImageView image_view(uint32_t index) const {
-    return image_views_[index];
-  }
+  // MTLPixelFormatBGRA8Unorm_sRGB: the hardware gamma-encodes our linear
+  // shading output.
+  [[nodiscard]] MTLPixelFormat format() const;
+  [[nodiscard]] core::Extent2D extent() const { return extent_; }
+  [[nodiscard]] bool vsync() const { return vsync_; }
 
-  // Returns the semaphore to signal when rendering to image `index` is done.
-  // One per image: the presentation engine may still hold a semaphore of an
-  // image until that image is acquired again, so these cannot be per frame in
-  // flight.
-  [[nodiscard]] VkSemaphore render_finished(uint32_t index) const {
-    return render_finished_[index];
-  }
+  // Returns the next drawable, or nil when none became available within the
+  // layer's timeout (one second).
+  [[nodiscard]] id<CAMetalDrawable> NextDrawable() const;
 
  private:
-  void Create(const VkSurfaceCapabilitiesKHR& capabilities, VkExtent2D extent,
-              bool vsync, VkSwapchainKHR old_swapchain);
-  void DestroyImageResources();
-
-  const VulkanContext& context_;
-  VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
-  VkFormat format_ = VK_FORMAT_UNDEFINED;
-  VkColorSpaceKHR color_space_ = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-  VkExtent2D extent_{};
-  VkPresentModeKHR present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
-  uint32_t min_image_count_ = 0;
-  std::vector<VkImage> images_;
-  std::vector<VkImageView> image_views_;
-  std::vector<VkSemaphore> render_finished_;
+  CAMetalLayer* layer_ = nil;
+  core::Extent2D extent_{};
+  bool vsync_ = true;
 };
 
 }  // namespace blue::render

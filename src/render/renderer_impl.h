@@ -1,51 +1,35 @@
 #ifndef BLUE_RENDER_RENDERER_IMPL_H_
 #define BLUE_RENDER_RENDERER_IMPL_H_
 
+#include "render/metal_types.h"
+
 #include <imgui.h>
-#include <vulkan/vulkan.h>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "asset/mesh_data.h"
-#include "camera/frustum.h"
 #include "core/extent.h"
-#include "lighting/cascades.h"
 #include "platform/window.h"
 #include "render/buffer.h"
-#include "render/draw_list.h"
-#include "render/environment.h"
 #include "render/frame_config.h"
-#include "render/frame_globals.h"
 #include "render/gpu_timer.h"
 #include "render/image.h"
 #include "render/material_system.h"
 #include "render/mesh.h"
-#include "render/passes/bloom_pass.h"
-#include "render/passes/depth_prepass.h"
+#include "render/metal_context.h"
 #include "render/passes/frame_context.h"
-#include "render/passes/mesh_pass.h"
-#include "render/passes/overlay_pass.h"
-#include "render/passes/present_pass.h"
-#include "render/passes/reticle_pass.h"
-#include "render/passes/shadow_pass.h"
-#include "render/passes/skybox_pass.h"
-#include "render/passes/ssao_pass.h"
-#include "render/passes/tonemap_pass.h"
 #include "render/passes/ui_pass.h"
 #include "render/render_targets.h"
 #include "render/renderer.h"
 #include "render/samplers.h"
 #include "render/scene_view.h"
-#include "render/shader_programs.h"
 #include "render/swapchain.h"
 #include "render/texture_cache.h"
-#include "render/vulkan_context.h"
 #include "shader/shader_compiler.h"
 
 // Internal to src/render: the state behind render::Renderer.
@@ -53,7 +37,10 @@
 // How a frame is built
 // --------------------
 // RendererImpl::RecordCommands() is the wiring: it records the passes in
-// order, each wrapped in a GPU timer scope:
+// order into the frame's one command buffer, each wrapped in a GPU timer
+// scope. The target design (Stages 3-5 of the Metal port bring these passes
+// back; in Stage 2 the frame only clears the LDR image and the output and
+// draws the UI, see RecordCommands()):
 //
 //   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
@@ -64,9 +51,9 @@
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
 //   overlay              OverlayPass       debug lines + selection outline
 //                                          -> ldr (editor; skipped if empty)
-//   present              PresentPass       ldr -> swapchain (FXAA), or ->
+//   present              PresentPass       ldr -> drawable (FXAA), or ->
 //                                          the editor viewport image
-//   ui                   RecordUiPass      ImGui on the swapchain, -> present
+//   ui                   RecordUiPass      ImGui on the drawable
 //
 // The visible submeshes are culled and sorted once per frame (DrawList) and
 // shared by the depth pre-pass and the mesh pass. Disabled effects
@@ -74,41 +61,30 @@
 //
 // A pass is a class (or a pair of functions) in src/render/passes/ with its
 // own shaders. It gets the shared state it needs in its constructor
-// (VulkanContext, ShaderPrograms for hot-reloadable pipelines, the
-// FrameGlobals set layout, ...) and records with a FrameContext. To add one:
-//   1. Write passes/<name>_pass.{h,cc} and shaders/<name>.frag. A full-screen
-//      effect wraps a FullscreenPass (render/fullscreen_pass.h): it owns the
-//      input descriptor sets and the pipeline; set its inputs in a
-//      BindTargets() called at startup and after every swapchain rebuild.
+// (MetalContext, ShaderPrograms for hot-reloadable pipelines, ...) and
+// records with a FrameContext, opening its encoders through
+// render/encoders.h. To add one:
+//   1. Write passes/<name>_pass.{h,mm} and its shaders/<name>.*.metal.
 //   2. Add a GpuScope (render/gpu_scope.h) and a line in RecordCommands().
 //   3. Add the sources to CMakeLists.txt. Window-sized images belong in
-//      RenderTargets; scene-wide inputs (environment cube, BRDF LUT, AO) are
-//      already bindings of FrameGlobals' set 0 (render/frame_globals.h).
-// Each pass does its own image barriers: it knows the layout its inputs come
-// in (documented on the pass) and the scope of the previous frame's last use
-// of an image it overwrites (all frames in flight share the render targets).
-//
-// Layouts between passes: depth is DEPTH_READ_ONLY after the pre-pass (and
-// stays so through the scene pass); ssao, hdr, bloom and ldr are
-// SHADER_READ_ONLY whenever they are not being written; the shadow map is
-// DEPTH_READ_ONLY; the swapchain image is COLOR_ATTACHMENT after the present
-// pass and PRESENT_SRC after the UI. The editor viewport image is
-// SHADER_READ_ONLY_OPTIMAL whenever the UI pass samples it; it is
-// R8G8B8A8, _SRGB when the swapchain is.
+//      RenderTargets.
+// There are no image layouts, barriers or descriptor sets: Metal orders the
+// encoders of the single queue and tracks the hazards between them, and
+// passes bind their inputs on their encoders (indices in shaders/bindings.h).
+// The window's drawable is acquired as late as possible, just before the
+// first pass that renders to it; when none is available the passes that
+// need it are skipped and the frame is still committed. The editor viewport
+// image is RGBA8Unorm_sRGB, the same encoding as the drawable.
 
 namespace blue::render {
 
 // Everything behind Renderer; see Renderer for the meaning of the methods it
 // forwards to. Neither copyable nor movable. Not thread-safe.
 struct RendererImpl {
-  using Cascades = std::array<lighting::Cascade, lighting::kCascadeCount>;
-
-  // Per-frame-in-flight command recording and synchronization.
+  // Per-frame-in-flight state: the frame slot's last command buffer, waited
+  // on (waitUntilCompleted) before the slot records again.
   struct Frame {
-    VkCommandPool command_pool = VK_NULL_HANDLE;
-    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-    VkFence in_flight = VK_NULL_HANDLE;
-    VkSemaphore image_acquired = VK_NULL_HANDLE;
+    id<MTLCommandBuffer> command_buffer = nil;
   };
 
   // Where a frame's tonemapped scene goes.
@@ -129,7 +105,7 @@ struct RendererImpl {
     uint64_t ticket = 0;
     // The frame that records the copy; 0 until recorded.
     uint64_t frame_serial = 0;
-    VkExtent2D extent{};
+    core::Extent2D extent{};
     Buffer buffer;
   };
 
@@ -144,79 +120,69 @@ struct RendererImpl {
   void ReleaseMesh(MeshId id);
   void ReleaseTextures(std::span<const TextureId> ids);
   void SetVsync(bool enabled);
-  ViewportImage PrepareViewport(VkExtent2D size);
+  ViewportImage PrepareViewport(core::Extent2D size);
   uint64_t RequestViewportReadback();
   ReadbackStatus TakeViewportReadback(uint64_t ticket, ViewportPixels& pixels);
   void InitImGuiRenderer();
   void ShutdownImGuiRenderer();
 
-  void CreateFrames();
-  // Destroys the retired meshes, images and UI textures no frame in flight
-  // can use any more. Call after the current frame's fence was waited on.
+  // Destroys the retired meshes and images no frame in flight can use any
+  // more. Call after the current frame slot's command buffer was waited on.
   void DestroyRetired();
-  // Points the passes that read render targets at the current ones.
-  void BindTargets();
   [[nodiscard]] bool RebuildSwapchain();
-  // Blocks until no frame in flight runs on the GPU any more (their fences),
-  // so that render targets and their descriptor sets can be replaced.
+  // Blocks until `frame`'s last command buffer, if any, has completed; a GPU
+  // error in it is fatal.
+  static void WaitForFrame(const Frame& frame);
+  // Blocks until no frame in flight runs on the GPU any more, so that render
+  // targets can be replaced.
   void WaitForFramesInFlight() const;
   // Recreates the viewport image and the render targets at `size`.
-  void ResizeViewport(VkExtent2D size);
+  void ResizeViewport(core::Extent2D size);
   // The body of DrawFrame() and DrawViewportFrame().
   void DrawFrameTo(const SceneView& view, ImDrawData* ui, Output output);
 
-  // Acquires the next swapchain image for `frame`. Returns nullopt, marking
-  // the swapchain dirty, when it is out of date and nothing can be drawn.
-  [[nodiscard]] std::optional<uint32_t> AcquireImage(const Frame& frame);
-  // Submits the recorded commands of `frame` and presents `image_index`.
-  void SubmitAndPresent(const Frame& frame, uint32_t image_index);
+  // Acquires the window's drawable into ctx.drawable. Returns false, marking
+  // the swapchain dirty, when none was available.
+  [[nodiscard]] bool AcquireDrawable(FrameContext& ctx);
   // Records every pass of the frame described by `ctx` (see the top of this
-  // file).
-  void RecordCommands(const Frame& frame, const FrameContext& ctx,
-                      ImDrawData* ui, Output output);
-  // Records the copy of the viewport image (COLOR_ATTACHMENT_OPTIMAL after
-  // the present pass, and again afterwards) for every readback not recorded
-  // yet.
-  void RecordViewportReadbacks(VkCommandBuffer cmd);
-  // Computes the world-space bounds of every draw item into world_bounds_.
-  void ComputeWorldBounds(const SceneView& view);
+  // file); acquires the drawable on the way.
+  void RecordCommands(FrameContext& ctx, ImDrawData* ui, Output output);
+  // Records the copy of the viewport image, after it was rendered, for every
+  // readback not recorded yet.
+  void RecordViewportReadbacks(const FrameContext& ctx);
 
   const platform::Window& window_;
-  std::string shader_dir_;
-  VulkanContext context_;
+  // TODO(metal-stage3): compile the shaders of `shader_dir_` with
+  // `shader_mode_` (ShaderPrograms).
+  [[maybe_unused]] std::string shader_dir_;
+  [[maybe_unused]] shader::CompileMode shader_mode_;
+  MetalContext context_;
   bool vsync_ = true;
   bool swapchain_dirty_ = false;
   Swapchain swapchain_;
   Samplers samplers_;
   RenderTargets targets_;
-  FrameGlobals frame_globals_;
+  // TODO(metal-stage4): FrameGlobals frame_globals_;
   TextureCache textures_;
   MaterialSystem materials_;
-  ShaderPrograms shader_programs_;
-  Environment environment_;
+  // TODO(metal-stage3): ShaderPrograms shader_programs_;
+  // TODO(metal-stage4): Environment environment_;
   // Declared before the passes that borrow it.
   std::vector<Mesh> meshes_;
   // Released GPU objects waiting until no frame in flight uses them
-  // (ReleaseMesh(), ReleaseTextures()); declared after the context so they
-  // are destroyed before it.
+  // (ReleaseMesh(), ReleaseTextures(), replaced viewport images); declared
+  // after the context so they are destroyed before it.
   std::vector<Retired<Mesh>> retired_meshes_;
   std::vector<Retired<Image>> retired_images_;
-  DrawList draw_list_;
+  // TODO(metal-stage4): DrawList draw_list_;
 
-  ShadowPass shadow_pass_;
-  DepthPrepass depth_prepass_;
-  SsaoPass ssao_pass_;
-  MeshPass mesh_pass_;
-  SkyboxPass skybox_pass_;
-  ReticlePass reticle_pass_;
-  BloomPass bloom_pass_;
-  TonemapPass tonemap_pass_;
-  OverlayPass overlay_pass_;
-  PresentPass present_pass_;
-  // The present pass into viewport_image_'s format; created by the first
-  // PrepareViewport().
-  std::optional<PresentPass> viewport_present_pass_;
-  // The ImGui backend and the ImGui textures (viewport, ui_texture()).
+  // TODO(metal-stage3): TonemapPass tonemap_pass_, PresentPass
+  // present_pass_, BloomPass bloom_pass_ and the viewport's PresentPass.
+  // TODO(metal-stage4): DepthPrepass depth_prepass_, MeshPass mesh_pass_,
+  // SkyboxPass skybox_pass_.
+  // TODO(metal-stage5): ShadowPass shadow_pass_, SsaoPass ssao_pass_,
+  // ReticlePass reticle_pass_, OverlayPass overlay_pass_.
+  // The ImGui backend.
   UiRenderer ui_;
 
   // Editor viewport output (PrepareViewport()); empty in the game.
@@ -231,9 +197,8 @@ struct RendererImpl {
   size_t frame_index_ = 0;
   // Number of the frame being recorded; counts every recorded frame from 1.
   uint64_t frame_serial_ = 0;
-  // World-space bounds of the current frame's draw items, parallel to
-  // SceneView::draws; kept as a member to reuse its allocation.
-  std::vector<camera::Aabb> world_bounds_;
+  // TODO(metal-stage4): world_bounds_, the world-space bounds of the current
+  // frame's draw items, parallel to SceneView::draws.
   RenderStats stats_;
   GpuTimer gpu_timer_;
 };

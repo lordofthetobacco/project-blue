@@ -1,42 +1,52 @@
 #ifndef BLUE_RENDER_PASSES_UI_PASS_H_
 #define BLUE_RENDER_PASSES_UI_PASS_H_
 
+#include "render/metal_types.h"
+
 #include <imgui.h>
-#include <vulkan/vulkan.h>
 
 #include <cstdint>
-#include <vector>
 
+#include "render/metal_context.h"
 #include "render/passes/frame_context.h"
-#include "render/swapchain.h"
-#include "render/texture_cache.h"
-#include "render/texture_types.h"
-#include "render/vulkan_context.h"
 
 namespace blue::render {
 
 // What the UI pass draws over.
 enum class UiBackground {
-  // The present pass's output: the swapchain image is in
-  // COLOR_ATTACHMENT_OPTIMAL and kept.
+  // What earlier passes of the frame rendered to the drawable (the present
+  // pass's output): kept.
   kScene,
-  // Nothing (the editor, whose scene is in a panel): the freshly acquired
-  // swapchain image is cleared to black first.
+  // Nothing: the drawable is cleared first (to RecordUiPass()'s
+  // `clear_color`).
   kClear,
 };
 
-// Draws the ImGui overlay `ui` (when non-null) over the swapchain image
-// without depth, then moves the image to PRESENT_SRC_KHR. The ImGui Vulkan
-// backend must have been initialized (UiRenderer::Init()) when `ui` is
-// non-null.
-void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
-                  UiBackground background);
+// Opaque black, what the editor's window shows around its panels.
+inline constexpr MTLClearColor kUiClearBlack{0.0, 0.0, 0.0, 1.0};
 
-// The ImGui Vulkan backend and the ImGui textures (descriptor sets of the
-// backend's pool) the renderer hands out: the editor viewport image and
-// uploaded textures. A replaced or released texture's set is freed only once
-// no frame in flight can still use it (FreeRetired()). Starts uninitialized;
-// every texture is 0 until Init(). Neither copyable nor movable. Not
+// Draws the ImGui overlay `ui` (when non-null) over the drawable of `ctx`,
+// which must not be nil, in one render pass without depth. `clear_color` is
+// linear (the drawable is sRGB) and only used with UiBackground::kClear. The
+// ImGui Metal backend must have been initialized (UiRenderer::Init()) when
+// `ui` is non-null. A frame whose UI was laid out for a larger output than
+// the drawable (a resize between building the UI and acquiring the
+// drawable) draws no UI.
+void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
+                  UiBackground background,
+                  MTLClearColor clear_color = kUiClearBlack);
+
+// Returns `texture` as an ImGui texture. The id does not keep the texture
+// alive: whoever hands it to the UI keeps the texture alive for as long as a
+// frame in flight may draw it.
+[[nodiscard]] inline ImTextureID ToImTextureId(id<MTLTexture> texture) {
+  return static_cast<ImTextureID>(
+      reinterpret_cast<intptr_t>((__bridge void*)texture));
+}
+
+// The ImGui Metal backend. ImGui textures are bridged MTLTextures
+// (ToImTextureId()), so the backend owns nothing but its own pipelines and
+// font atlas. Starts uninitialized. Neither copyable nor movable. Not
 // thread-safe.
 class UiRenderer {
  public:
@@ -45,48 +55,16 @@ class UiRenderer {
   UiRenderer(const UiRenderer&) = delete;
   UiRenderer& operator=(const UiRenderer&) = delete;
 
-  // Initializes the backend to draw to `swapchain`'s format with dynamic
-  // rendering and no depth (RecordUiPass()). Needs a current ImGui context.
-  // Failure is fatal.
-  void Init(const VulkanContext& context, const Swapchain& swapchain);
-  // Shuts the backend down; its pool owns the texture sets, so this frees
-  // them all. The GPU must be idle.
+  // Initializes the backend on the device of `context`. Needs a current
+  // ImGui context. Failure is fatal.
+  void Init(const MetalContext& context);
+  // Shuts the backend down, destroying its font atlas texture. The GPU must
+  // be idle. Does nothing when uninitialized.
   void Shutdown();
   [[nodiscard]] bool initialized() const { return initialized_; }
 
-  // Registers `view` (a sampled image in SHADER_READ_ONLY_OPTIMAL whenever
-  // the UI samples it) as the viewport texture and returns it; the previous
-  // viewport texture is retired. `frame_serial` is the last frame that may
-  // have recorded the previous one. Returns 0 while uninitialized.
-  [[nodiscard]] ImTextureID SetViewport(VkImageView view,
-                                        uint64_t frame_serial);
-  // Returns the texture of `id` in `textures`, registering it on first use;
-  // unknown or released ids share one texture of the white default.
-  // Returns 0 while uninitialized.
-  [[nodiscard]] ImTextureID Texture(TextureId id,
-                                    const TextureCache& textures);
-  // Retires the texture of `id`, if any; `frame_serial` is the last frame
-  // that may have recorded it.
-  void Release(TextureId id, uint64_t frame_serial);
-  // Frees the retired sets that no frame in flight can use any more, given
-  // that `frame_serial` is the frame being recorded and every frame up to
-  // frame_serial - kFramesInFlight has finished on the GPU.
-  void FreeRetired(uint64_t frame_serial);
-
  private:
-  // A texture descriptor set waiting until no frame in flight uses it.
-  struct RetiredSet {
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    uint64_t last_frame = 0;  // The last frame serial that may use it.
-  };
-
   bool initialized_ = false;
-  VkDescriptorSet viewport_set_ = VK_NULL_HANDLE;
-  // The set of the white default, shared by every unknown or released id.
-  VkDescriptorSet default_set_ = VK_NULL_HANDLE;
-  // Sets of uploaded textures, indexed by TextureId; empty until first use.
-  std::vector<VkDescriptorSet> texture_sets_;
-  std::vector<RetiredSet> retired_;
 };
 
 }  // namespace blue::render

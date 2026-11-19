@@ -1,7 +1,7 @@
 #ifndef BLUE_RENDER_TEXTURE_CACHE_H_
 #define BLUE_RENDER_TEXTURE_CACHE_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <array>
 #include <cstddef>
@@ -10,8 +10,8 @@
 #include <vector>
 
 #include "render/image.h"
+#include "render/metal_context.h"
 #include "render/texture_types.h"
-#include "render/vulkan_context.h"
 
 namespace blue::render {
 
@@ -23,8 +23,8 @@ enum class DefaultTexture {
   kCount,
 };
 
-// Returns the Vulkan format of `format`.
-[[nodiscard]] VkFormat ToVkFormat(TextureFormat format);
+// Returns the Metal pixel format of `format`.
+[[nodiscard]] MTLPixelFormat ToPixelFormat(TextureFormat format);
 
 // The renderer's textures: the 1 x 1 defaults and textures uploaded already
 // encoded (Upload()), each resident until taken out with TakeUploaded().
@@ -33,7 +33,7 @@ enum class DefaultTexture {
 // Not thread-safe.
 class TextureCache {
  public:
-  explicit TextureCache(const VulkanContext& context);
+  explicit TextureCache(const MetalContext& context);
 
   TextureCache(const TextureCache&) = delete;
   TextureCache& operator=(const TextureCache&) = delete;
@@ -46,35 +46,35 @@ class TextureCache {
   // fatal: validate file data before.
   [[nodiscard]] std::vector<TextureId> Upload(
       std::span<const TextureUpload> textures);
-  // Returns the view of an uploaded texture, or the white default for an
-  // unknown or taken id.
-  [[nodiscard]] VkImageView view(TextureId id) const {
+  // Returns the texture of an uploaded texture id, or the white default for
+  // an unknown or taken id.
+  [[nodiscard]] id<MTLTexture> texture(TextureId id) const {
     const auto index = static_cast<size_t>(id);
-    return index < uploaded_.size() &&
-                   uploaded_[index].handle() != VK_NULL_HANDLE
-               ? uploaded_[index].view()
-               : default_view(DefaultTexture::kWhite);
+    return index < uploaded_.size() && uploaded_[index].texture() != nil
+               ? uploaded_[index].texture()
+               : default_texture(DefaultTexture::kWhite);
   }
   // Moves uploaded texture `id` out of the cache (for deferred destruction,
   // see Renderer::ReleaseTextures()) and returns it; its slot stays empty
   // and the id is never reused. Returns an empty Image for an unknown or
   // already taken id.
   [[nodiscard]] Image TakeUploaded(TextureId id);
-  // Returns the view of `id`, or of `fallback` when `id` is empty.
-  [[nodiscard]] VkImageView ViewOr(std::optional<TextureId> id,
-                                   DefaultTexture fallback) const {
-    return id ? view(*id) : default_view(fallback);
+  // Returns the texture of `id`, or `fallback` when `id` is empty.
+  [[nodiscard]] id<MTLTexture> TextureOr(std::optional<TextureId> id,
+                                         DefaultTexture fallback) const {
+    return id ? texture(*id) : default_texture(fallback);
   }
 
-  [[nodiscard]] VkImageView default_view(DefaultTexture texture) const {
-    return defaults_[static_cast<size_t>(texture)].view();
+  [[nodiscard]] id<MTLTexture> default_texture(DefaultTexture texture) const {
+    return defaults_[static_cast<size_t>(texture)].texture();
   }
   [[nodiscard]] TextureStats stats() const { return stats_; }
 
  private:
-  const VulkanContext& context_;
+  const MetalContext& context_;
   std::array<Image, static_cast<size_t>(DefaultTexture::kCount)> defaults_;
-  // Textures from Upload(), indexed by TextureId.
+  // Textures from Upload(), indexed by TextureId; a taken slot holds an
+  // empty Image (the tombstone).
   std::vector<Image> uploaded_;
   TextureStats stats_;
 };

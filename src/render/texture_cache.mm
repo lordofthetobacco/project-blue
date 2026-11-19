@@ -6,59 +6,60 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "core/extent.h"
 #include "core/log.h"
-#include "render/vk_extent.h"
 
 namespace blue::render {
 
 namespace {
 
-Image MakeSolidTexture(const VulkanContext& context,
-                       std::array<uint8_t, 4> rgba) {
-  return CreateSampledImage(
-      context, {.extent = {1, 1}, .format = VK_FORMAT_R8G8B8A8_UNORM},
-      std::as_bytes(std::span(rgba)));
+Image MakeSolidTexture(const MetalContext& context, std::array<uint8_t, 4> rgba,
+                       const char* label) {
+  return CreateSampledImage(context,
+                            {.extent = {1, 1},
+                             .format = MTLPixelFormatRGBA8Unorm,
+                             .label = label},
+                            std::as_bytes(std::span(rgba)));
 }
 
 }  // namespace
 
-TextureCache::TextureCache(const VulkanContext& context) : context_(context) {
+TextureCache::TextureCache(const MetalContext& context) : context_(context) {
   defaults_[static_cast<size_t>(DefaultTexture::kWhite)] =
-      MakeSolidTexture(context_, {255, 255, 255, 255});
+      MakeSolidTexture(context_, {255, 255, 255, 255}, "Default white");
   defaults_[static_cast<size_t>(DefaultTexture::kFlatNormal)] =
-      MakeSolidTexture(context_, {128, 128, 255, 255});
+      MakeSolidTexture(context_, {128, 128, 255, 255}, "Default flat normal");
   defaults_[static_cast<size_t>(DefaultTexture::kBlack)] =
-      MakeSolidTexture(context_, {0, 0, 0, 255});
+      MakeSolidTexture(context_, {0, 0, 0, 255}, "Default black");
 }
 
-VkFormat ToVkFormat(TextureFormat format) {
+MTLPixelFormat ToPixelFormat(TextureFormat format) {
   switch (format) {
     case TextureFormat::kBc7Srgb:
-      return VK_FORMAT_BC7_SRGB_BLOCK;
+      return MTLPixelFormatBC7_RGBAUnorm_sRGB;
     case TextureFormat::kBc7Unorm:
-      return VK_FORMAT_BC7_UNORM_BLOCK;
+      return MTLPixelFormatBC7_RGBAUnorm;
     case TextureFormat::kBc5Unorm:
-      return VK_FORMAT_BC5_UNORM_BLOCK;
+      return MTLPixelFormatBC5_RGUnorm;
     case TextureFormat::kRgba8Srgb:
-      return VK_FORMAT_R8G8B8A8_SRGB;
+      return MTLPixelFormatRGBA8Unorm_sRGB;
     case TextureFormat::kRgba8Unorm:
-      return VK_FORMAT_R8G8B8A8_UNORM;
+      return MTLPixelFormatRGBA8Unorm;
   }
   core::log::Fatal("Unknown texture format {}", static_cast<int>(format));
 }
 
 Image TextureCache::TakeUploaded(TextureId id) {
   const auto index = static_cast<size_t>(id);
-  if (index >= uploaded_.size() ||
-      uploaded_[index].handle() == VK_NULL_HANDLE) {
+  if (index >= uploaded_.size() || uploaded_[index].texture() == nil) {
     return {};
   }
+  // The defaulted move leaves an empty Image in the slot: the tombstone.
   Image taken = std::move(uploaded_[index]);
-  uploaded_[index] = Image();
   stats_.count -= 1;
   stats_.bytes -= taken.size_bytes();
   return taken;
@@ -67,6 +68,11 @@ Image TextureCache::TakeUploaded(TextureId id) {
 std::vector<TextureId> TextureCache::Upload(
     std::span<const TextureUpload> textures) {
   const auto start = std::chrono::steady_clock::now();
+  // NUL-terminated copies of the names, for the texture labels; alive until
+  // the images are created. Reserved up front so that no reallocation moves
+  // the strings that `uploads` points into.
+  std::vector<std::string> labels;
+  labels.reserve(textures.size());
   std::vector<MipChainUpload> uploads;
   uploads.reserve(textures.size());
   size_t file_bytes = 0;
@@ -89,16 +95,20 @@ std::vector<TextureId> TextureCache::Upload(
       }
       file_bytes += expected;
     }
-    uploads.push_back({.desc = {.extent = ToVkExtent(extent),
-                                .format = ToVkFormat(texture.format),
-                                .mip_levels = static_cast<uint32_t>(levels)},
+    const std::string& label = labels.emplace_back(
+        texture.name.empty() ? std::string("Uploaded texture")
+                             : std::string(texture.name));
+    uploads.push_back({.desc = {.extent = extent,
+                                .format = ToPixelFormat(texture.format),
+                                .mip_levels = static_cast<uint32_t>(levels),
+                                .label = label.c_str()},
                        .mips = texture.mips});
   }
 
   std::vector<Image> images = CreateImagesFromMipChains(context_, uploads);
   std::vector<TextureId> ids;
   ids.reserve(images.size());
-  VkDeviceSize device_bytes = 0;
+  uint64_t device_bytes = 0;
   for (Image& image : images) {
     device_bytes += image.size_bytes();
     ids.push_back(static_cast<TextureId>(uploaded_.size()));

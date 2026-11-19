@@ -1,7 +1,11 @@
-#version 450
+#include <metal_stdlib>
+
+#include "bindings.h"
+
+using namespace metal;
 
 // Writes the LDR image (sRGB-encoded colour, luma in alpha) to the
-// swapchain, optionally through FXAA. An _SRGB swapchain encodes on write,
+// drawable, optionally through FXAA. An _sRGB drawable encodes on write,
 // so the result is decoded first; the round trip is exact for 8-bit values.
 //
 // The FXAA path follows the structure of Timothy Lottes' FXAA 3.11 "quality"
@@ -11,48 +15,62 @@
 // the position along that span, and a separate sub-pixel term for
 // single-pixel features. Implemented here from that description.
 
-layout(set = 0, binding = 0) uniform sampler2D ldrImage;  // bilinear, clamped
+// Must match PresentConstants in src/render/passes/present_pass.cc
+// (int32_t, int32_t, float, float: 16 bytes).
+struct PresentConstants {
+    int decodeSrgb;     // 1: the target encodes, so output linear values
+    int fxaa;           // 1: anti-alias
+    float2 texelSize;   // 1 / image size
+};
 
-// Must match PresentConstants in src/render/passes/present_pass.cc.
-layout(push_constant) uniform PresentConstants {
-    int decodeSrgb;   // 1: the target encodes, so output linear values
-    int fxaa;         // 1: anti-alias
-    vec2 texelSize;   // 1 / image size
-} params;
+// Must match FullscreenVaryings in fullscreen.vert.metal.
+struct FullscreenVaryings {
+    float4 position [[position]];  // Window coordinates (gl_FragCoord).
+    float2 uv [[user(loc0)]];
+};
 
-layout(location = 0) in vec2 inUv;
-layout(location = 0) out vec4 outColor;
+// The pass's inputs, gathered so that the helpers take one argument.
+struct PresentInputs {
+    texture2d<float> ldrImage;  // bilinear, clamped
+    sampler ldrSampler;
+    float2 texelSize;
+};
 
 // Contrast below max(kEdgeThresholdMin, kEdgeThreshold * local max luma)
 // is left alone (the "quality" preset's defaults).
-const float kEdgeThreshold = 0.125;
-const float kEdgeThresholdMin = 0.0312;
+constant float kEdgeThreshold = 0.125;
+constant float kEdgeThresholdMin = 0.0312;
 // How much single-pixel features are softened, [0, 1].
-const float kSubpixelQuality = 0.75;
+constant float kSubpixelQuality = 0.75;
 // Step sizes of the walk along an edge, in pixels: fine near the start,
 // then growing so long edges end within a fixed number of taps.
-const int kSearchSteps = 12;
-const float kSearchStepSizes[kSearchSteps] =
-    float[](1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0);
+constant int kSearchSteps = 12;
+constant float kSearchStepSizes[kSearchSteps] =
+    {1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0};
 
-float Luma(vec2 uv)
+static float4 SampleLdr(thread const PresentInputs& inputs, float2 uv)
 {
-    return textureLod(ldrImage, uv, 0.0).a;
+    return inputs.ldrImage.sample(inputs.ldrSampler, uv, level(0.0));
 }
 
-float LumaAt(vec2 uv, vec2 offsetPixels)
+static float Luma(thread const PresentInputs& inputs, float2 uv)
 {
-    return textureLod(ldrImage, uv + offsetPixels * params.texelSize, 0.0).a;
+    return SampleLdr(inputs, uv).a;
 }
 
-vec3 Fxaa(vec2 uv)
+static float LumaAt(thread const PresentInputs& inputs, float2 uv, float2 offsetPixels)
 {
-    const vec4 centerSample = textureLod(ldrImage, uv, 0.0);
+    return SampleLdr(inputs, uv + offsetPixels * inputs.texelSize).a;
+}
+
+static float3 Fxaa(thread const PresentInputs& inputs, float2 uv)
+{
+    const float4 centerSample = SampleLdr(inputs, uv);
     const float center = centerSample.a;
-    const float north = LumaAt(uv, vec2(0.0, -1.0));
-    const float south = LumaAt(uv, vec2(0.0, 1.0));
-    const float west = LumaAt(uv, vec2(-1.0, 0.0));
-    const float east = LumaAt(uv, vec2(1.0, 0.0));
+    const float north = LumaAt(inputs, uv, float2(0.0, -1.0));
+    const float south = LumaAt(inputs, uv, float2(0.0, 1.0));
+    const float west = LumaAt(inputs, uv, float2(-1.0, 0.0));
+    const float east = LumaAt(inputs, uv, float2(1.0, 0.0));
 
     const float lumaMax = max(center, max(max(north, south), max(west, east)));
     const float lumaMin = min(center, min(min(north, south), min(west, east)));
@@ -61,10 +79,10 @@ vec3 Fxaa(vec2 uv)
         return centerSample.rgb;
     }
 
-    const float northWest = LumaAt(uv, vec2(-1.0, -1.0));
-    const float northEast = LumaAt(uv, vec2(1.0, -1.0));
-    const float southWest = LumaAt(uv, vec2(-1.0, 1.0));
-    const float southEast = LumaAt(uv, vec2(1.0, 1.0));
+    const float northWest = LumaAt(inputs, uv, float2(-1.0, -1.0));
+    const float northEast = LumaAt(inputs, uv, float2(1.0, -1.0));
+    const float southWest = LumaAt(inputs, uv, float2(-1.0, 1.0));
+    const float southEast = LumaAt(inputs, uv, float2(1.0, 1.0));
 
     // A horizontal edge changes the most from row to row.
     const float horizontal = abs(northWest + southWest - 2.0 * west)
@@ -83,7 +101,7 @@ vec3 Fxaa(vec2 uv)
     const float gradientPositive = abs(positive - center);
     const bool negativeSide = gradientNegative >= gradientPositive;
     const float gradientScaled = 0.25 * max(gradientNegative, gradientPositive);
-    float stepAcross = isHorizontal ? params.texelSize.y : params.texelSize.x;
+    float stepAcross = isHorizontal ? inputs.texelSize.y : inputs.texelSize.x;
     float edgeLuma;
     if (negativeSide) {
         stepAcross = -stepAcross;
@@ -93,15 +111,15 @@ vec3 Fxaa(vec2 uv)
     }
 
     // Walk along the edge, half a pixel over onto it, both ways.
-    vec2 edgeUv = uv;
+    float2 edgeUv = uv;
     if (isHorizontal) {
         edgeUv.y += 0.5 * stepAcross;
     } else {
         edgeUv.x += 0.5 * stepAcross;
     }
-    const vec2 along = isHorizontal ? vec2(params.texelSize.x, 0.0) : vec2(0.0, params.texelSize.y);
-    vec2 uvBackward = edgeUv;
-    vec2 uvForward = edgeUv;
+    const float2 along = isHorizontal ? float2(inputs.texelSize.x, 0.0) : float2(0.0, inputs.texelSize.y);
+    float2 uvBackward = edgeUv;
+    float2 uvForward = edgeUv;
     float endBackward = 0.0;
     float endForward = 0.0;
     bool doneBackward = false;
@@ -109,12 +127,12 @@ vec3 Fxaa(vec2 uv)
     for (int i = 0; i < kSearchSteps && !(doneBackward && doneForward); ++i) {
         if (!doneBackward) {
             uvBackward -= along * kSearchStepSizes[i];
-            endBackward = Luma(uvBackward) - edgeLuma;
+            endBackward = Luma(inputs, uvBackward) - edgeLuma;
             doneBackward = abs(endBackward) >= gradientScaled;
         }
         if (!doneForward) {
             uvForward += along * kSearchStepSizes[i];
-            endForward = Luma(uvForward) - edgeLuma;
+            endForward = Luma(inputs, uvForward) - edgeLuma;
             doneForward = abs(endForward) >= gradientScaled;
         }
     }
@@ -140,29 +158,33 @@ vec3 Fxaa(vec2 uv)
     const float subpixelOffset = subpixelSmooth * subpixelSmooth * kSubpixelQuality;
 
     const float offset = max(edgeOffset, subpixelOffset);
-    vec2 finalUv = uv;
+    float2 finalUv = uv;
     if (isHorizontal) {
         finalUv.y += offset * stepAcross;
     } else {
         finalUv.x += offset * stepAcross;
     }
-    return textureLod(ldrImage, finalUv, 0.0).rgb;
+    return SampleLdr(inputs, finalUv).rgb;
 }
 
-vec3 SrgbToLinear(vec3 encoded)
+static float3 SrgbToLinear(float3 encoded)
 {
-    const vec3 low = encoded / 12.92;
-    const vec3 high = pow((encoded + 0.055) / 1.055, vec3(2.4));
-    return mix(high, low, lessThanEqual(encoded, vec3(0.04045)));
+    const float3 low = encoded / 12.92;
+    const float3 high = pow((encoded + 0.055) / 1.055, float3(2.4));
+    return select(high, low, encoded <= float3(0.04045));
 }
 
-void main()
+fragment float4 FragmentMain(FullscreenVaryings varyings [[stage_in]],
+                             texture2d<float> ldrImage [[texture(kTextureInput0)]],
+                             sampler ldrSampler [[sampler(kSamplerInput)]],
+                             constant PresentConstants& pass [[buffer(kBufferPass)]])
 {
-    vec3 encoded;
-    if (params.fxaa != 0) {
-        encoded = Fxaa(gl_FragCoord.xy * params.texelSize);
+    const PresentInputs inputs = {ldrImage, ldrSampler, pass.texelSize};
+    float3 encoded;
+    if (pass.fxaa != 0) {
+        encoded = Fxaa(inputs, varyings.position.xy * pass.texelSize);
     } else {
-        encoded = texelFetch(ldrImage, ivec2(gl_FragCoord.xy), 0).rgb;
+        encoded = ldrImage.read(uint2(varyings.position.xy)).rgb;
     }
-    outColor = vec4(params.decodeSrgb != 0 ? SrgbToLinear(encoded) : encoded, 1.0);
+    return float4(pass.decodeSrgb != 0 ? SrgbToLinear(encoded) : encoded, 1.0);
 }

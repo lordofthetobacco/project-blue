@@ -31,8 +31,7 @@ ImGuiLayer::ImGuiLayer(const platform::Window& window,
 
   UpdateScale();
 
-  // TODO(metal-stage2): ImGui_ImplSDL3_InitForMetal.
-  ImGui_ImplSDL3_InitForVulkan(window.handle());
+  ImGui_ImplSDL3_InitForMetal(window.handle());
   renderer_.InitImGuiRenderer();
 }
 

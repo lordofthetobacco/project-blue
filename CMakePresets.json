@@ -1,45 +1,49 @@
-﻿{
+{
     "version": 3,
     "configurePresets": [
         {
-            "name": "windows-base",
+            "name": "macos-base",
             "hidden": true,
-            "generator": "Ninja",
+            "generator": "Unix Makefiles",
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "installDir": "${sourceDir}/out/install/${presetName}",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "cl.exe",
-                "CMAKE_CXX_COMPILER": "cl.exe"
-            },
-            "architecture": {
-                "value": "x64",
-                "strategy": "external"
-            },
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
-                "rhs": "Windows"
+                "rhs": "Darwin"
             }
         },
         {
-            "name": "x64-debug",
-            "displayName": "x64 Debug",
-            "inherits": "windows-base",
+            "name": "macos-debug",
+            "displayName": "macOS Debug",
+            "inherits": "macos-base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug"
             }
         },
         {
-            "name": "x64-release",
-            "displayName": "x64 Release",
-            "inherits": "windows-base",
+            "name": "macos-release",
+            "displayName": "macOS Release",
+            "inherits": "macos-base",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
         }
     ],
     "buildPresets": [
-        { "name": "x64-debug", "configurePreset": "x64-debug" },
-        { "name": "x64-release", "configurePreset": "x64-release" }
+        { "name": "macos-debug", "configurePreset": "macos-debug", "jobs": 12 },
+        { "name": "macos-release", "configurePreset": "macos-release", "jobs": 12 }
+    ],
+    "testPresets": [
+        {
+            "name": "macos-debug",
+            "configurePreset": "macos-debug",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "macos-release",
+            "configurePreset": "macos-release",
+            "output": { "outputOnFailure": true }
+        }
     ]
 }

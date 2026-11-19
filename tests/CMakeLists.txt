@@ -57,6 +57,7 @@ add_executable(blue_tests
     weapon_prefab_test.cc
     window_pair_test.cc
     shader_compiler_test.cc
+    shader_preprocessor_test.cc
     shader_watcher_test.cc
     material_file_test.cc
     image_decoder_test.cc

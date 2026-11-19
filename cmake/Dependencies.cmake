@@ -28,13 +28,6 @@ FetchContent_Declare(glm
     GIT_SHALLOW    TRUE
     SYSTEM)
 
-# --- Vulkan Memory Allocator ------------------------------------------------
-FetchContent_Declare(VulkanMemoryAllocator
-    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-    GIT_TAG        v3.3.0
-    GIT_SHALLOW    TRUE
-    SYSTEM)
-
 # --- Dear ImGui, docking branch (no CMake support upstream; target defined below)
 # Docking is only switched on by the editor (ImGuiConfigFlags_DockingEnable).
 FetchContent_Declare(imgui
@@ -134,7 +127,7 @@ FetchContent_Declare(JoltPhysics
     SOURCE_SUBDIR  Build
     SYSTEM)
 
-FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui imguizmo stb)
+FetchContent_MakeAvailable(SDL3 glm imgui imguizmo stb)
 
 # The asset-cooking dependencies are compiled optimised even in Debug: assimp
 # parses m16.obj in ~1.7 s at /Od, and BC7 encoding is far too slow without
@@ -200,14 +193,21 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm
 )
 target_include_directories(imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
-target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL3::SDL3-static)
+# The Metal backend is written for ARC.
+target_compile_options(imgui PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+target_link_libraries(imgui PUBLIC
+    SDL3::SDL3-static
+    "-framework Metal"
+    "-framework QuartzCore"
+    "-framework Foundation"
+)
 blue_restore_msvc_default_flags(imgui)
 
 add_library(imguizmo STATIC ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp)
