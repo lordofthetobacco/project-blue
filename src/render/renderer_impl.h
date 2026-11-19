@@ -17,8 +17,9 @@
 #include "core/extent.h"
 #include "platform/window.h"
 #include "render/buffer.h"
+#include "render/environment.h"
 #include "render/frame_config.h"
-#include "render/fullscreen_pass.h"
+#include "render/frame_globals.h"
 #include "render/gpu_timer.h"
 #include "render/image.h"
 #include "render/material_system.h"
@@ -27,6 +28,7 @@
 #include "render/passes/bloom_pass.h"
 #include "render/passes/frame_context.h"
 #include "render/passes/present_pass.h"
+#include "render/passes/skybox_pass.h"
 #include "render/passes/tonemap_pass.h"
 #include "render/passes/ui_pass.h"
 #include "render/render_targets.h"
@@ -45,8 +47,8 @@
 // RendererImpl::RecordCommands() is the wiring: it records the passes in
 // order into the frame's one command buffer, each wrapped in a GPU timer
 // scope. The target design (Stages 4-5 of the Metal port bring back the
-// passes before bloom; until then a test pattern stands in for the scene,
-// see RecordCommands()):
+// passes before bloom; until then the scene is the sky alone, see
+// RecordCommands()):
 //
 //   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
@@ -170,12 +172,13 @@ struct RendererImpl {
   Swapchain swapchain_;
   Samplers samplers_;
   RenderTargets targets_;
-  // TODO(metal-stage4): FrameGlobals frame_globals_;
+  FrameGlobals frame_globals_;
   TextureCache textures_;
   MaterialSystem materials_;
   // Declared before the passes that register their programs with it.
   ShaderPrograms shader_programs_;
-  // TODO(metal-stage4): Environment environment_;
+  // Declared after frame_globals_, which it binds its textures into.
+  Environment environment_;
   // Declared before the passes that borrow it.
   std::vector<Mesh> meshes_;
   // Released GPU objects waiting until no frame in flight uses them
@@ -185,17 +188,15 @@ struct RendererImpl {
   std::vector<Retired<Image>> retired_images_;
   // TODO(metal-stage4): DrawList draw_list_;
 
-  // TODO(metal-stage4): replaced by the scene pass. Writes a uv test
-  // pattern (shaders/debug_gradient.frag.metal) into the HDR image.
-  FullscreenPass debug_gradient_pass_;
+  // TODO(metal-stage4): DepthPrepass depth_prepass_, MeshPass mesh_pass_
+  // (before skybox_pass_).
+  SkyboxPass skybox_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   // Into the drawable.
   PresentPass present_pass_;
   // Into viewport_image_; created by the first PrepareViewport().
   std::optional<PresentPass> viewport_present_pass_;
-  // TODO(metal-stage4): DepthPrepass depth_prepass_, MeshPass mesh_pass_,
-  // SkyboxPass skybox_pass_.
   // TODO(metal-stage5): ShadowPass shadow_pass_, SsaoPass ssao_pass_,
   // ReticlePass reticle_pass_, OverlayPass overlay_pass_.
   // The ImGui backend.

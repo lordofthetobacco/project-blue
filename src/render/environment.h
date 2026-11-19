@@ -1,32 +1,32 @@
 #ifndef BLUE_RENDER_ENVIRONMENT_H_
 #define BLUE_RENDER_ENVIRONMENT_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
-#include <array>
+#include <cstdint>
 #include <string>
-#include <vector>
 
 #include "asset/image_decoder.h"
 #include "lighting/environment.h"
 #include "render/frame_globals.h"
+#include "render/frame_uniforms.h"
 #include "render/fullscreen_pass.h"
 #include "render/image.h"
+#include "render/metal_context.h"
 #include "render/samplers.h"
 #include "render/shader_programs.h"
-#include "render/vulkan_context.h"
 
 namespace blue::render {
 
 // Image-based lighting on the GPU: turns an equirect HDR panorama into
-//   - the sky cube (512^2 RGBA16F, no mips): the panorama as it is, drawn
-//     by SkyboxPass;
-//   - the specular cube (256^2 RGBA16F, kPrefilterMips mips): GGX-prefiltered
-//     for perceptual roughness mip / (kPrefilterMips - 1), bound as
-//     FrameGlobals binding 2;
+//   - the sky cube (512^2 RGBA16Float, no mips): the panorama as it is,
+//     drawn by SkyboxPass;
+//   - the specular cube (256^2 RGBA16Float, kPrefilterMips mips):
+//     GGX-prefiltered for perceptual roughness mip / (kPrefilterMips - 1),
+//     bound through FrameGlobals at kTextureEnvironment;
 //   - SH9 diffuse irradiance (CPU), written into FrameUniforms;
-// plus the split-sum BRDF lookup table (256^2 RG16F, generated on the GPU
-// once), FrameGlobals binding 3.
+// plus the split-sum BRDF lookup table (256^2 RG16Float, generated on the
+// GPU once), bound through FrameGlobals at kTextureBrdfLut.
 //
 // The panorama's sun is too small and bright for the prefiltered cube and
 // the SH (fireflies, and it would double the scene's analytic sun). Lighting
@@ -34,8 +34,10 @@ namespace blue::render {
 // lighting::EstimateSun().clamp_luminance scaled down to it; only the sky
 // cube keeps the sun.
 //
-// Borrows `context`, `samplers` and `frame_globals`, which must outlive it.
-// Neither copyable nor movable. Not thread-safe.
+// The cubes are created once and refilled in place by Set(), so the
+// textures handed out (sky_texture(), the FrameGlobals bindings) never
+// change. Borrows `context` and `samplers`, which must outlive it. Neither
+// copyable nor movable. Not thread-safe.
 class Environment {
  public:
   static constexpr uint32_t kSkySize = 512;
@@ -46,7 +48,7 @@ class Environment {
   // Creates the images and pipelines, generates the BRDF LUT, binds the
   // specular cube and LUT into `frame_globals` and sets the generated
   // default sky (lighting::MakeDefaultEnvironment) with intensity 1.
-  Environment(const VulkanContext& context, ShaderPrograms& programs,
+  Environment(const MetalContext& context, ShaderPrograms& programs,
               const std::string& shader_dir, const Samplers& samplers,
               FrameGlobals& frame_globals);
 
@@ -55,8 +57,8 @@ class Environment {
 
   // Replaces the environment by `equirect` (linear radiance, see
   // lighting/environment.h for the mapping) and blocks until the GPU has
-  // filtered it. The GPU must be idle (no frame in flight). An empty image
-  // sets the default sky.
+  // filtered it. The GPU must be idle (no frame in flight): the cubes are
+  // rewritten in place. An empty image sets the default sky.
   void Set(const asset::ImageDataF& equirect, float intensity,
            float rotation_radians);
 
@@ -67,9 +69,11 @@ class Environment {
   // Writes the SH9 irradiance and environment_params into `uniforms`.
   void FillUniforms(FrameUniforms& uniforms) const;
 
-  // The sky cube (SHADER_READ_ONLY_OPTIMAL) and the sampler to read it.
-  [[nodiscard]] VkImageView sky_view() const { return sky_cube_.view(); }
-  [[nodiscard]] VkSampler sky_sampler() const {
+  // The sky cube and the sampler to read it.
+  [[nodiscard]] id<MTLTexture> sky_texture() const {
+    return sky_cube_.texture();
+  }
+  [[nodiscard]] id<MTLSamplerState> sky_sampler() const {
     return samplers_.linear_clamp();
   }
   // The sun found in the current panorama (found == false for the default
@@ -77,23 +81,19 @@ class Environment {
   [[nodiscard]] const lighting::SunEstimate& sun() const { return sun_; }
 
  private:
-  // Records the GGX prefilter of the specular source cube (all mips in
-  // SHADER_READ_ONLY_OPTIMAL) into the specular cube.
-  void RecordFiltering(VkCommandBuffer cmd) const;
-  // Fills the specular source cube's mips by blitting mip 0 down.
-  void RecordSourceMips(VkCommandBuffer cmd) const;
+  // Records the GGX prefilter of the specular source cube (with its mips)
+  // into the specular cube.
+  void RecordFiltering(id<MTLCommandBuffer> cmd) const;
+  // Fills the specular source cube's mips from mip 0.
+  void RecordSourceMips(id<MTLCommandBuffer> cmd) const;
   void GenerateBrdfLut();
 
-  const VulkanContext& context_;
+  const MetalContext& context_;
   const Samplers& samplers_;
   Image sky_cube_;
   Image source_cube_;  // Clamped panorama with a full mip chain.
   Image specular_cube_;
   Image brdf_lut_;
-  std::array<ImageView, 6> sky_face_views_;
-  std::array<ImageView, 6> source_face_views_;
-  std::vector<ImageView> specular_face_views_;  // [mip * 6 + face]
-  ImageView brdf_lut_target_;
   FullscreenPass to_cube_pass_;
   FullscreenPass prefilter_pass_;
   FullscreenPass brdf_lut_pass_;

@@ -1,73 +1,71 @@
 #ifndef BLUE_RENDER_FRAME_GLOBALS_H_
 #define BLUE_RENDER_FRAME_GLOBALS_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <array>
 #include <cstddef>
-#include <cstdint>
 
 #include "render/buffer.h"
 #include "render/frame_config.h"
 #include "render/frame_uniforms.h"
 #include "render/image.h"
+#include "render/metal_context.h"
 #include "render/samplers.h"
-#include "render/vulkan_context.h"
 
 namespace blue::render {
 
-// Descriptor set 0 of the scene passes, one per frame in flight:
-//   binding 0: FrameUniforms (uniform buffer)
-//   binding 1: cascaded shadow map (sampler2DArrayShadow)
-//   binding 2: prefiltered environment cube (samplerCube), specular IBL
-//   binding 3: BRDF lookup table (sampler2D, RG: scale, bias)
-//   binding 4: ambient occlusion (sampler2D, R, render-target sized)
-// Bindings 2-4 start bound to 1 x 1 defaults (black cube, zero LUT, white
-// AO) so shaders can sample them before the passes that produce them exist.
-// Borrows `context` and `samplers`, which must outlive it. Neither copyable
-// nor movable. Not thread-safe.
+// The resources every scene shader sees (FrameResources in shaders/common.h),
+// set on an encoder by Bind() (indices in shaders/bindings.h):
+//   kBufferFrame (both stages):  FrameUniforms, one shared buffer per frame
+//                                in flight
+//   kTextureShadowMap:           cascaded shadow map (depth2d_array)
+//   kTextureEnvironment:         prefiltered environment cube, specular IBL
+//   kTextureBrdfLut:             BRDF lookup table (RG: scale, bias)
+//   kTextureAmbientOcclusion:    ambient occlusion (R)
+//   kSamplerShadow, kSamplerLinearClamp, kSamplerNearestClamp
+// The textures start as 1 x 1 defaults, so shaders can sample them before
+// the passes that produce them exist: a 4-layer shadow map at depth 1 (lit
+// everywhere), a black cube, a zero LUT and white occlusion.
+// Borrows `samplers`, which must outlive it. Neither copyable nor movable.
+// Not thread-safe.
 class FrameGlobals {
  public:
-  FrameGlobals(const VulkanContext& context, const Samplers& samplers);
-  ~FrameGlobals();
+  FrameGlobals(const MetalContext& context, const Samplers& samplers);
 
   FrameGlobals(const FrameGlobals&) = delete;
   FrameGlobals& operator=(const FrameGlobals&) = delete;
 
-  [[nodiscard]] VkDescriptorSetLayout set_layout() const { return layout_; }
-  [[nodiscard]] VkDescriptorSet set(size_t frame) const {
-    return frames_[frame].set;
-  }
   // Copies `uniforms` into the buffer of `frame`, whose previous use the GPU
-  // must have finished (its fence waited on).
+  // must have finished (its command buffer waited on).
   void Write(size_t frame, const FrameUniforms& uniforms) const;
 
-  // The Bind* calls rewrite a binding of every frame's set: no frame may be
-  // in flight (call while the GPU is idle, e.g. at startup or after a
-  // swapchain rebuild). Images must be in SHADER_READ_ONLY_OPTIMAL (the
-  // shadow map: DEPTH_READ_ONLY_OPTIMAL) whenever a frame samples them.
-  void BindShadowMap(VkImageView view, VkSampler compare_sampler);
-  void BindEnvironment(VkImageView prefiltered_cube, VkImageView brdf_lut);
-  void BindAmbientOcclusion(VkImageView ambient_occlusion);
+  // The Bind* calls choose what later Bind(encoder, ...) calls set; encoders
+  // recorded before keep (and retain) what they were given, so these may be
+  // called at any time between frames.
+  // `shadow_map`: Depth*, 2D array with one layer per cascade.
+  void BindShadowMap(id<MTLTexture> shadow_map);
+  void BindEnvironment(id<MTLTexture> prefiltered_cube,
+                       id<MTLTexture> brdf_lut);
+  void BindAmbientOcclusion(id<MTLTexture> ambient_occlusion);
+
+  // Sets frame `frame`'s uniform buffer, the textures and the samplers on
+  // `encoder`. Call once per encoder: the bindings persist across pipeline
+  // changes.
+  void Bind(id<MTLRenderCommandEncoder> encoder, size_t frame) const;
 
  private:
-  struct Frame {
-    Buffer uniforms;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-  };
-
-  // Points `binding` of every frame's set at `view` with `sampler`.
-  void BindImage(uint32_t binding, VkImageView view, VkSampler sampler,
-                 VkImageLayout layout);
-
-  VkDevice device_;
   const Samplers& samplers_;
-  VkDescriptorSetLayout layout_ = VK_NULL_HANDLE;
-  VkDescriptorPool pool_ = VK_NULL_HANDLE;
-  std::array<Frame, kFramesInFlight> frames_;
+  std::array<Buffer, kFramesInFlight> uniforms_;
+  // TODO(metal-stage5): replaced through BindShadowMap() by the shadow pass.
+  Image default_shadow_map_;
   Image default_cube_;
   Image default_lut_;
   Image default_ambient_occlusion_;
+  id<MTLTexture> shadow_map_ = nil;
+  id<MTLTexture> environment_ = nil;
+  id<MTLTexture> brdf_lut_ = nil;
+  id<MTLTexture> ambient_occlusion_ = nil;
 };
 
 }  // namespace blue::render

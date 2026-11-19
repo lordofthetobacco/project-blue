@@ -13,10 +13,10 @@
 #include <glm/vec4.hpp>
 
 #include "core/log.h"
-#include "core/path.h"
 #include "material/material.h"
 #include "platform/window.h"
 #include "render/encoders.h"
+#include "render/frame_uniforms.h"
 #include "render/metal_check.h"
 #include "render/passes/ui_pass.h"
 #include "render/renderer_impl.h"
@@ -29,6 +29,9 @@ namespace {
 // output (BGRA8Unorm_sRGB), so the UI shows it as the game window would.
 constexpr MTLPixelFormat kViewportFormat = MTLPixelFormatRGBA8Unorm_sRGB;
 
+// Linear radiance where nothing (not even the sky) is drawn.
+constexpr MTLClearColor kSceneClearColor{0.015, 0.018, 0.022, 1.0};
+
 // Neutral grey dielectric: what kDefaultMaterial looks like.
 material::MaterialDesc DefaultMaterialDesc() {
   material::MaterialDesc desc;
@@ -36,6 +39,30 @@ material::MaterialDesc DefaultMaterialDesc() {
   desc.base_color = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
   desc.roughness = 0.6f;
   return desc;
+}
+
+// TODO(metal-stage4b): becomes BeginScenePass / EndScenePass with the mesh
+// pass before the skybox. Opens the scene encoder: the HDR target cleared,
+// the scene depth cleared to 0 (reversed Z: infinitely far), both stored,
+// with the frame's globals bound.
+id<MTLRenderCommandEncoder> BeginTemporaryScenePass(const FrameContext& ctx) {
+  MTLRenderPassDescriptor* descriptor =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTLRenderPassColorAttachmentDescriptor* color =
+      descriptor.colorAttachments[0];
+  color.texture = ctx.targets.hdr().texture();
+  color.loadAction = MTLLoadActionClear;
+  color.storeAction = MTLStoreActionStore;
+  color.clearColor = kSceneClearColor;
+  MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
+  depth.texture = ctx.targets.depth().texture();
+  depth.loadAction = MTLLoadActionClear;
+  depth.storeAction = MTLStoreActionStore;
+  depth.clearDepth = 0.0;
+  id<MTLRenderCommandEncoder> encoder =
+      BeginRenderPass(ctx, descriptor, "scene");
+  ctx.globals.Bind(encoder, ctx.frame_index);
+  return encoder;
 }
 
 }  // namespace
@@ -50,16 +77,13 @@ RendererImpl::RendererImpl(const platform::Window& window,
       swapchain_(context_, window, window.PixelSize(), vsync_),
       samplers_(context_),
       targets_(context_, swapchain_.extent()),
+      frame_globals_(context_, samplers_),
       textures_(context_),
       materials_(context_, textures_, samplers_),
       shader_programs_(context_, shader_mode_),
-      debug_gradient_pass_(
-          context_, shader_programs_, shader_dir_,
-          {.fragment_path =
-               core::JoinPath(shader_dir_, "debug_gradient.frag.metal"),
-           .input_count = 0,
-           .output_format = RenderTargets::kHdrFormat,
-           .label = "debug gradient"}),
+      environment_(context_, shader_programs_, shader_dir_, samplers_,
+                   frame_globals_),
+      skybox_pass_(context_, shader_programs_, shader_dir_, environment_),
       bloom_pass_(context_, shader_programs_, shader_dir_),
       tonemap_pass_(context_, shader_programs_, shader_dir_),
       present_pass_(context_, shader_programs_, shader_dir_,
@@ -74,6 +98,8 @@ RendererImpl::RendererImpl(const platform::Window& window,
 RendererImpl::~RendererImpl() { context_.WaitIdle(); }
 
 void RendererImpl::BindTargets() {
+  // TODO(metal-stage5): the SSAO pass writes it; until then it stays white.
+  frame_globals_.BindAmbientOcclusion(targets_.ssao().texture());
   bloom_pass_.BindTargets(targets_, samplers_);
   tonemap_pass_.BindTargets(targets_, samplers_);
   present_pass_.BindTargets(targets_, samplers_);
@@ -295,10 +321,19 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     FatalIfNil(frame.command_buffer, nil, "commandBuffer");
     frame.command_buffer.label = @"frame";
 
+    // TODO(metal-stage5): shadows (view.shadows_enabled &&
+    // view.sun.casts_shadows) with lighting::FitCascades(); until the shadow
+    // pass exists the uniforms say "no shadows" and need no cascades.
+    FrameUniforms uniforms =
+        MakeFrameUniforms(view, {}, /*shadows=*/false, targets_.extent());
+    environment_.FillUniforms(uniforms);
+    frame_globals_.Write(frame_index_, uniforms);
+
     stats_ = {};
     FrameContext ctx{
         .cmd = frame.command_buffer,
         .frame_index = frame_index_,
+        .globals = frame_globals_,
         .view = view,
         .targets = targets_,
         .output_extent = swapchain_.extent(),
@@ -324,11 +359,10 @@ void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
     gpu_timer_.EndScope(scope);
   };
 
-  // TODO(metal-stage4): replaced by the scene pass; the test pattern shows
-  // the orientation and colour handling of the post chain.
   timed(GpuScope::kScene, [&] {
-    debug_gradient_pass_.Record(ctx, {.texture = ctx.targets.hdr().texture(),
-                                      .extent = ctx.targets.extent()});
+    const id<MTLRenderCommandEncoder> encoder = BeginTemporaryScenePass(ctx);
+    skybox_pass_.Draw(ctx, encoder);
+    [encoder endEncoding];
   });
   if (ctx.view.post.bloom_enabled) {
     timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });
@@ -444,16 +478,20 @@ TextureStats Renderer::texture_stats() const {
   return impl_->textures_.stats();
 }
 
-// TODO(metal-stage4): the environment (sky and image-based lighting); until
-// then these keep their signatures and do nothing.
-void Renderer::SetEnvironment(const asset::ImageDataF& /*equirect*/,
-                              float /*intensity*/, float /*rotation_radians*/) {
+void Renderer::SetEnvironment(const asset::ImageDataF& equirect,
+                              float intensity, float rotation_radians) {
+  impl_->context_.WaitIdle();
+  impl_->environment_.Set(equirect, intensity, rotation_radians);
 }
 
-void Renderer::ResetEnvironment() {}
+void Renderer::ResetEnvironment() {
+  impl_->context_.WaitIdle();
+  impl_->environment_.Set({}, 1.0f, 0.0f);
+}
 
-void Renderer::SetEnvironmentParams(float /*intensity*/,
-                                    float /*rotation_radians*/) {}
+void Renderer::SetEnvironmentParams(float intensity, float rotation_radians) {
+  impl_->environment_.SetParams(intensity, rotation_radians);
+}
 
 void Renderer::RequestSwapchainRebuild() { impl_->swapchain_dirty_ = true; }
 

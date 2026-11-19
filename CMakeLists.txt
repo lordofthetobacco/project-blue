@@ -369,6 +369,8 @@ add_library(blue_render STATIC
     src/render/buffer.mm
     src/render/debug_lines.cc
     src/render/encoders.mm
+    src/render/environment.mm
+    src/render/frame_globals.mm
     src/render/frame_uniforms.cc
     src/render/fullscreen_pass.mm
     src/render/gpu_scope.cc
@@ -388,6 +390,7 @@ add_library(blue_render STATIC
     src/render/texture_types.cc
     src/render/passes/bloom_pass.mm
     src/render/passes/present_pass.mm
+    src/render/passes/skybox_pass.mm
     src/render/passes/tonemap_pass.mm
     src/render/passes/ui_pass.mm
 )

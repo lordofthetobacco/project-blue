@@ -1,4 +1,9 @@
-#version 450
+#include <metal_stdlib>
+
+using namespace metal;
+
+#include "environment.h"
+#include "sanitize.h"
 
 // Generates the split-sum BRDF lookup table (render::Environment), the GPU
 // twin of lighting::GenerateBrdfLut(): x = NdotV, y = perceptual roughness
@@ -6,15 +11,15 @@
 // prefiltered * (F0 * scale + F90 * bias). Importance-sampled GGX with
 // height-correlated Smith visibility.
 
-#include "environment.glsl"
-#include "sanitize.glsl"
+// Must match FullscreenVaryings in fullscreen.vert.metal.
+struct FullscreenVaryings {
+    float4 position [[position]];
+    float2 uv [[user(loc0)]];
+};
 
-layout(location = 0) in vec2 inUv;
-layout(location = 0) out vec4 outColor;
+constant uint kSampleCount = 1024u;
 
-const uint kSampleCount = 1024u;
-
-float VisibilitySmithGgxCorrelated(float NdotV, float NdotL, float alpha)
+static float VisibilitySmithGgxCorrelated(float NdotV, float NdotL, float alpha)
 {
     const float a2 = alpha * alpha;
     const float ggxV = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);
@@ -22,16 +27,16 @@ float VisibilitySmithGgxCorrelated(float NdotV, float NdotL, float alpha)
     return 0.5 / max(ggxV + ggxL, 1.0e-7);
 }
 
-void main()
+fragment float4 FragmentMain(FullscreenVaryings varyings [[stage_in]])
 {
-    const float NdotV = inUv.x;
-    const float alpha = inUv.y * inUv.y;
-    const vec3 v = vec3(sqrt(1.0 - NdotV * NdotV), 0.0, NdotV);
-    vec2 sum = vec2(0.0);
+    const float NdotV = varyings.uv.x;
+    const float alpha = varyings.uv.y * varyings.uv.y;
+    const float3 v = float3(sqrt(1.0 - NdotV * NdotV), 0.0, NdotV);
+    float2 sum = float2(0.0);
     for (uint i = 0u; i < kSampleCount; ++i) {
-        const vec3 h = ImportanceSampleGgx(Hammersley(i, kSampleCount), alpha);
+        const float3 h = ImportanceSampleGgx(Hammersley(i, kSampleCount), alpha);
         const float VdotH = dot(v, h);
-        const vec3 l = 2.0 * VdotH * h - v;
+        const float3 l = 2.0 * VdotH * h - v;
         const float NdotL = l.z;
         const float NdotH = h.z;
         if (NdotL <= 0.0 || VdotH <= 0.0) {
@@ -41,8 +46,8 @@ void main()
         const float g = 4.0 * VisibilitySmithGgxCorrelated(NdotV, NdotL, alpha) *
                         NdotL * VdotH / max(NdotH, 1.0e-7);
         const float fc = pow(1.0 - VdotH, 5.0);
-        sum += vec2((1.0 - fc) * g, fc * g);
+        sum += float2((1.0 - fc) * g, fc * g);
     }
     // Scale and bias are fractions of the reflected energy.
-    outColor = vec4(SanitizeColor(sum / float(kSampleCount), 1.0), 0.0, 1.0);
+    return float4(SanitizeColor(sum / float(kSampleCount), 1.0), 0.0, 1.0);
 }

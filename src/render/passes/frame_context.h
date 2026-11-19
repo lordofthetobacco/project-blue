@@ -6,6 +6,7 @@
 #include <cstddef>
 
 #include "core/extent.h"
+#include "render/frame_globals.h"
 #include "render/gpu_timer.h"
 #include "render/render_targets.h"
 #include "render/scene_view.h"
@@ -20,8 +21,9 @@ struct FrameContext {
   // render/encoders.h.
   id<MTLCommandBuffer> cmd = nil;
   size_t frame_index = 0;  // Frame in flight, [0, kFramesInFlight).
-  // TODO(metal-stage4): FrameGlobals of this frame (FrameUniforms and the
-  // shared textures, bound per encoder).
+  // FrameUniforms and the shared textures; a scene pass sets them on each
+  // of its encoders with globals.Bind(encoder, frame_index).
+  const FrameGlobals& globals;
   const SceneView& view;
   const RenderTargets& targets;
 
