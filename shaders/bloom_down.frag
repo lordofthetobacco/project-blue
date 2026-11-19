@@ -8,6 +8,8 @@
 // average"), so a single extremely bright pixel cannot become a flickering
 // blob.
 
+#include "sanitize.glsl"
+
 layout(set = 0, binding = 0) uniform sampler2D source;  // bilinear, clamped
 
 // Must match DownsampleConstants in src/render/passes/bloom_pass.cc.
@@ -19,14 +21,13 @@ layout(push_constant) uniform DownsampleConstants {
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
 
-// Largest radiance passed on: fp16 headroom, and NaN / inf from a broken
-// pixel never spreads.
-const float kMaxRadiance = 32768.0;
-
+// Every tap is sanitised: NaN / Inf from a broken pixel never spreads, and
+// the radiance passed on stays at the scene maximum. (It was 32768 here,
+// which the up-sample summing six levels could take past the fp16 maximum
+// to +Inf, and the composite then to black.)
 vec3 Tap(vec2 offset)
 {
-    const vec3 color = texture(source, inUv + offset * params.sourceTexel).rgb;
-    return clamp(color, vec3(0.0), vec3(kMaxRadiance));
+    return SanitizeRadiance(texture(source, inUv + offset * params.sourceTexel).rgb);
 }
 
 float KarisWeight(vec3 color)
@@ -71,5 +72,5 @@ void main()
         sum += groups[n] * weight;
         weightSum += weight;
     }
-    outColor = vec4(sum / weightSum, 1.0);
+    outColor = vec4(SanitizeRadiance(sum / weightSum), 1.0);
 }

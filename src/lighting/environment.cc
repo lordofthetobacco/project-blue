@@ -159,10 +159,10 @@ glm::vec2 Hammersley(uint32_t i, uint32_t count) {
 float SmithGgxCorrelated(float n_dot_v, float n_dot_l, float a) {
   const float a2 = a * a;
   const float lambda_v =
-      n_dot_l * std::sqrt(n_dot_v * n_dot_v * (1.0f - a2) + a2);
+      n_dot_l * std::sqrt(std::max(n_dot_v * n_dot_v * (1.0f - a2) + a2, 0.0f));
   const float lambda_l =
-      n_dot_v * std::sqrt(n_dot_l * n_dot_l * (1.0f - a2) + a2);
-  return 0.5f / (lambda_v + lambda_l);
+      n_dot_v * std::sqrt(std::max(n_dot_l * n_dot_l * (1.0f - a2) + a2, 0.0f));
+  return 0.5f / std::max(lambda_v + lambda_l, 1.0e-7f);
 }
 
 // Returns (scale, bias) of the split-sum for `n_dot_v` and perceptual
@@ -174,11 +174,17 @@ glm::vec2 IntegrateBrdf(float n_dot_v, float roughness, int sample_count) {
   glm::vec2 sum(0.0f);
   for (uint32_t i = 0; i < count; ++i) {
     const glm::vec2 xi = Hammersley(i, count);
-    // GGX importance sample of the half vector.
+    // GGX importance sample of the half vector, as ImportanceSampleGgx in
+    // shaders/environment.glsl: cos^2 is clamped to [0, 1] before both
+    // square roots (for small alpha the quotient is x / x, which inexact
+    // division can put above 1), and alpha 0 at xi.y = 1 is not 0 / 0.
     const float phi = 2.0f * kPi * xi.x;
-    const float cos_theta =
-        std::sqrt((1.0f - xi.y) / (1.0f + (alpha * alpha - 1.0f) * xi.y));
-    const float sin_theta = std::sqrt(1.0f - cos_theta * cos_theta);
+    const float denominator =
+        std::max(1.0f + (alpha * alpha - 1.0f) * xi.y, 1.0e-20f);
+    const float cos_theta_sq =
+        std::clamp((1.0f - xi.y) / denominator, 0.0f, 1.0f);
+    const float cos_theta = std::sqrt(cos_theta_sq);
+    const float sin_theta = std::sqrt(std::max(1.0f - cos_theta_sq, 0.0f));
     const glm::vec3 half{sin_theta * std::cos(phi), sin_theta * std::sin(phi),
                          cos_theta};
     const float v_dot_h = glm::dot(view, half);
@@ -190,7 +196,7 @@ glm::vec2 IntegrateBrdf(float n_dot_v, float roughness, int sample_count) {
     }
     // BRDF * NdotL / pdf with pdf = D * NdotH / (4 VdotH); D cancels.
     const float weight = 4.0f * SmithGgxCorrelated(n_dot_v, n_dot_l, alpha) *
-                         n_dot_l * v_dot_h / n_dot_h;
+                         n_dot_l * v_dot_h / std::max(n_dot_h, 1.0e-7f);
     const float fresnel = std::pow(1.0f - v_dot_h, 5.0f);
     sum.x += (1.0f - fresnel) * weight;
     sum.y += fresnel * weight;
@@ -288,7 +294,10 @@ BrdfLut GenerateBrdfLut(int size, int sample_count) {
     for (int x = 0; x < lut.size; ++x) {
       const float n_dot_v =
           (static_cast<float>(x) + 0.5f) / static_cast<float>(lut.size);
-      const glm::vec2 value = IntegrateBrdf(n_dot_v, roughness, samples);
+      // Scale and bias are fractions of the reflected energy (clamped like
+      // env_brdf_lut.frag's output).
+      const glm::vec2 value =
+          glm::clamp(IntegrateBrdf(n_dot_v, roughness, samples), 0.0f, 1.0f);
       const size_t offset =
           (static_cast<size_t>(y) * static_cast<size_t>(lut.size) +
            static_cast<size_t>(x)) *

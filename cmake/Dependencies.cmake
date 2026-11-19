@@ -72,10 +72,12 @@ set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_FBX_IMPORTER ON CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
 
+# The patch drops the /Od assimp appends to its MSVC debug flags (see below).
 FetchContent_Declare(assimp
     GIT_REPOSITORY https://github.com/assimp/assimp.git
     GIT_TAG        v6.0.2
     GIT_SHALLOW    TRUE
+    PATCH_COMMAND  ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/third_party/assimp_debug_flags.cmake
     SYSTEM)
 
 # --- stb (header-only; only stb_image is used, compiled in src/asset/image_decoder.cc)
@@ -169,11 +171,6 @@ FetchContent_MakeAvailable(assimp)
 unset(BUILD_SHARED_LIBS)
 set_target_properties(assimp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-if(MSVC)
-    # assimp appends "/D_DEBUG /Zi /Od" to its own debug flags; a later /O2
-    # wins (the compiler notes the override with D9025 once per file).
-    target_compile_options(assimp PRIVATE $<$<CONFIG:Debug>:/O2>)
-endif()
 
 FetchContent_MakeAvailable(meshoptimizer bc7enc_rdo)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/third_party/bc7enc_rdo
@@ -191,6 +188,11 @@ else()
     FetchContent_MakeAvailable(JoltPhysics)
 endif()
 
+# Every sub-project above has copied the default flags; from here on the root directory
+# (first-party code and the libraries below) compiles without /EHsc and the Release /O2,
+# see cmake/ProjectOptions.cmake.
+blue_remove_msvc_default_flags()
+
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -206,10 +208,12 @@ target_include_directories(imgui SYSTEM PUBLIC
 )
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL3::SDL3-static)
+blue_restore_msvc_default_flags(imgui)
 
 add_library(imguizmo STATIC ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp)
 target_include_directories(imguizmo SYSTEM PUBLIC ${imguizmo_SOURCE_DIR}/src)
 target_link_libraries(imguizmo PUBLIC imgui)
+blue_restore_msvc_default_flags(imguizmo)
 
 # stb has no CMake project; SYSTEM keeps its warnings out of /W4 /WX builds.
 add_library(stb INTERFACE)

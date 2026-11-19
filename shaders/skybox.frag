@@ -6,6 +6,7 @@
 
 #include "common.glsl"
 #include "environment.glsl"
+#include "sanitize.glsl"
 
 layout(set = 1, binding = 0) uniform samplerCube skyMap;
 
@@ -20,5 +21,6 @@ void main()
     const vec3 viewDirection = point.xyz / point.w;
     const vec3 world = normalize(transpose(mat3(frame.view)) * viewDirection);
     const vec3 d = RotateY(world, -frame.environmentParams.y);
-    outColor = vec4(textureLod(skyMap, d, 0.0).rgb * frame.environmentParams.x, 1.0);
+    outColor = vec4(SanitizeRadiance(textureLod(skyMap, d, 0.0).rgb * frame.environmentParams.x),
+                    1.0);
 }

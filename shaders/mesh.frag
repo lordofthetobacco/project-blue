@@ -29,7 +29,9 @@ vec3 PerturbNormal(vec3 normal, vec3 tangent, float handedness, vec3 mapped)
     }
     const vec3 unitTangent = normalize(t);
     const vec3 bitangent = cross(normal, unitTangent) * handedness;
-    return normalize(unitTangent * mapped.x - bitangent * mapped.y + normal * mapped.z);
+    // A zero texel (a broken or unset map) has no direction: keep the normal.
+    return SafeNormalize(unitTangent * mapped.x - bitangent * mapped.y + normal * mapped.z,
+                         normal);
 }
 
 // Returns the tangent-space normal stored in `texel` (sampled from the
@@ -82,7 +84,10 @@ void main()
     const vec3 emissive =
         texture(emissiveMap, MaterialUv(kSlotEmissive, uv0, uv1)).rgb * material.emissive.rgb;
 
-    vec3 geometricNormal = normalize(inNormal);
+    // Degenerate vertex normals (zero, or cancelling across the triangle)
+    // fall back to facing the camera.
+    vec3 geometricNormal = SafeNormalize(
+        inNormal, SafeNormalize(frame.cameraPosition.xyz - inWorldPosition, vec3(0.0, 1.0, 0.0)));
     vec3 tangent = inTangent.xyz;
     if (kDoubleSided && !gl_FrontFacing) {
         // Back face: mirror the whole tangent frame. The bitangent comes from
@@ -101,7 +106,9 @@ void main()
     }
 
     const float metallic = clamp(metallicRoughness.b * material.surface.x, 0.0, 1.0);
-    const float occlusion = 1.0 + material.surface.w * (occlusionTexel - 1.0);
+    // Strengths above 1 would push it below 0.
+    const float occlusion =
+        clamp(1.0 + material.surface.w * (occlusionTexel - 1.0), 0.0, 1.0);
     const Surface s = MakeSurface(inWorldPosition, normal, baseColor.rgb, metallic,
                                   roughness, occlusion);
 
@@ -109,7 +116,9 @@ void main()
 
     // Sun. Surfaces whose geometry faces away from it get no direct light,
     // shadow lookup included (a bumped normal must not light the back side).
-    const vec3 sunDir = -normalize(frame.sunDirection.xyz);
+    // A scene without a sun may leave its direction zero (and its colour 0,
+    // but 0 * NaN is still NaN).
+    const vec3 sunDir = -SafeNormalize(frame.sunDirection.xyz, vec3(0.0, -1.0, 0.0));
     const float viewDepth = -(frame.view * vec4(inWorldPosition, 1.0)).z;
     float visibility = dot(geometricNormal, sunDir) > 0.0 ? 1.0 : 0.0;
     if (frame.shadowParams.x > 0.5 && visibility > 0.0) {
@@ -119,5 +128,8 @@ void main()
 
     color += AmbientLight(s, geometricNormal) + emissive;
     color = ApplyCascadeDebugTint(color, viewDepth);
-    outColor = vec4(color, 1.0);
+    // Defence in depth: whatever slipped through above must not reach the
+    // HDR target as NaN / Inf (or overflow its half floats), see
+    // sanitize.glsl.
+    outColor = vec4(SanitizeRadiance(color), 1.0);
 }

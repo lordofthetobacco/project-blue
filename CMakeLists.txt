@@ -14,10 +14,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
 
+# ProjectOptions first: cmake/Dependencies.cmake uses its MSVC flag helpers.
+include(ProjectOptions)
 include(Dependencies)
 include(ShaderSources)
 include(SampleAssets)
-include(ProjectOptions)
 
 # Path handling and file system access (src/core/path.cc is pure; file_system.cc sits on
 # SDL3). One small library because the file system layer depends on the path functions

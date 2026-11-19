@@ -5,6 +5,7 @@
 // to it (the sun clamp for lighting; FLT_MAX for the sky).
 
 #include "environment.glsl"
+#include "sanitize.glsl"
 
 // RGBA32F, unfiltered: filtered here by hand (u wraps, v clamps).
 layout(set = 0, binding = 0) uniform sampler2D equirect;
@@ -39,6 +40,7 @@ void main()
     if (luminance > push.maxLuminance) {
         radiance *= push.maxLuminance / luminance;
     }
-    // Half floats end at 65504; keep the sun finite.
-    outColor = vec4(min(radiance, vec3(65000.0)), 1.0);
+    // Half floats end at 65504; keep the sun finite (and a broken texel of
+    // the panorama out of every mip and prefiltered level built from it).
+    outColor = vec4(SanitizeColor(radiance, kMaxHalfRadiance), 1.0);
 }

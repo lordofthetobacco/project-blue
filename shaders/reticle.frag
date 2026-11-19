@@ -2,6 +2,7 @@
 
 #include "common.glsl"
 #include "reticle.glsl"
+#include "sanitize.glsl"
 
 // A collimated (reflex) sight: the dot is an image at infinity along the
 // optic axis, so whether a pixel shows it depends only on the direction from
@@ -36,5 +37,5 @@ void main()
         1.0 - smoothstep(radius - 0.5 * pixelAngle, radius + 0.5 * pixelAngle, angle);
 
     // Additive: alpha is ignored by the blend.
-    outColor = vec4((sight.dotColor.rgb * dotMask + sight.tint.rgb) * window, 0.0);
+    outColor = vec4(SanitizeRadiance((sight.dotColor.rgb * dotMask + sight.tint.rgb) * window), 0.0);
 }

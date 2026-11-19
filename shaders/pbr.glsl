@@ -5,8 +5,15 @@
 // Light intensity convention (see src/render/scene_view.h): a light's color *
 // intensity is the radiance a white Lambertian surface facing it reflects,
 // so its irradiance is pi times that. DirectLight() applies the factor.
+//
+// Every function here is finite and non-negative for all legal inputs
+// (roughness 0..1, metallic 0..1, any directions, grazing and back-facing
+// shading normals). src/render/brdf_reference.h mirrors the math 1:1 under
+// the same names for the CPU test (tests/brdf_reference_test.cc); keep the
+// two in sync.
 
 #include "environment.glsl"
+#include "sanitize.glsl"
 
 const float kPi = 3.14159265359;
 // Below this perceptual roughness GGX highlights get too small for fp16 and
@@ -53,10 +60,11 @@ Surface MakeSurface(vec3 position, vec3 normal, vec3 baseColor, float metallic,
     Surface s;
     s.position = position;
     s.normal = normal;
-    s.view = normalize(frame.cameraPosition.xyz - position);
-    s.NdotV = max(dot(normal, s.view), 1.0e-4);
+    s.view = SafeNormalize(frame.cameraPosition.xyz - position, normal);
+    s.NdotV = clamp(dot(normal, s.view), 1.0e-4, 1.0);
     s.diffuseColor = baseColor * (1.0 - metallic);
-    s.f0 = mix(kDielectricF0, baseColor, metallic);
+    // Reflectance above 1 would make the multiple-scattering term blow up.
+    s.f0 = clamp(mix(kDielectricF0, baseColor, metallic), 0.0, 1.0);
     s.roughness = clamp(perceptualRoughness, kMinPerceptualRoughness, 1.0);
     s.alpha = s.roughness * s.roughness;
     s.occlusion = occlusion;
@@ -66,7 +74,9 @@ Surface MakeSurface(vec3 position, vec3 normal, vec3 baseColor, float metallic,
 float DistributionGgx(float NdotH, float alpha)
 {
     const float a2 = alpha * alpha;
-    const float d = (NdotH * a2 - NdotH) * NdotH + 1.0;
+    // d = NdotH^2 (a2 - 1) + 1 lies in [a2, 1]; rounding near NdotH = 1 must
+    // not take it below.
+    const float d = max((NdotH * a2 - NdotH) * NdotH + 1.0, a2);
     return a2 / (kPi * d * d);
 }
 
@@ -74,14 +84,14 @@ float DistributionGgx(float NdotH, float alpha)
 float VisibilitySmithGgxCorrelated(float NdotV, float NdotL, float alpha)
 {
     const float a2 = alpha * alpha;
-    const float ggxV = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);
-    const float ggxL = NdotV * sqrt(NdotL * NdotL * (1.0 - a2) + a2);
+    const float ggxV = NdotL * sqrt(max(NdotV * NdotV * (1.0 - a2) + a2, 0.0));
+    const float ggxL = NdotV * sqrt(max(NdotL * NdotL * (1.0 - a2) + a2, 0.0));
     return 0.5 / max(ggxV + ggxL, 1.0e-7);
 }
 
 vec3 FresnelSchlick(vec3 f0, float VdotH)
 {
-    const float f = pow(1.0 - VdotH, 5.0);
+    const float f = pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0);
     return f + f0 * (1.0 - f);
 }
 
@@ -90,11 +100,13 @@ vec3 FresnelSchlick(vec3 f0, float VdotH)
 // convention above).
 vec3 DirectLight(Surface s, vec3 toLight, vec3 intensity)
 {
-    const float NdotL = dot(s.normal, toLight);
-    if (NdotL <= 0.0) {
-        return vec3(0.0);
+    const float NdotL = min(dot(s.normal, toLight), 1.0);
+    if (!(NdotL > 0.0)) {
+        return vec3(0.0);  // Also a NaN light direction.
     }
-    const vec3 halfway = normalize(s.view + toLight);
+    // L = -V (light straight behind the camera through a bumped normal)
+    // has no halfway vector; the normal is the limit of the others.
+    const vec3 halfway = SafeNormalize(s.view + toLight, s.normal);
     const float NdotH = clamp(dot(s.normal, halfway), 0.0, 1.0);
     const float VdotH = clamp(dot(s.view, halfway), 0.0, 1.0);
 
@@ -135,9 +147,23 @@ vec3 EnvironmentIrradiance(vec3 n)
 }
 
 // Specular occlusion from ambient occlusion (Lagarde and de Rousiers 2014).
+// At the minimum roughness the exponent is ~0.3, so at NdotV = 1 the result
+// is ~ao: a mirror is occluded about as strongly as the diffuse term.
 float SpecularOcclusion(float NdotV, float ao, float roughness)
 {
-    return clamp(pow(NdotV + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
+    const float base = max(NdotV + ao, 0.0);
+    return clamp(pow(base, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
+}
+
+// Returns the split-sum (scale, bias) for `s` from the LUT, with the
+// analytic fit standing in for a texel that is not finite.
+vec2 EnvironmentBrdf(Surface s)
+{
+    const vec2 lut = textureLod(brdfLut, vec2(s.NdotV, s.roughness), 0.0).rg;
+    if (any(isnan(lut)) || any(isinf(lut))) {
+        return EnvironmentBrdfApprox(s.NdotV, s.roughness);
+    }
+    return clamp(lut, 0.0, 1.0);
 }
 
 // Returns the ambient light reflected by `s` with image-based lighting
@@ -158,7 +184,7 @@ vec3 AmbientLight(Surface s, vec3 geometricNormal)
 {
     const vec2 screenUv = gl_FragCoord.xy * frame.screen.zw;
     const float screenAo = textureLod(ambientOcclusionMap, screenUv, 0.0).r;
-    const float ao = s.occlusion * screenAo;
+    const float ao = SanitizeColor(s.occlusion * screenAo, 1.0);
     if (frame.environmentParams.w < 0.5) {
         const vec2 brdf = EnvironmentBrdfApprox(s.NdotV, s.roughness);
         const vec3 specular = s.f0 * brdf.x + brdf.y;
@@ -167,16 +193,18 @@ vec3 AmbientLight(Surface s, vec3 geometricNormal)
     const float intensity = frame.environmentParams.x;
     const float rotation = -frame.environmentParams.y;
 
-    const vec2 lut = textureLod(brdfLut, vec2(s.NdotV, s.roughness), 0.0).rg;
-    const vec3 singleScatter = s.f0 * lut.x + lut.y;  // F_ss * E_ss
-    const float singleEnergy = lut.x + lut.y;          // E_ss
-    const float multiEnergy = 1.0 - singleEnergy;      // E_ms
+    const vec2 lut = EnvironmentBrdf(s);
+    const vec3 singleScatter = s.f0 * lut.x + lut.y;            // F_ss * E_ss
+    const float singleEnergy = min(lut.x + lut.y, 1.0);         // E_ss
+    const float multiEnergy = 1.0 - singleEnergy;               // E_ms
     const vec3 averageFresnel = s.f0 + (1.0 - s.f0) / 21.0;
+    // The denominator is >= E_ss for f0 <= 1; it reaches 0 only for a white
+    // metal whose LUT texel reflects nothing (E_ss = 0).
     const vec3 multiScatter = singleScatter * averageFresnel /
-                              (1.0 - multiEnergy * averageFresnel);  // F_ms
+                              max(1.0 - multiEnergy * averageFresnel, vec3(1.0e-4));  // F_ms
     // Diffuse gets what neither specular term reflects.
     const vec3 diffuseWeight =
-        s.diffuseColor * (1.0 - singleScatter - multiScatter * multiEnergy);
+        s.diffuseColor * max(1.0 - singleScatter - multiScatter * multiEnergy, vec3(0.0));
 
     const vec3 irradiance =
         EnvironmentIrradiance(RotateY(s.normal, rotation)) * (intensity / kPi);
@@ -184,7 +212,8 @@ vec3 AmbientLight(Surface s, vec3 geometricNormal)
     const vec3 reflected = reflect(-s.view, s.normal);
     const float lod = s.roughness * frame.environmentParams.z;
     const vec3 prefiltered =
-        textureLod(environmentMap, RotateY(reflected, rotation), lod).rgb * intensity;
+        SanitizeColor(textureLod(environmentMap, RotateY(reflected, rotation), lod).rgb,
+                      kMaxHalfRadiance) * intensity;
     // Fade reflections that point into the surface (normal-mapped grazing
     // angles), which would otherwise show the ground or sky below it.
     float horizon = clamp(1.0 + dot(reflected, geometricNormal), 0.0, 1.0);

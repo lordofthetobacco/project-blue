@@ -5,6 +5,8 @@
 // added (blend ONE, ONE) onto the next larger one, which still holds its
 // downsampled image. Mip 0 ends up with the sum of every level.
 
+#include "sanitize.glsl"
+
 layout(set = 0, binding = 0) uniform sampler2D source;  // bilinear, clamped
 
 // Must match UpsampleConstants in src/render/passes/bloom_pass.cc.
@@ -17,7 +19,8 @@ layout(location = 0) out vec4 outColor;
 
 vec3 Tap(float x, float y)
 {
-    return texture(source, inUv + vec2(x, y) * params.sourceTexel).rgb;
+    // A non-finite texel contributes nothing (see sanitize.glsl).
+    return SanitizeRadiance(texture(source, inUv + vec2(x, y) * params.sourceTexel).rgb);
 }
 
 void main()

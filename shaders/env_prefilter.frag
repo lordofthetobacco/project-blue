@@ -7,6 +7,7 @@
 // 2008), which removes fireflies with few samples.
 
 #include "environment.glsl"
+#include "sanitize.glsl"
 
 layout(set = 0, binding = 0) uniform samplerCube source;
 
@@ -31,7 +32,7 @@ void main()
 {
     const vec3 n = CubeFaceDirection(push.face, inUv);
     if (push.sampleCount <= 1 || push.roughness <= 0.0) {
-        outColor = vec4(textureLod(source, n, 0.0).rgb, 1.0);
+        outColor = vec4(SanitizeColor(textureLod(source, n, 0.0).rgb, kMaxHalfRadiance), 1.0);
         return;
     }
     const float alpha = push.roughness * push.roughness;
@@ -56,5 +57,5 @@ void main()
         sum += textureLod(source, l, lod).rgb * NdotL;
         weight += NdotL;
     }
-    outColor = vec4(sum / max(weight, 1.0e-6), 1.0);
+    outColor = vec4(SanitizeColor(sum / max(weight, 1.0e-6), kMaxHalfRadiance), 1.0);
 }

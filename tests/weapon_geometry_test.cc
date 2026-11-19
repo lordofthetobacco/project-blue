@@ -85,11 +85,25 @@ TEST_CASE("the M16 points lie inside the mesh, which is 1.0 to 1.25 m long") {
   CHECK(length >= 1.0f);
   CHECK(length <= 1.25f);
 
-  // The optic axis looks out of the hood and through the front sight's
-  // notch without touching the rifle; 8 mm lower it hits the sight base.
-  CHECK_FALSE(RayHitsMesh(mesh, rifle.sight_eye_point, rifle.sight_axis));
-  const glm::vec3 low = rifle.sight_eye_point - glm::vec3(0.0f, 0.1f, 0.0f);
-  CHECK(RayHitsMesh(mesh, low, rifle.sight_axis));
+  // The optic axis runs through the middle of the hood's window. Nothing
+  // ahead blocks it, nor lines 7.7 mm (0.1 units) above, below or beside it
+  // (the old A2 front sight blocked everything at x = 0 below y 1.412); 10 mm
+  // (0.13 units) above or below it the hood's roof and floor do.
+  const glm::vec3 up(0.0f, 1.0f, 0.0f);
+  const glm::vec3 side(1.0f, 0.0f, 0.0f);
+  for (const glm::vec3 offset :
+       {glm::vec3(0.0f), 0.1f * up, -0.1f * up, 0.1f * side, -0.1f * side}) {
+    CAPTURE(offset.x);
+    CAPTURE(offset.y);
+    CHECK_FALSE(
+        RayHitsMesh(mesh, rifle.sight_eye_point + offset, rifle.sight_axis));
+  }
+  CHECK(
+      RayHitsMesh(mesh, rifle.sight_eye_point + 0.13f * up, rifle.sight_axis));
+  CHECK(
+      RayHitsMesh(mesh, rifle.sight_eye_point - 0.13f * up, rifle.sight_axis));
+  // The sight line is centred in the window, level with the lens.
+  CHECK(rifle.sight_eye_point.y == doctest::Approx(rifle.optic_lens.y));
 }
 
 TEST_CASE("the M16 optic sits above the bore, the lens ahead of the eye") {

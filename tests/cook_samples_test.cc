@@ -67,7 +67,7 @@ TEST_CASE("The cooked M16 is in metres with its four sockets") {
              glm::vec3(0.0f, -0.75f, -2.0f) * kScale));
   const prefab::Socket& sight = Socket(rifle, "sight");
   CHECK(
-      Near(sight.local.translation, glm::vec3(0.0f, 1.44f, -1.505f) * kScale));
+      Near(sight.local.translation, glm::vec3(0.0f, 1.354f, -1.505f) * kScale));
   CHECK(Near(sight.local.rotation * glm::vec3(0, 0, 1), {0, 0, 1}));
   const prefab::Socket& lens = Socket(rifle, "lens");
   CHECK(Near(lens.local.translation, glm::vec3(0.0f, 1.354f, -1.27f) * kScale));

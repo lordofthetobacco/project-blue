@@ -32,7 +32,8 @@ struct WeaponGeometry {
 };
 
 // Returns the calibration of samples/m16.obj, measured from the vertices and
-// faces of each material with throwaway awk scripts:
+// faces of each material with throwaway scripts (re-measured for the
+// re-export without the front sight):
 // - scale 0.0771: the model spans z [-5.921, 8.996], 14.92 units; an
 //   M16A2 (1.006 m) with this suppressor is about 1.15 m long.
 // - muzzle (0, 0.598, 8.995): the Silencer's largest z (8.9957); y is the
@@ -47,12 +48,16 @@ struct WeaponGeometry {
 // - optic_lens (0, 1.354, -1.27), radius 0.11 (8.5 mm): middle of the window
 //   height at the hood's front edge; the radius is limited by the 0.115 half
 //   height and the rounded top corners.
-// - sight_eye_point (0, 1.44, -1.505), axis +Z: the A2 front sight ahead
-//   (z 5.18 .. 5.36) is solid across |x| < 0.09 up to y 1.412 and has two
-//   ears at |x| 0.055 .. 0.092 up to y 1.508 with an open notch between. A
-//   +Z line at x = 0 clears it only for y >= 1.412, and the window ends at
-//   1.468, so the axis runs at y 1.44 through the notch (a co-witness look,
-//   6.5 cm above the bore).
+// - sight_eye_point (0, 1.354, -1.505), axis +Z: through the centre of the
+//   window, 5.8 cm above the bore. The front sight has been removed (no
+//   faces above the barrel's y 0.85 at z 4.95 .. 5.55; the file keeps 8
+//   unused vertices of its old tips, which the importer drops), so nothing
+//   ahead of the hood reaches the window: +Z rays from the rear face are
+//   clear at x = 0 for y 1.246 .. 1.468, at the axis height for
+//   |x| < 0.16, and over the whole disc of radius 0.10 around the axis. Below
+//   the line the nearest geometry is the hood floor and the mount just ahead of
+//   it (y 1.245, 8.4 mm below), then the receiver and handguard (y <= 1.056, 23
+//   mm below).
 // - grip (0, -0.75, -2.0): middle of the Grip vertices behind z = -1
 //   (y [-1.52, -0.04], raked back from z -1.55 at the top to -2.9).
 [[nodiscard]] const WeaponGeometry& M16Geometry();

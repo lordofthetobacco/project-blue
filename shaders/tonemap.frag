@@ -5,6 +5,8 @@
 // Writes sRGB-encoded colour to a UNORM target (what FXAA wants to read)
 // with its luma in alpha.
 
+#include "sanitize.glsl"
+
 layout(set = 0, binding = 0) uniform sampler2D hdrImage;
 // Mip 0 of the bloom chain, half resolution: the sum of every level.
 layout(set = 0, binding = 1) uniform sampler2D bloomImage;
@@ -87,11 +89,12 @@ vec3 LinearToSrgb(vec3 linear)
 void main()
 {
     // Same size as the target: fetch the exact texel.
-    vec3 hdr = max(texelFetch(hdrImage, ivec2(gl_FragCoord.xy), 0).rgb, vec3(0.0));
+    // Non-finite inputs are black, never NaN through the curves below.
+    vec3 hdr = SanitizeRadiance(texelFetch(hdrImage, ivec2(gl_FragCoord.xy), 0).rgb);
     if (params.bloomStrength > 0.0) {
         // Energy-preserving: a fraction of every pixel is replaced by the
         // blurred image (the average of the levels).
-        const vec3 bloom = texture(bloomImage, inUv).rgb * params.bloomScale;
+        const vec3 bloom = SanitizeRadiance(texture(bloomImage, inUv).rgb * params.bloomScale);
         hdr = mix(hdr, bloom, params.bloomStrength);
     }
     const vec3 exposed = hdr * params.exposureScale;

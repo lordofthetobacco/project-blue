@@ -58,12 +58,21 @@ vec2 Hammersley(uint i, uint count)
 }
 
 // Returns a GGX-distributed half vector (alpha = roughness^2) around +Z for
-// the uniform sample `xi`.
+// the uniform sample `xi`. Mirrored by render::brdf_reference.
+//
+// cos^2(theta) is clamped to [0, 1] before both square roots: for small
+// alpha the numerator and denominator round to the same float (alpha^4 * xi.y
+// is below half an ulp of 1), and GPU division (x * rcp(y), 2.5 ulp in
+// Vulkan) can then return 1 + ulp, which made sinTheta = sqrt(-tiny) = NaN
+// and poisoned whole rows of the BRDF LUT. At alpha = 0 and xi.y = 1 the
+// quotient is 0 / 0.
 vec3 ImportanceSampleGgx(vec2 xi, float alpha)
 {
     const float phi = 2.0 * kEnvPi * xi.x;
-    const float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (alpha * alpha - 1.0) * xi.y));
-    const float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    const float denominator = max(1.0 + (alpha * alpha - 1.0) * xi.y, 1.0e-20);
+    const float cosThetaSq = clamp((1.0 - xi.y) / denominator, 0.0, 1.0);
+    const float cosTheta = sqrt(cosThetaSq);
+    const float sinTheta = sqrt(max(1.0 - cosThetaSq, 0.0));
     return vec3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
 }
 

@@ -109,6 +109,34 @@ TEST_CASE("SH9 follows the direction of a bright region") {
         doctest::Approx(EvaluateIrradiance(sh, {0, 0, -1}).x).epsilon(0.02));
 }
 
+TEST_CASE("The BRDF LUT's smoothest rows are finite and in [0, 1]") {
+  // 64 rows at the GPU's 1024 samples: rows 0..4 lie below roughness 0.072,
+  // where GGX sampling divides x by x (see ImportanceSampleGgx in
+  // shaders/environment.glsl).
+  constexpr int kSize = 64;
+  const BrdfLut lut = GenerateBrdfLut(kSize, 1024);
+  REQUIRE(lut.pixels.size() == size_t{kSize} * kSize * 2);
+  for (int y = 0; y < kSize; ++y) {
+    for (int x = 0; x < kSize; ++x) {
+      const size_t offset = (static_cast<size_t>(y) * kSize + x) * 2;
+      const float scale = lut.pixels[offset];
+      const float bias = lut.pixels[offset + 1];
+      CAPTURE(x);
+      CAPTURE(y);
+      REQUIRE(std::isfinite(scale));
+      REQUIRE(std::isfinite(bias));
+      REQUIRE(scale >= 0.0f);
+      REQUIRE(bias >= 0.0f);
+      REQUIRE(scale <= 1.0f);
+      REQUIRE(bias <= 1.0f);
+    }
+  }
+  // A mirror seen head-on reflects everything through the F0 term.
+  const size_t head_on = (kSize - 1) * 2;
+  CHECK(lut.pixels[head_on] == doctest::Approx(1.0f).epsilon(0.02));
+  CHECK(lut.pixels[head_on + 1] == doctest::Approx(0.0f).epsilon(0.02));
+}
+
 TEST_CASE("The BRDF LUT matches split-sum reference values") {
   constexpr int kSize = 32;
   const BrdfLut lut = GenerateBrdfLut(kSize, 512);

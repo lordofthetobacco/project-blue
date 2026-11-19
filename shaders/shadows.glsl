@@ -52,14 +52,15 @@ float SunVisibility(vec3 worldPosition, vec3 normal, float viewDepth)
 
     const float cascadeFar = frame.cascadeSplitFar[cascade];
     const float cascadeNear = cascade == 0 ? 0.0 : frame.cascadeSplitFar[cascade - 1];
-    const float blendRange = (cascadeFar - cascadeNear) * kBlendFraction;
+    // Empty ranges (equal splits, zero shadow distance) must not divide 0 / 0.
+    const float blendRange = max((cascadeFar - cascadeNear) * kBlendFraction, 1.0e-6);
     const float blend = clamp((viewDepth - (cascadeFar - blendRange)) / blendRange, 0.0, 1.0);
     if (cascade + 1 < kCascadeCount && blend > 0.0) {
         visibility = mix(visibility, SampleCascade(cascade + 1, worldPosition, normal), blend);
     }
 
     const float shadowDistance = frame.shadowParams.z;
-    const float fadeRange = shadowDistance * kBlendFraction;
+    const float fadeRange = max(shadowDistance * kBlendFraction, 1.0e-6);
     const float fade = clamp((viewDepth - (shadowDistance - fadeRange)) / fadeRange, 0.0, 1.0);
     return mix(visibility, 1.0, fade);
 }

@@ -247,22 +247,27 @@ TEST_CASE("ImportModel reads the M16 materials from its MTL file") {
   // Five MTL materials; Grip and Stock are identical (black polymer), so
   // the table holds four.
   CHECK(model.materials.size() == 4);
+  // Blender writes "Ns 0" for BaseMetal (no shininess: the 0.5 default) and
+  // "Ns 1000" for the others (glossy: clamped to the minimum roughness).
+  const float glossy = material::RoughnessFromShininess(1000.0f);
+  CHECK(glossy == doctest::Approx(0.05f));
   struct Expected {
     std::string_view name;
     glm::vec3 color;
+    float roughness;
   };
   for (const Expected& expected :
-       {Expected{"BaseMetal", {0.105f, 0.105f, 0.11f}},
-        Expected{"Clip", {0.18f, 0.175f, 0.165f}},
-        Expected{"Grip", {0.06f, 0.06f, 0.062f}},
-        Expected{"Silencer", {0.075f, 0.073f, 0.07f}}}) {
+       {Expected{"BaseMetal", {0.105f, 0.105f, 0.11f}, 0.5f},
+        Expected{"Clip", {0.18f, 0.175f, 0.165f}, glossy},
+        Expected{"Grip", {0.06f, 0.06f, 0.062f}, glossy},
+        Expected{"Silencer", {0.075f, 0.073f, 0.07f}, glossy}}) {
     const std::string name(expected.name);
     CAPTURE(name);
     const material::MaterialDesc* found = FindMaterial(model, expected.name);
     REQUIRE(found != nullptr);
     CHECK(NearlyEqual(glm::vec3(found->base_color), expected.color));
     CHECK(found->metallic == 0.0f);
-    CHECK(found->roughness == doctest::Approx(0.5f));
+    CHECK(found->roughness == doctest::Approx(expected.roughness));
     CHECK(found->base_color_texture.empty());
   }
 }

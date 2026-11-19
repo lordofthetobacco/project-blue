@@ -89,7 +89,7 @@ TEST_CASE("aimed, the optic axis runs through the eye along the view") {
       CHECK(DistanceFromAxis(eye, forward,
                              ToWorld(viewmodel, rifle.sight_eye_point),
                              eye_side_along) < 1.0e-4f);
-      // A point half a metre down the optic axis, past the front sight.
+      // A point half a metre down the optic axis, above the barrel.
       const glm::vec3 ahead =
           rifle.sight_eye_point + rifle.sight_axis * (0.5f / rifle.scale);
       CHECK(DistanceFromAxis(eye, forward, ToWorld(viewmodel, ahead),
@@ -142,7 +142,8 @@ TEST_CASE("the lens is posed on the rifle and the dot shows only through it") {
   };
   const glm::vec2 centred = dot_on_lens(eye);
   CHECK(std::abs(centred.x) < 1.0e-5f);
-  // Seen through the A2 notch: above the lens centre, inside the disc.
+  // The axis runs through the middle of the window: the dot sits at the
+  // height of the lens centre, inside the disc.
   CHECK(centred.y ==
         doctest::Approx((rifle.sight_eye_point.y - rifle.optic_lens.y) *
                         rifle.scale)
@@ -181,8 +182,10 @@ TEST_CASE("the zeroed bore crosses the line of sight at the zero distance") {
     CHECK(muzzle.y < 0.0f);
     CHECK(std::abs(height_at(zero)) < 1.0e-3f);
     // It really crosses there (rising through a near zero, falling through a
-    // far one), rather than touching the line.
-    CHECK(height_at(0.9f * zero) * height_at(1.1f * zero) < 0.0f);
+    // far one), rather than touching the line. The two crossings multiply to
+    // 2 h v^2 / g (about 10600 m^2 for this rifle's 5.8 cm sight height), so
+    // a 100 m zero crosses again near 106 m: sample within 1 %.
+    CHECK(height_at(0.99f * zero) * height_at(1.01f * zero) < 0.0f);
   }
 }
 
