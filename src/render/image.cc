@@ -1,7 +1,6 @@
 #include "render/image.h"
 
 #include <algorithm>
-#include <bit>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -85,11 +84,6 @@ void RecordMipChain(VkCommandBuffer cmd, const Image& image, VkFilter filter) {
 }
 
 }  // namespace
-
-uint32_t MipLevelCount(VkExtent2D extent) {
-  const uint32_t largest = std::max({extent.width, extent.height, 1u});
-  return static_cast<uint32_t>(std::bit_width(largest));
-}
 
 uint32_t TexelSize(VkFormat format) {
   switch (format) {

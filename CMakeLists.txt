@@ -375,7 +375,7 @@ target_include_directories(blue_window PUBLIC src)
 
 blue_target_defaults(blue_window)
 
-target_link_libraries(blue_window PUBLIC blue_core SDL3::SDL3-static Vulkan::Vulkan)
+target_link_libraries(blue_window PUBLIC blue_core SDL3::SDL3-static)
 
 # The Vulkan renderer: device, swapchain, render targets, the frame's passes, meshes,
 # materials and textures. Linked by the game and the editor; draws to the swapchain or,
@@ -389,6 +389,7 @@ add_library(blue_render STATIC
     src/render/environment.cc
     src/render/buffer.cc
     src/render/frame_globals.cc
+    src/render/frame_uniforms.cc
     src/render/fullscreen_pass.cc
     src/render/image.cc
     src/render/material_system.cc
@@ -396,10 +397,12 @@ add_library(blue_render STATIC
     src/render/render_targets.cc
     src/render/samplers.cc
     src/render/shader_programs.cc
+    src/render/gpu_scope.cc
     src/render/gpu_timer.cc
     src/render/mesh.cc
     src/render/renderer.cc
     src/render/texture_cache.cc
+    src/render/texture_types.cc
     src/render/passes/bloom_pass.cc
     src/render/passes/depth_prepass.cc
     src/render/passes/mesh_pass.cc

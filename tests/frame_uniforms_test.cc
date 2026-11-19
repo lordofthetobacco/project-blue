@@ -8,7 +8,8 @@
 #include <glm/trigonometric.hpp>
 
 #include "camera/projection.h"
-#include "render/frame_globals.h"
+#include "core/extent.h"
+#include "render/frame_uniforms.h"
 
 namespace blue::render {
 namespace {
@@ -27,7 +28,7 @@ SceneView MakeView(std::span<const PointLight> lights) {
 
 FrameUniforms Uniforms(std::span<const PointLight> lights) {
   return MakeFrameUniforms(MakeView(lights), {}, /*shadows=*/false,
-                           VkExtent2D{640, 480});
+                           core::Extent2D{640, 480});
 }
 
 }  // namespace

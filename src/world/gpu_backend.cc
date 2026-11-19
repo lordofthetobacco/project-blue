@@ -11,7 +11,7 @@
 #include "prefab/prefab.h"
 #include "render/renderer.h"
 #include "render/scene_view.h"
-#include "render/texture_cache.h"
+#include "render/texture_types.h"
 
 namespace blue::world {
 namespace {

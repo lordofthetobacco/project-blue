@@ -9,6 +9,7 @@
 #include <span>
 #include <vector>
 
+#include "render/texture_types.h"
 #include "render/vulkan_context.h"
 
 namespace blue::render {
@@ -29,9 +30,6 @@ struct ImageDesc {
   // that are recreated on resize; small textures share blocks.
   bool dedicated = false;
 };
-
-// Returns the mip count of a full chain down to 1 x 1 for `extent`.
-[[nodiscard]] uint32_t MipLevelCount(VkExtent2D extent);
 
 // Returns the size of one texel of `format` in bytes, or 0 for formats the
 // upload path does not handle (block-compressed, depth, packed).

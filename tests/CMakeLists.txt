@@ -38,6 +38,7 @@ add_executable(blue_tests
     fov_controller_test.cc
     player_controller_test.cc
     projection_test.cc
+    render_public_headers_test.cc
     frustum_test.cc
     result_test.cc
     path_test.cc

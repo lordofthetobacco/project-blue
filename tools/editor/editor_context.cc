@@ -22,7 +22,7 @@
 #include "editor/document.h"
 #include "platform/file_system.h"
 #include "prefab/prefab.h"
-#include "render/texture_cache.h"
+#include "render/texture_types.h"
 
 namespace blue::editor {
 
@@ -365,8 +365,7 @@ ImTextureID EditorContext::CreateImageTexture(int width, int height,
   };
   const std::vector<render::TextureId> ids =
       renderer_.UploadTextures(std::span(&upload, 1));
-  const ImTextureID texture =
-      imgui_.AddTexture(renderer_.texture_view(ids.front()));
+  const ImTextureID texture = renderer_.ui_texture(ids.front());
   image_textures_.push_back({texture, ids.front()});
   return texture;
 }
@@ -374,7 +373,8 @@ ImTextureID EditorContext::CreateImageTexture(int width, int height,
 void EditorContext::ReleaseImageTexture(ImTextureID texture) {
   for (size_t i = 0; i < image_textures_.size(); ++i) {
     if (image_textures_[i].imgui == texture) {
-      imgui_.RemoveTexture(texture);
+      // The renderer frees the texture and its ImGui handle once no frame in
+      // flight can still use them.
       const render::TextureId id = image_textures_[i].texture;
       renderer_.ReleaseTextures(std::span(&id, 1));
       image_textures_.erase(image_textures_.begin() +

@@ -4,8 +4,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/vec4.hpp>
@@ -16,9 +19,12 @@
 #include "material/material.h"
 #include "platform/window.h"
 #include "render/barriers.h"
+#include "render/frame_uniforms.h"
 #include "render/passes/scene_pass.h"
 #include "render/passes/ui_pass.h"
+#include "render/renderer_impl.h"
 #include "render/vk_check.h"
+#include "render/vk_extent.h"
 
 namespace blue::render {
 
@@ -44,13 +50,13 @@ VkFormat ViewportFormat(VkFormat swapchain_format) {
 
 }  // namespace
 
-Renderer::Renderer(const platform::Window& window,
-                   const std::string& shader_dir,
-                   shader::CompileMode shader_mode)
+RendererImpl::RendererImpl(const platform::Window& window,
+                           const std::string& shader_dir,
+                           shader::CompileMode shader_mode)
     : window_(window),
       shader_dir_(shader_dir),
       context_(window),
-      swapchain_(context_, window.PixelSize(), vsync_),
+      swapchain_(context_, ToVkExtent(window.PixelSize()), vsync_),
       samplers_(context_),
       targets_(context_, swapchain_.extent()),
       frame_globals_(context_, samplers_),
@@ -85,7 +91,7 @@ Renderer::Renderer(const platform::Window& window,
   CreateFrames();
 }
 
-Renderer::~Renderer() {
+RendererImpl::~RendererImpl() {
   context_.WaitIdle();
 
   const VkDevice device = context_.device();
@@ -96,7 +102,7 @@ Renderer::~Renderer() {
   }
 }
 
-void Renderer::CreateFrames() {
+void RendererImpl::CreateFrames() {
   const VkDevice device = context_.device();
 
   for (Frame& frame : frames_) {
@@ -130,7 +136,7 @@ void Renderer::CreateFrames() {
   }
 }
 
-void Renderer::BindTargets() {
+void RendererImpl::BindTargets() {
   frame_globals_.BindAmbientOcclusion(targets_.ssao().view());
   ssao_pass_.BindTargets(targets_, samplers_);
   bloom_pass_.BindTargets(targets_, samplers_);
@@ -142,12 +148,12 @@ void Renderer::BindTargets() {
   }
 }
 
-MeshId Renderer::UploadMesh(const asset::MeshData& data) {
+MeshId RendererImpl::UploadMesh(const asset::MeshData& data) {
   meshes_.emplace_back(context_, data);
   return static_cast<MeshId>(meshes_.size() - 1);
 }
 
-void Renderer::ReleaseMesh(MeshId id) {
+void RendererImpl::ReleaseMesh(MeshId id) {
   const auto index = static_cast<size_t>(id);
   if (index >= meshes_.size() || !meshes_[index].resident()) {
     return;
@@ -157,8 +163,9 @@ void Renderer::ReleaseMesh(MeshId id) {
       {.object = std::move(meshes_[index]), .last_frame = frame_serial_});
 }
 
-void Renderer::ReleaseTextures(std::span<const TextureId> ids) {
+void RendererImpl::ReleaseTextures(std::span<const TextureId> ids) {
   for (const TextureId id : ids) {
+    ui_.Release(id, frame_serial_);
     Image image = textures_.TakeUploaded(id);
     if (image.handle() != VK_NULL_HANDLE) {
       retired_images_.push_back(
@@ -167,7 +174,7 @@ void Renderer::ReleaseTextures(std::span<const TextureId> ids) {
   }
 }
 
-void Renderer::DestroyRetired() {
+void RendererImpl::DestroyRetired() {
   const auto done = [this](uint64_t last_frame) {
     return last_frame + kFramesInFlight <= frame_serial_;
   };
@@ -177,18 +184,19 @@ void Renderer::DestroyRetired() {
   std::erase_if(retired_images_, [&](const Retired<Image>& retired) {
     return done(retired.last_frame);
   });
+  ui_.FreeRetired(frame_serial_);
 }
 
-void Renderer::SetVsync(bool enabled) {
+void RendererImpl::SetVsync(bool enabled) {
   if (vsync_ != enabled) {
     vsync_ = enabled;
     swapchain_dirty_ = true;
   }
 }
 
-bool Renderer::RebuildSwapchain() {
+bool RendererImpl::RebuildSwapchain() {
   context_.WaitIdle();
-  if (!swapchain_.Recreate(window_.PixelSize(), vsync_)) {
+  if (!swapchain_.Recreate(ToVkExtent(window_.PixelSize()), vsync_)) {
     return false;  // Surface has no area; stay dirty and retry next frame.
   }
   if (viewport_.generation == 0) {  // Otherwise they follow the viewport.
@@ -199,7 +207,7 @@ bool Renderer::RebuildSwapchain() {
   return true;
 }
 
-void Renderer::WaitForFramesInFlight() const {
+void RendererImpl::WaitForFramesInFlight() const {
   std::array<VkFence, kFramesInFlight> fences{};
   for (size_t i = 0; i < kFramesInFlight; ++i) {
     fences[i] = frames_[i].in_flight;
@@ -208,7 +216,7 @@ void Renderer::WaitForFramesInFlight() const {
                           VK_TRUE, UINT64_MAX));
 }
 
-ViewportImage Renderer::PrepareViewport(VkExtent2D size) {
+ViewportImage RendererImpl::PrepareViewport(VkExtent2D size) {
   size = {std::max(size.width, 1u), std::max(size.height, 1u)};
   if (!viewport_present_pass_) {
     viewport_present_pass_.emplace(context_, shader_programs_, shader_dir_,
@@ -219,14 +227,14 @@ ViewportImage Renderer::PrepareViewport(VkExtent2D size) {
                        size.height != viewport_.extent.height;
   const bool may_resize =
       viewport_.generation == 0 ||
-      frame_serial_ >= viewport_resized_at_ + kViewportResizeFrames;
+      frame_serial_ >= viewport_resized_at_ + Renderer::kViewportResizeFrames;
   if (changed && may_resize) {
     ResizeViewport(size);
   }
   return viewport_;
 }
 
-void Renderer::ResizeViewport(VkExtent2D size) {
+void RendererImpl::ResizeViewport(VkExtent2D size) {
   WaitForFramesInFlight();
   viewport_image_ =
       Image(context_, {.extent = size,
@@ -244,31 +252,23 @@ void Renderer::ResizeViewport(VkExtent2D size) {
   });
   targets_.Resize(size);
   BindTargets();
-  viewport_ = {.view = viewport_image_.view(),
-               .extent = size,
-               .generation = viewport_.generation + 1};
+  // Frames up to the current one may have recorded the old texture.
+  viewport_ = {
+      .texture = ui_.SetViewport(viewport_image_.view(), frame_serial_),
+      .extent = ToExtent(size),
+      .generation = viewport_.generation + 1,
+  };
   viewport_resized_at_ = frame_serial_;
   core::log::Info("Viewport output {} x {}", size.width, size.height);
 }
 
-void Renderer::DrawFrame(const SceneView& view, ImDrawData* ui) {
-  DrawFrameTo(view, ui, Output::kSwapchain);
-}
-
-void Renderer::DrawViewportFrame(const SceneView& view, ImDrawData* ui) {
-  if (viewport_.generation == 0) {
-    core::log::Fatal("DrawViewportFrame() before PrepareViewport()");
-  }
-  DrawFrameTo(view, ui, Output::kViewport);
-}
-
-uint64_t Renderer::RequestViewportReadback() {
+uint64_t RendererImpl::RequestViewportReadback() {
   const uint64_t ticket = next_readback_ticket_++;
   readbacks_.push_back({.ticket = ticket});
   return ticket;
 }
 
-ReadbackStatus Renderer::TakeViewportReadback(uint64_t ticket,
+ReadbackStatus RendererImpl::TakeViewportReadback(uint64_t ticket,
                                               ViewportPixels& pixels) {
   const auto it = std::ranges::find(readbacks_, ticket, &Readback::ticket);
   if (it == readbacks_.end()) {
@@ -289,7 +289,7 @@ ReadbackStatus Renderer::TakeViewportReadback(uint64_t ticket,
   return ReadbackStatus::kReady;
 }
 
-void Renderer::RecordViewportReadbacks(VkCommandBuffer cmd) {
+void RendererImpl::RecordViewportReadbacks(VkCommandBuffer cmd) {
   constexpr BarrierScope kTransferRead{VK_PIPELINE_STAGE_2_COPY_BIT,
                                        VK_ACCESS_2_TRANSFER_READ_BIT};
   bool transitioned = false;
@@ -304,7 +304,7 @@ void Renderer::RecordViewportReadbacks(VkCommandBuffer cmd) {
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
       transitioned = true;
     }
-    readback.extent = viewport_.extent;
+    readback.extent = ToVkExtent(viewport_.extent);
     readback.frame_serial = frame_serial_;
     readback.buffer =
         Buffer(context_.allocator(),
@@ -345,9 +345,9 @@ void Renderer::RecordViewportReadbacks(VkCommandBuffer cmd) {
                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
-void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
+void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
                            Output output) {
-  const VkExtent2D window_size = window_.PixelSize();
+  const core::Extent2D window_size = window_.PixelSize();
   if (window_size.width == 0 || window_size.height == 0) {
     return;  // Minimized: nothing to present to.
   }
@@ -390,7 +390,8 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
 
   draw_list_.Build(view, world_bounds_, camera_frustum, materials_, meshes_,
                    stats_);
-  FrameUniforms uniforms = MakeFrameUniforms(view, cascades, shadows, extent);
+  FrameUniforms uniforms =
+      MakeFrameUniforms(view, cascades, shadows, ToExtent(extent));
   environment_.FillUniforms(uniforms);
   frame_globals_.Write(frame_index_, uniforms);
   const FrameContext ctx{
@@ -415,7 +416,7 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   frame_index_ = (frame_index_ + 1) % kFramesInFlight;
 }
 
-std::optional<uint32_t> Renderer::AcquireImage(const Frame& frame) {
+std::optional<uint32_t> RendererImpl::AcquireImage(const Frame& frame) {
   uint32_t image_index = 0;
   const VkResult result =
       vkAcquireNextImageKHR(context_.device(), swapchain_.handle(), UINT64_MAX,
@@ -432,7 +433,7 @@ std::optional<uint32_t> Renderer::AcquireImage(const Frame& frame) {
   return image_index;
 }
 
-void Renderer::SubmitAndPresent(const Frame& frame, uint32_t image_index) {
+void RendererImpl::SubmitAndPresent(const Frame& frame, uint32_t image_index) {
   const VkSemaphore render_finished = swapchain_.render_finished(image_index);
   const VkSemaphoreSubmitInfo wait_info{
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -478,7 +479,7 @@ void Renderer::SubmitAndPresent(const Frame& frame, uint32_t image_index) {
   }
 }
 
-void Renderer::ComputeWorldBounds(const SceneView& view) {
+void RendererImpl::ComputeWorldBounds(const SceneView& view) {
   world_bounds_.clear();
   world_bounds_.reserve(view.draws.size());
   for (const DrawItem& item : view.draws) {
@@ -487,7 +488,7 @@ void Renderer::ComputeWorldBounds(const SceneView& view) {
   }
 }
 
-void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
+void RendererImpl::RecordCommands(const Frame& frame, const FrameContext& ctx,
                               ImDrawData* ui, Output output) {
   const VkCommandBuffer cmd = ctx.cmd;
   CheckVk(vkResetCommandPool(context_.device(), frame.command_pool, 0));
@@ -548,7 +549,7 @@ void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
     const PresentTarget target{
         .image = viewport_image_.handle(),
         .view = viewport_image_.view(),
-        .extent = viewport_.extent,
+        .extent = ToVkExtent(viewport_.extent),
         .previous_use = kFragmentSampledRead,
     };
     timed(GpuScope::kPresent, [&] {
@@ -564,6 +565,154 @@ void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
 
   gpu_timer_.End(cmd, frame_index_, GpuScope::kTotal);
   CheckVk(vkEndCommandBuffer(cmd));
+}
+
+void RendererImpl::InitImGuiRenderer() {
+  ui_.Init(context_, swapchain_);
+  if (viewport_.generation != 0) {
+    // PrepareViewport() ran before the backend existed.
+    viewport_.texture = ui_.SetViewport(viewport_image_.view(), frame_serial_);
+  }
+}
+
+void RendererImpl::ShutdownImGuiRenderer() {
+  ui_.Shutdown();
+  viewport_.texture = ImTextureID{};
+}
+
+Renderer::Renderer(const platform::Window& window,
+                   const std::string& shader_dir,
+                   shader::CompileMode shader_mode)
+    : impl_(std::make_unique<RendererImpl>(window, shader_dir, shader_mode)) {}
+
+Renderer::~Renderer() = default;
+
+void Renderer::DrawFrame(const SceneView& view, ImDrawData* ui) {
+  impl_->DrawFrameTo(view, ui, RendererImpl::Output::kSwapchain);
+}
+
+ViewportImage Renderer::PrepareViewport(core::Extent2D size) {
+  return impl_->PrepareViewport(ToVkExtent(size));
+}
+
+const ViewportImage& Renderer::viewport() const { return impl_->viewport_; }
+
+void Renderer::DrawViewportFrame(const SceneView& view, ImDrawData* ui) {
+  if (impl_->viewport_.generation == 0) {
+    core::log::Fatal("DrawViewportFrame() before PrepareViewport()");
+  }
+  impl_->DrawFrameTo(view, ui, RendererImpl::Output::kViewport);
+}
+
+uint64_t Renderer::RequestViewportReadback() {
+  return impl_->RequestViewportReadback();
+}
+
+ReadbackStatus Renderer::TakeViewportReadback(uint64_t ticket,
+                                              ViewportPixels& pixels) {
+  return impl_->TakeViewportReadback(ticket, pixels);
+}
+
+MeshId Renderer::UploadMesh(const asset::MeshData& data) {
+  return impl_->UploadMesh(data);
+}
+
+void Renderer::ReleaseMesh(MeshId id) { impl_->ReleaseMesh(id); }
+
+void Renderer::ReleaseTextures(std::span<const TextureId> ids) {
+  impl_->ReleaseTextures(ids);
+}
+
+void Renderer::ReleaseMaterial(MaterialId id) {
+  impl_->materials_.Release(id);
+}
+
+ImTextureID Renderer::ui_texture(TextureId id) const {
+  return impl_->ui_.Texture(id, impl_->textures_);
+}
+
+MaterialId Renderer::CreateMaterial(const material::MaterialDesc& desc) {
+  return impl_->materials_.Create(desc);
+}
+
+std::vector<TextureId> Renderer::UploadTextures(
+    std::span<const TextureUpload> textures) {
+  return impl_->textures_.Upload(textures);
+}
+
+MaterialId Renderer::CreateMaterial(const material::MaterialDesc& desc,
+                                    const MaterialTextures& textures) {
+  return impl_->materials_.Create(desc, textures);
+}
+
+void Renderer::UpdateMaterial(MaterialId id,
+                              const material::MaterialDesc& desc) {
+  impl_->materials_.Update(id, desc);
+}
+
+const material::MaterialDesc& Renderer::material(MaterialId id) const {
+  return impl_->materials_.desc(id);
+}
+
+size_t Renderer::material_count() const { return impl_->materials_.count(); }
+
+TextureStats Renderer::texture_stats() const {
+  return impl_->textures_.stats();
+}
+
+void Renderer::SetEnvironment(const asset::ImageDataF& equirect,
+                              float intensity, float rotation_radians) {
+  impl_->context_.WaitIdle();
+  impl_->environment_.Set(equirect, intensity, rotation_radians);
+}
+
+void Renderer::ResetEnvironment() {
+  impl_->context_.WaitIdle();
+  impl_->environment_.Set({}, 1.0f, 0.0f);
+}
+
+void Renderer::SetEnvironmentParams(float intensity, float rotation_radians) {
+  impl_->environment_.SetParams(intensity, rotation_radians);
+}
+
+void Renderer::RequestSwapchainRebuild() { impl_->swapchain_dirty_ = true; }
+
+void Renderer::SetVsync(bool enabled) { impl_->SetVsync(enabled); }
+
+void Renderer::ReloadChangedShaders() {
+  impl_->shader_programs_.ReloadChanged();
+}
+
+std::string_view Renderer::last_shader_error() const {
+  return impl_->shader_programs_.last_error();
+}
+
+bool Renderer::vsync() const { return impl_->vsync_; }
+
+std::string_view Renderer::device_name() const {
+  return impl_->context_.device_name();
+}
+
+core::Extent2D Renderer::output_extent() const {
+  return ToExtent(impl_->swapchain_.extent());
+}
+
+void Renderer::WaitIdle() const { impl_->context_.WaitIdle(); }
+
+std::optional<double> Renderer::gpu_frame_ms() const {
+  return impl_->gpu_timer_.last_frame_ms();
+}
+
+std::optional<double> Renderer::gpu_scope_ms(GpuScope scope) const {
+  return impl_->gpu_timer_.last_ms(scope);
+}
+
+RenderStats Renderer::stats() const { return impl_->stats_; }
+
+void Renderer::InitImGuiRenderer() const { impl_->InitImGuiRenderer(); }
+
+void Renderer::ShutdownImGuiRenderer() const {
+  impl_->ShutdownImGuiRenderer();
 }
 
 }  // namespace blue::render

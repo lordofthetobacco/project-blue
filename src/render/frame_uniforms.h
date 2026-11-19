@@ -1,0 +1,69 @@
+#ifndef BLUE_RENDER_FRAME_UNIFORMS_H_
+#define BLUE_RENDER_FRAME_UNIFORMS_H_
+
+#include <array>
+#include <span>
+
+#include <glm/ext/vector_uint4.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/vec4.hpp>
+
+#include "core/extent.h"
+#include "lighting/cascades.h"
+#include "render/scene_view.h"
+
+namespace blue::render {
+
+// One point light as the shaders read it. Must match GpuPointLight in
+// shaders/common.glsl (std140).
+struct GpuPointLight {
+  // xyz: world position, w: 1 / range^2, or 0 for an unlimited range.
+  glm::vec4 position_inverse_range_sq;
+  glm::vec4 radiance;  // rgb: color * intensity, w: unused
+};
+
+// Must match FrameUniforms in shaders/common.glsl (std140; offsets are
+// asserted in the .cc).
+struct FrameUniforms {
+  glm::mat4 view_proj;
+  glm::mat4 view;
+  glm::mat4 projection;
+  glm::mat4 inverse_projection;
+  glm::mat4 inverse_view_proj;
+  glm::vec4 camera_position;
+  glm::vec4 ambient_color;
+  glm::vec4 sun_direction;  // xyz: direction the light travels
+  glm::vec4 sun_color;      // rgb: color * intensity
+  std::array<glm::mat4, lighting::kCascadeCount> cascade_view_projection;
+  glm::vec4 cascade_split_far;  // View-space far distance per cascade.
+  glm::vec4 cascade_texel_world_size;
+  // x: shadows enabled, y: cascade debug, z: shadow distance, w: normal
+  // offset scale in texels.
+  glm::vec4 shadow_params;
+  // xy: render target size in pixels, zw: its reciprocal.
+  glm::vec4 screen;
+  // Diffuse irradiance of the environment as 9 spherical-harmonics
+  // coefficients (rgb each, lighting::IrradianceSh9 with the constants
+  // folded in). All zero while no environment is bound.
+  std::array<glm::vec4, 9> irradiance_sh;
+  // x: intensity, y: rotation about +Y (radians), z: highest mip of the
+  // prefiltered cube, w: 1 when an environment is bound, else 0.
+  glm::vec4 environment_params;
+  // x: number of valid point_lights, [0, kMaxPointLights].
+  glm::uvec4 point_light_count;
+  std::array<GpuPointLight, kMaxPointLights> point_lights;
+};
+
+// Returns the uniforms of `view` for a render target of `extent`.
+// `cascades` are only read when `shadows` is true. The environment fields
+// stay zero (no environment yet). Point lights whose range sphere lies
+// outside the camera frustum are dropped; when more than kMaxPointLights
+// remain, the ones that light the camera position the least are dropped.
+// Allocates nothing.
+[[nodiscard]] FrameUniforms MakeFrameUniforms(
+    const SceneView& view, std::span<const lighting::Cascade> cascades,
+    bool shadows, core::Extent2D extent);
+
+}  // namespace blue::render
+
+#endif  // BLUE_RENDER_FRAME_UNIFORMS_H_

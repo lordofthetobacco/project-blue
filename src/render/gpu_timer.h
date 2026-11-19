@@ -9,31 +9,10 @@
 #include <optional>
 
 #include "render/frame_config.h"
+#include "render/gpu_scope.h"
 #include "render/vulkan_context.h"
 
 namespace blue::render {
-
-// A named span of GPU work measured by GpuTimer. To time a new pass, add an
-// enumerator before kCount and its name to GpuScopeName(); the overlay lists
-// every scope.
-enum class GpuScope {
-  kTotal,         // The whole frame.
-  kShadow,        // The shadow cascades; absent in frames that skip them.
-  kDepthPrepass,  // Scene depth of the camera view.
-  kSsao,          // Ambient occlusion and its blur; absent when off.
-  kScene,         // The HDR scene pass: meshes, sky and the reflex sight.
-  kBloom,         // Downsample / upsample chain; absent when off.
-  kTonemap,       // Bloom mix, exposure and tonemapping into the LDR image.
-  kOverlay,       // Editor debug lines and selection outline on the LDR image.
-  kPresent,       // LDR image to the swapchain, with FXAA when on.
-  kUi,            // The ImGui overlay.
-  kCount,         // Number of scopes; not a scope.
-};
-
-inline constexpr size_t kGpuScopeCount = static_cast<size_t>(GpuScope::kCount);
-
-// Returns the display name of `scope`, e.g. "shadow".
-[[nodiscard]] const char* GpuScopeName(GpuScope scope);
 
 // Measures GPU time of named scopes using timestamp queries. One query pair
 // per scope and frame in flight; results are read back once that frame's

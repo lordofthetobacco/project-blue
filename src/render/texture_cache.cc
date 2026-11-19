@@ -9,7 +9,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/extent.h"
 #include "core/log.h"
+#include "render/vk_extent.h"
 
 namespace blue::render {
 
@@ -49,23 +51,6 @@ VkFormat ToVkFormat(TextureFormat format) {
   core::log::Fatal("Unknown texture format {}", static_cast<int>(format));
 }
 
-size_t MipByteSize(TextureFormat format, uint32_t width, uint32_t height) {
-  constexpr size_t kBlockSize = 4;
-  constexpr size_t kBlockBytes = 16;  // BC5 and BC7 alike.
-  constexpr size_t kRgba8Bytes = 4;
-  switch (format) {
-    case TextureFormat::kBc7Srgb:
-    case TextureFormat::kBc7Unorm:
-    case TextureFormat::kBc5Unorm:
-      return (size_t{width} + kBlockSize - 1) / kBlockSize *
-             ((size_t{height} + kBlockSize - 1) / kBlockSize) * kBlockBytes;
-    case TextureFormat::kRgba8Srgb:
-    case TextureFormat::kRgba8Unorm:
-      return size_t{width} * height * kRgba8Bytes;
-  }
-  core::log::Fatal("Unknown texture format {}", static_cast<int>(format));
-}
-
 Image TextureCache::TakeUploaded(TextureId id) {
   const auto index = static_cast<size_t>(id);
   if (index >= uploaded_.size() ||
@@ -86,7 +71,7 @@ std::vector<TextureId> TextureCache::Upload(
   uploads.reserve(textures.size());
   size_t file_bytes = 0;
   for (const TextureUpload& texture : textures) {
-    const VkExtent2D extent{texture.width, texture.height};
+    const core::Extent2D extent{texture.width, texture.height};
     const size_t levels = texture.mips.size();
     if (texture.width == 0 || texture.height == 0 || levels == 0 ||
         levels > MipLevelCount(extent)) {
@@ -104,7 +89,7 @@ std::vector<TextureId> TextureCache::Upload(
       }
       file_bytes += expected;
     }
-    uploads.push_back({.desc = {.extent = extent,
+    uploads.push_back({.desc = {.extent = ToVkExtent(extent),
                                 .format = ToVkFormat(texture.format),
                                 .mip_levels = static_cast<uint32_t>(levels)},
                        .mips = texture.mips});

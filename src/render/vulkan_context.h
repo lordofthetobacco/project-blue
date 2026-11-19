@@ -58,7 +58,7 @@ class VulkanContext {
   void WaitIdle() const;
 
  private:
-  void CreateInstance(const platform::Window& window);
+  void CreateInstance();
   void SelectPhysicalDevice();
   void CreateDevice();
   void CreateAllocator();

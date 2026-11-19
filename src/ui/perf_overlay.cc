@@ -1,7 +1,6 @@
 #include "ui/perf_overlay.h"
 
 #include <imgui.h>
-#include <vulkan/vk_enum_string_helper.h>
 
 #include <algorithm>
 #include <array>
@@ -15,9 +14,10 @@
 
 #include <glm/vec2.hpp>
 
+#include "core/extent.h"
 #include "lighting/cascades.h"
 #include "platform/window.h"
-#include "render/gpu_timer.h"
+#include "render/gpu_scope.h"
 #include "render/renderer.h"
 #include "render/scene_view.h"
 #include "ui/imgui_layer.h"
@@ -28,19 +28,6 @@ namespace blue::ui {
 namespace {
 
 constexpr ImVec4 kShaderErrorColor{1.0f, 0.3f, 0.3f, 1.0f};
-
-const char* PresentModeLabel(VkPresentModeKHR mode) {
-  switch (mode) {
-    case VK_PRESENT_MODE_FIFO_KHR:
-      return "FIFO (VSync on)";
-    case VK_PRESENT_MODE_MAILBOX_KHR:
-      return "Mailbox (VSync off)";
-    case VK_PRESENT_MODE_IMMEDIATE_KHR:
-      return "Immediate (VSync off)";
-    default:
-      return string_VkPresentModeKHR(mode);
-  }
-}
 
 // Shows `text` as a plain label; ImGui::Text would treat it as a format
 // string and string views are not null-terminated.
@@ -433,11 +420,10 @@ void PerfOverlay::DrawTimings(float cpu_frame_ms) const {
 }
 
 void PerfOverlay::DrawDeviceInfo() const {
-  const render::Swapchain& swapchain = renderer_.swapchain();
-  TextView(renderer_.context().device_name());
-  ImGui::Text("%u x %u  |  %s", swapchain.extent().width,
-              swapchain.extent().height,
-              PresentModeLabel(swapchain.present_mode()));
+  const core::Extent2D output = renderer_.output_extent();
+  TextView(renderer_.device_name());
+  ImGui::Text("%u x %u  |  %s", output.width, output.height,
+              renderer_.vsync() ? "vsync" : "no vsync");
   const render::TextureStats textures = renderer_.texture_stats();
   ImGui::Text("Materials %zu  textures %zu (%.1f MiB)",
               renderer_.material_count(), textures.count,

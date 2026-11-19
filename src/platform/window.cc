@@ -1,10 +1,10 @@
 #include "platform/window.h"
 
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_vulkan.h>
 
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <system_error>
@@ -69,7 +69,7 @@ Window::~Window() {
   SDL_Quit();
 }
 
-VkExtent2D Window::PixelSize() const {
+core::Extent2D Window::PixelSize() const {
   int width = 0;
   int height = 0;
   SDL_GetWindowSizeInPixels(window_, &width, &height);
@@ -102,24 +102,6 @@ void Window::SetRelativeMouseMode(bool enabled) {
     core::log::Error("SDL_SetWindowRelativeMouseMode({}) failed: {}", enabled,
                      SDL_GetError());
   }
-}
-
-std::span<const char* const> Window::RequiredInstanceExtensions() const {
-  Uint32 count = 0;
-  const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&count);
-  if (extensions == nullptr) {
-    core::log::Fatal("SDL_Vulkan_GetInstanceExtensions failed: {}",
-                     SDL_GetError());
-  }
-  return {extensions, count};
-}
-
-VkSurfaceKHR Window::CreateSurface(VkInstance instance) const {
-  VkSurfaceKHR surface = VK_NULL_HANDLE;
-  if (!SDL_Vulkan_CreateSurface(window_, instance, nullptr, &surface)) {
-    core::log::Fatal("SDL_Vulkan_CreateSurface failed: {}", SDL_GetError());
-  }
-  return surface;
 }
 
 }  // namespace blue::platform

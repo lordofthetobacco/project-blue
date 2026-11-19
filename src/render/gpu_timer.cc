@@ -22,34 +22,6 @@ uint32_t FirstScopeQuery(size_t frame, GpuScope scope) {
 
 }  // namespace
 
-const char* GpuScopeName(GpuScope scope) {
-  switch (scope) {
-    case GpuScope::kTotal:
-      return "frame";
-    case GpuScope::kShadow:
-      return "shadow";
-    case GpuScope::kDepthPrepass:
-      return "depth";
-    case GpuScope::kSsao:
-      return "ssao";
-    case GpuScope::kScene:
-      return "scene";
-    case GpuScope::kBloom:
-      return "bloom";
-    case GpuScope::kTonemap:
-      return "tonemap";
-    case GpuScope::kOverlay:
-      return "overlay";
-    case GpuScope::kPresent:
-      return "present";
-    case GpuScope::kUi:
-      return "ui";
-    case GpuScope::kCount:
-      break;
-  }
-  return "?";
-}
-
 GpuTimer::GpuTimer(const VulkanContext& context) : device_(context.device()) {
   const uint32_t valid_bits = context.timestamp_valid_bits();
   const float period = context.properties().limits.timestampPeriod;

@@ -28,6 +28,7 @@
 #include "asset/mesh_data.h"
 #include "camera/look.h"
 #include "camera/projection.h"
+#include "core/extent.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "input/action.h"
@@ -1248,7 +1249,7 @@ void App::AppendPistolDraws() {
 }
 
 render::SceneView App::BuildSceneView() {
-  const VkExtent2D extent = renderer_.swapchain().extent();
+  const core::Extent2D extent = renderer_.output_extent();
   const float aspect = static_cast<float>(extent.width) /
                        static_cast<float>(std::max(extent.height, 1u));
 

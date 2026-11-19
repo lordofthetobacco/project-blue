@@ -1,10 +1,8 @@
 #include <doctest/doctest.h>
-#include <vulkan/vulkan.h>
 
 #include <cstddef>
 
-#include "render/image.h"
-#include "render/texture_cache.h"
+#include "render/texture_types.h"
 
 namespace blue::render {
 
@@ -26,16 +24,8 @@ TEST_CASE("RGBA8 mips take four bytes per texel") {
   CHECK(MipByteSize(TextureFormat::kRgba8Unorm, 3, 5) == 60);
 }
 
-TEST_CASE("Texture formats map to their Vulkan formats") {
-  CHECK(ToVkFormat(TextureFormat::kBc7Srgb) == VK_FORMAT_BC7_SRGB_BLOCK);
-  CHECK(ToVkFormat(TextureFormat::kBc7Unorm) == VK_FORMAT_BC7_UNORM_BLOCK);
-  CHECK(ToVkFormat(TextureFormat::kBc5Unorm) == VK_FORMAT_BC5_UNORM_BLOCK);
-  CHECK(ToVkFormat(TextureFormat::kRgba8Srgb) == VK_FORMAT_R8G8B8A8_SRGB);
-  CHECK(ToVkFormat(TextureFormat::kRgba8Unorm) == VK_FORMAT_R8G8B8A8_UNORM);
-}
-
 TEST_CASE("A full chain of a cooked texture ends at 1 x 1") {
-  // The mip count TextureCache::Upload() accepts at most.
+  // The mip count Renderer::UploadTextures() accepts at most.
   CHECK(MipLevelCount({2048, 2048}) == 12);
   CHECK(MipLevelCount({2048, 512}) == 12);
   CHECK(MipLevelCount({1, 1}) == 1);

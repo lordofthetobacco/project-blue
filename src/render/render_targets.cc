@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "render/barriers.h"
+#include "render/vk_extent.h"
 
 namespace blue::render {
 
@@ -64,7 +65,7 @@ void RenderTargets::Resize(VkExtent2D extent) {
 
   bloom_mip_views_.clear();
   const uint32_t levels =
-      std::min(kMaxBloomLevels, MipLevelCount(half_extent_));
+      std::min(kMaxBloomLevels, MipLevelCount(ToExtent(half_extent_)));
   bloom_ =
       MakeTarget(context_, half_extent_, kBloomFormat, kSampledTarget, levels);
   for (uint32_t level = 0; level < levels; ++level) {

@@ -12,7 +12,7 @@
 #include "material/material.h"
 #include "prefab/prefab.h"
 #include "render/scene_view.h"
-#include "render/texture_cache.h"
+#include "render/texture_types.h"
 #include "world/gpu_backend.h"
 
 namespace blue::testing {

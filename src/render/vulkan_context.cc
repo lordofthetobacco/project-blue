@@ -1,9 +1,13 @@
 #include "render/vulkan_context.h"
 
+#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_vulkan.h>
+
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "core/log.h"
@@ -159,11 +163,35 @@ uint32_t QueryTimestampValidBits(VkPhysicalDevice device,
   return families[queue_family].timestampValidBits;
 }
 
+// Returns the instance extensions Vulkan needs to present to an SDL window.
+// The array is owned by SDL and stays valid until SDL shuts down.
+std::span<const char* const> WindowInstanceExtensions() {
+  Uint32 count = 0;
+  const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&count);
+  if (extensions == nullptr) {
+    core::log::Fatal("SDL_Vulkan_GetInstanceExtensions failed: {}",
+                     SDL_GetError());
+  }
+  return {extensions, count};
+}
+
+// Creates a presentation surface of `window` for `instance`. The caller owns
+// it.
+VkSurfaceKHR CreateWindowSurface(const platform::Window& window,
+                                 VkInstance instance) {
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  if (!SDL_Vulkan_CreateSurface(window.handle(), instance, nullptr,
+                                &surface)) {
+    core::log::Fatal("SDL_Vulkan_CreateSurface failed: {}", SDL_GetError());
+  }
+  return surface;
+}
+
 }  // namespace
 
 VulkanContext::VulkanContext(const platform::Window& window) {
-  CreateInstance(window);
-  surface_ = window.CreateSurface(instance_);
+  CreateInstance();
+  surface_ = CreateWindowSurface(window, instance_);
   SelectPhysicalDevice();
   CreateDevice();
   CreateAllocator();
@@ -192,7 +220,7 @@ VulkanContext::~VulkanContext() {
   vkDestroyInstance(instance_, nullptr);
 }
 
-void VulkanContext::CreateInstance(const platform::Window& window) {
+void VulkanContext::CreateInstance() {
   uint32_t loader_version = 0;
   CheckVk(vkEnumerateInstanceVersion(&loader_version));
   if (loader_version < kApiVersion) {
@@ -202,7 +230,7 @@ void VulkanContext::CreateInstance(const platform::Window& window) {
   }
 
   const std::span<const char* const> window_extensions =
-      window.RequiredInstanceExtensions();
+      WindowInstanceExtensions();
   std::vector<const char*> extensions(window_extensions.begin(),
                                       window_extensions.end());
   std::vector<const char*> layers;
