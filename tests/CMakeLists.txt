@@ -91,10 +91,7 @@ blue_target_defaults(blue_tests ALLOW_EXCEPTIONS_AND_RTTI)
 target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_material blue_asset blue_animation blue_input blue_camera blue_input_mapper blue_physics blue_player blue_weapon blue_lighting blue_shader blue_render blue_cook blue_prefab blue_world blue_editor_core blue_mcp doctest::doctest)
 
 # assimp is a DLL (see cmake/Dependencies.cmake); copy it next to the runner.
-add_custom_command(TARGET blue_tests POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_RUNTIME_DLLS:blue_tests> $<TARGET_FILE_DIR:blue_tests>
-    COMMAND_EXPAND_LISTS)
+blue_copy_runtime_dlls(blue_tests)
 
 # cook_samples_test reads the cooked sample assets.
 add_dependencies(blue_tests blue_sample_assets)

@@ -74,13 +74,6 @@ float Luminance(glm::vec3 rgb) {
   return kLumaR * rgb.r + kLumaG * rgb.g + kLumaB * rgb.b;
 }
 
-// Returns `rgb` scaled down so its luminance is at most `max_luminance`
-// (the shaders' ClampRadiance() does the same).
-glm::vec3 ClampRadiance(glm::vec3 rgb, float max_luminance) {
-  const float luminance = Luminance(rgb);
-  return luminance > max_luminance ? rgb * (max_luminance / luminance) : rgb;
-}
-
 // Returns `image` with every texel clamped to `clamp_luminance`, then
 // box-filtered down by an integer factor so that its width is at most
 // `max_width`. Clamping first keeps a tiny, extremely bright sun from

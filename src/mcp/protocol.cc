@@ -28,8 +28,6 @@ constexpr std::string_view kMetaProtocolVersion =
     "io.modelcontextprotocol/protocolVersion";
 constexpr std::string_view kMetaClientCapabilities =
     "io.modelcontextprotocol/clientCapabilities";
-constexpr std::string_view kMetaClientInfo =
-    "io.modelcontextprotocol/clientInfo";
 constexpr std::string_view kMetaServerInfo =
     "io.modelcontextprotocol/serverInfo";
 

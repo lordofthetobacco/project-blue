@@ -242,14 +242,6 @@ template <size_t N>
               "double_sided uv_set)");
 }
 
-[[nodiscard]] Status FromCook(core::Result<void, cook::CookError> result,
-                              std::string_view what) {
-  if (!result.ok()) {
-    return Fail(std::format("{}: {}", what, CookErrorText(result.error())));
-  }
-  return Status::Ok();
-}
-
 // Wraps `op` (returning core::Result<..., cook::CookError>) for TryEditQuiet.
 template <typename Op>
 [[nodiscard]] auto CookOp(std::string_view what, Op op) {
