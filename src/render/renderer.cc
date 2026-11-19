@@ -70,6 +70,8 @@ Renderer::Renderer(const platform::Window& window,
                    frame_globals_.set_layout(), environment_),
       reticle_pass_(context_, shader_programs_, shader_dir,
                     frame_globals_.set_layout()),
+      motion_blur_pass_(context_, shader_programs_, shader_dir,
+                        frame_globals_.set_layout(), meshes_),
       bloom_pass_(context_, shader_programs_, shader_dir),
       tonemap_pass_(context_, shader_programs_, shader_dir),
       overlay_pass_(context_, shader_programs_, shader_dir,
@@ -134,6 +136,7 @@ void Renderer::CreateFrames() {
 void Renderer::BindTargets() {
   frame_globals_.BindAmbientOcclusion(targets_.ssao().view());
   ssao_pass_.BindTargets(targets_, samplers_);
+  motion_blur_pass_.BindTargets(targets_, samplers_);
   bloom_pass_.BindTargets(targets_, samplers_);
   tonemap_pass_.BindTargets(targets_, samplers_);
   overlay_pass_.BindTargets(targets_, samplers_);
@@ -599,13 +602,29 @@ void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
   } else {
     ssao_pass_.Record(ctx);  // At most a one-time clear to white.
   }
+  // The weapon motion blur rewrites the HDR image, so the reflex sight is
+  // drawn after it: its dot must stay sharp.
+  const std::optional<VkRect2D> motion_blur_area =
+      MotionBlurPass::FindArea(ctx);
   timed(GpuScope::kScene, [&] {
     BeginScenePass(ctx);
     mesh_pass_.Draw(ctx);
     skybox_pass_.Draw(ctx);
-    reticle_pass_.Draw(ctx);
+    if (!motion_blur_area) {
+      reticle_pass_.Draw(ctx);
+    }
     EndScenePass(ctx);
   });
+  if (motion_blur_area) {
+    timed(GpuScope::kMotionBlur, [&] {
+      motion_blur_pass_.Record(ctx, *motion_blur_area);
+      if (ctx.view.sight) {
+        ResumeScenePass(ctx);
+        reticle_pass_.Draw(ctx);
+        EndScenePass(ctx);
+      }
+    });
+  }
   if (ctx.view.post.bloom_enabled) {
     timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });
   }

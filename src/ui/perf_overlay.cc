@@ -171,6 +171,7 @@ void DrawPostSettings(render::PostSettings& post) {
   }
   constexpr float kMaxExposureEv = 8.0f;
   constexpr float kMaxBloomStrength = 0.3f;
+  constexpr float kMaxMotionBlurStrength = 2.0f;
   constexpr const char* kTonemappers[] = {"ACES fitted", "PBR Neutral",
                                           "Clamp"};
   ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
@@ -187,6 +188,11 @@ void DrawPostSettings(render::PostSettings& post) {
   ImGui::PopItemWidth();
   ImGui::Checkbox("SSAO", &post.ssao_enabled);
   ImGui::Checkbox("FXAA", &post.fxaa_enabled);
+  ImGui::Checkbox("Weapon motion blur", &post.weapon_motion_blur_enabled);
+  ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
+  ImGui::SliderFloat("Blur strength", &post.weapon_motion_blur_strength, 0.0f,
+                     kMaxMotionBlurStrength, "%.2f");
+  ImGui::PopItemWidth();
 }
 
 void DrawSceneInfo(const SceneOverlayInfo& scene_info) {

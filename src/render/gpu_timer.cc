@@ -34,6 +34,8 @@ const char* GpuScopeName(GpuScope scope) {
       return "ssao";
     case GpuScope::kScene:
       return "scene";
+    case GpuScope::kMotionBlur:
+      return "motion";
     case GpuScope::kBloom:
       return "bloom";
     case GpuScope::kTonemap:

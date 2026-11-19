@@ -33,6 +33,7 @@
 #include "render/passes/depth_prepass.h"
 #include "render/passes/frame_context.h"
 #include "render/passes/mesh_pass.h"
+#include "render/passes/motion_blur_pass.h"
 #include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/reticle_pass.h"
@@ -59,6 +60,13 @@
 //   ssao                 SsaoPass          depth -> ssao (half res, blurred)
 //   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
 //                        SkyboxPass, ReticlePass -> EndScenePass
+//   motion blur          MotionBlurPass    weapon items -> velocity -> tile
+//                                          max; hdr blurred in place (via a
+//                                          copy); then ResumeScenePass ->
+//                                          ReticlePass -> EndScenePass. Only
+//                                          in frames with weapon motion
+//                                          blur, where the reticle moves
+//                                          here from the scene pass.
 //   bloom                BloomPass         hdr -> bloom mip chain
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
 //   overlay              OverlayPass       debug lines + selection outline
@@ -88,8 +96,10 @@
 // of an image it overwrites (all frames in flight share the render targets).
 //
 // Layouts between passes: depth is DEPTH_READ_ONLY after the pre-pass (and
-// stays so through the scene pass); ssao, hdr, bloom and ldr are
-// SHADER_READ_ONLY whenever they are not being written; the shadow map is
+// stays so through the scene and motion blur passes); ssao, hdr, bloom,
+// ldr and the motion blur images are SHADER_READ_ONLY whenever they are not
+// being written or copied (hdr is TRANSFER_SRC for the motion blur's copy);
+// the shadow map is
 // DEPTH_READ_ONLY; the swapchain image is COLOR_ATTACHMENT after the present
 // pass and PRESENT_SRC after the UI.
 
@@ -386,6 +396,7 @@ class Renderer {
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
   ReticlePass reticle_pass_;
+  MotionBlurPass motion_blur_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   OverlayPass overlay_pass_;

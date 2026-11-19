@@ -26,6 +26,11 @@ struct Camera {
   // Parameters of `projection`, needed to fit the shadow cascades.
   float vertical_fov_radians = 1.0f;
   float near_plane = 0.1f;
+  // Last frame's projection * view; read with DrawItem::previous_transform
+  // (weapon motion blur). A surface point's screen velocity is its position
+  // this frame minus its position under the previous model and previous
+  // view-projection, so an item rigidly following the camera does not move.
+  glm::mat4 previous_view_projection{1.0f};
 };
 
 // Light intensities follow one convention throughout the renderer: color *
@@ -80,6 +85,11 @@ struct DrawItem {
   // Replaces the material of every submesh when set, e.g. a builtin cube
   // drawn as a tracer.
   std::optional<MaterialId> material_override;
+  // The item's `transform` in the previous frame. Set: the item writes
+  // motion vectors and is motion-blurred along its screen motion (the
+  // first-person weapon). Unset (the default): static as far as motion blur
+  // goes; leave it unset for an item that was not drawn last frame or jumped.
+  std::optional<glm::mat4> previous_transform;
 };
 
 // Draw counts of the most recent frame. Culled items were submitted in the
@@ -142,6 +152,13 @@ struct PostSettings {
   float ssao_intensity = 1.0f;  // occlusion exponent: ao = pow(ao, intensity)
   // FXAA on the tonemapped image; off = plain copy to the swapchain.
   bool fxaa_enabled = true;
+  // Motion blur of the draw items with a previous_transform (the weapon),
+  // along their motion on screen; the world is never blurred. The blur
+  // length is the motion over 1/60 s times the strength, whatever the frame
+  // rate (render/motion_blur_math.h). Skipped entirely when off, when the
+  // strength is 0 or when no such item is visible.
+  bool weapon_motion_blur_enabled = true;
+  float weapon_motion_blur_strength = 1.0f;  // [0, 2]
 };
 
 // Everything the renderer needs to draw one frame. The spans are borrowed
@@ -162,6 +179,10 @@ struct SceneView {
   // Drawn after the draw items when present.
   std::optional<ReticleSight> sight;
   PostSettings post;
+  // Duration of the frame in seconds (since the previous one), which turns
+  // the items' motion since the previous frame into a blur of fixed exposure.
+  // 0 (unknown), negative or very long frames blur nothing.
+  float frame_seconds = 0.0f;
 
   // Editor overlays, drawn over the tonemapped image; empty spans cost
   // nothing. Line vertex pairs (DebugLines::tested() / on_top()): `lines`

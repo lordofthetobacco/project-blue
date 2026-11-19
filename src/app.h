@@ -2,12 +2,14 @@
 #define BLUE_APP_H_
 
 #include <SDL3/SDL_events.h>
+#include <vulkan/vulkan.h>
 
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -30,6 +32,7 @@
 #include "scene/scene_data.h"
 #include "ui/perf_overlay.h"
 #include "weapon/loadout.h"
+#include "weapon/motion_history.h"
 #include "weapon/projectile_system.h"
 #include "weapon/target_log.h"
 #include "weapon/viewmodel.h"
@@ -199,17 +202,28 @@ class App {
   // Rebuilds targets_ from the instances named as targets; call after every
   // world build. Ranges are measured from the player start.
   void FindTargets();
-  // Appends the weapon in hand, the bullet streaks and the impact marks to
-  // draws_.
-  void AppendWeaponDraws();
+  // Appends the draws of the weapon in hand to draws_ when the player view
+  // shows it; returns whether it did.
+  bool AppendHeldWeaponDraws();
   // Appends one draw per mesh of the pistol prefab as posed this frame.
   void AppendPistolDraws();
+  // Appends the bullet streaks and the impact marks to draws_.
+  void AppendEffectDraws();
+  // Feeds this frame's weapon draws (the transforms of `weapon_draws`, seen
+  // through `camera` on a target of `extent` pixels) to weapon_motion_ and,
+  // when the history is valid, sets their previous_transform and the
+  // camera's previous_view_projection so the weapon is motion-blurred.
+  void ApplyWeaponMotion(std::span<render::DrawItem> weapon_draws,
+                         float frame_seconds, VkExtent2D extent,
+                         render::Camera& camera);
   [[nodiscard]] ui::WeaponOverlayInfo MakeWeaponOverlayInfo() const;
   [[nodiscard]] ui::HitLogOverlayInfo MakeHitLogOverlayInfo() const;
   // Returns the reflex sight as posed this frame, nullopt outside the
   // player view.
   [[nodiscard]] std::optional<render::ReticleSight> CurrentSight() const;
-  [[nodiscard]] render::SceneView BuildSceneView();
+  // Returns the frame to draw; `frame_seconds` is its duration (since the
+  // previous frame), for the weapon motion blur.
+  [[nodiscard]] render::SceneView BuildSceneView(float frame_seconds);
 
   // Declaration order is construction order and, reversed, destruction order:
   // the overlay and renderer must go before the window they render into; the
@@ -257,6 +271,12 @@ class App {
   weapon::WeaponAnimator pistol_animator_;
   // World matrix of every node of the pistol this frame, sized once.
   std::vector<glm::mat4> pistol_world_;
+  // Last frame's weapon draws, for the weapon motion blur; invalidated
+  // whenever the weapon jumps (respawn, a fresh viewmodel, a weapon reload)
+  // or is not drawn.
+  weapon::MotionHistory weapon_motion_;
+  // This frame's weapon draw transforms for weapon_motion_; reused.
+  std::vector<glm::mat4> weapon_transforms_;
   EffectMesh effect_cube_;
   // Ring buffer of the transforms of the most recent bullet holes on static
   // surfaces, each a small tile of the effect cube: the first

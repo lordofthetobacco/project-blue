@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "render/barriers.h"
+#include "render/motion_blur_math.h"
 
 namespace blue::render {
 
@@ -41,7 +42,9 @@ void RenderTargets::Resize(VkExtent2D extent) {
   half_extent_ = {std::max((extent.width + 1) / 2, 1u),
                   std::max((extent.height + 1) / 2, 1u)};
 
-  hdr_ = MakeTarget(context_, extent, kHdrFormat, kSampledTarget);
+  // The motion blur copies part of the HDR image before blurring it.
+  hdr_ = MakeTarget(context_, extent, kHdrFormat,
+                    kSampledTarget | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
   depth_ =
       Image(context_, {
                           .extent = extent,
@@ -62,6 +65,17 @@ void RenderTargets::Resize(VkExtent2D extent) {
   selection_mask_ =
       MakeTarget(context_, extent, kSelectionMaskFormat, kSampledTarget);
 
+  motion_tile_size_ = MotionBlurMaxRadius(extent.height);
+  const auto tile_size = static_cast<uint32_t>(motion_tile_size_);
+  velocity_ = MakeTarget(context_, extent, kVelocityFormat, kSampledTarget);
+  motion_tiles_ = MakeTarget(context_,
+                             {(extent.width + tile_size - 1) / tile_size,
+                              (extent.height + tile_size - 1) / tile_size},
+                             kMotionTileFormat, kSampledTarget);
+  motion_source_ =
+      MakeTarget(context_, extent, kHdrFormat,
+                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+
   bloom_mip_views_.clear();
   const uint32_t levels =
       std::min(kMaxBloomLevels, MipLevelCount(half_extent_));
@@ -77,7 +91,8 @@ void RenderTargets::Resize(VkExtent2D extent) {
 void RenderTargets::InitializeLayouts() {
   context_.SubmitImmediate([this](VkCommandBuffer cmd) {
     for (const Image* image :
-         {&hdr_, &ldr_, &ssao_raw_, &ssao_blur_, &bloom_, &selection_mask_}) {
+         {&hdr_, &ldr_, &ssao_raw_, &ssao_blur_, &bloom_, &selection_mask_,
+          &velocity_, &motion_tiles_, &motion_source_}) {
       ImageBarrier(cmd, image->handle(), VK_IMAGE_ASPECT_COLOR_BIT, kNoAccess,
                    kFragmentSampledRead, VK_IMAGE_LAYOUT_UNDEFINED,
                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

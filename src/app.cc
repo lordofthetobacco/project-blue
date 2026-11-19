@@ -41,6 +41,7 @@
 #include "shader/shader_compiler.h"
 #include "weapon/firearm.h"
 #include "weapon/loadout.h"
+#include "weapon/motion_history.h"
 #include "weapon/projectile_system.h"
 #include "weapon/target_log.h"
 #include "weapon/viewmodel.h"
@@ -498,11 +499,13 @@ void App::ResetLoadout() {
     viewmodel.Reset();
   }
   pistol_animator_.Reset();
+  weapon_motion_.Invalidate();
   ApplyWeaponToPlayer();
 }
 
 void App::OnWeaponChanged() {
   active_viewmodel().Reset();
+  weapon_motion_.Invalidate();
   if (loadout_.active() == weapon::WeaponSlot::kPistol) {
     pistol_animator_.Reset();
   }
@@ -528,6 +531,7 @@ void App::PlacePlayerAtStart() {
             : start.position -
                   glm::vec3(0.0f, player_.tuning().eye_height_standing, 0.0f);
 
+  weapon_motion_.Invalidate();  // The view jumps.
   if (player_.spawned()) {
     player_.Teleport(feet, look);
     return;
@@ -804,6 +808,7 @@ void App::RereadWeapons() {
   }
   weapons_ = std::move(assets).value();
   viewmodels_ = MakeViewmodels(weapons_);
+  weapon_motion_.Invalidate();
   rifle_pose_ = world::PrefabPose(prefab_cache_, weapons_.rifle);
   pistol_animator_ = weapon::WeaponAnimator(&weapons_.pistol_hierarchy,
                                             &weapons_.pistol_fire_clip,
@@ -984,7 +989,7 @@ int App::Run() {
       target_log_.Clear();
       shots_fired_ = 0;
     }
-    renderer_.DrawFrame(BuildSceneView(), ui_draw_data);
+    renderer_.DrawFrame(BuildSceneView(frame_seconds), ui_draw_data);
     if (!first_frame_logged_) {
       first_frame_logged_ = true;
       core::log::Info("Startup: {:.0f} ms from process start to first frame",
@@ -1195,15 +1200,19 @@ ui::WeaponOverlayInfo App::MakeWeaponOverlayInfo() const {
   };
 }
 
-void App::AppendWeaponDraws() {
-  if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
-    if (loadout_.active() == weapon::WeaponSlot::kPistol) {
-      AppendPistolDraws();
-    } else {
-      rifle_pose_.AppendDraws(active_viewmodel().model_matrix(), draws_);
-    }
+bool App::AppendHeldWeaponDraws() {
+  if (view_mode_ != ViewMode::kPlayer || !player_.spawned()) {
+    return false;
   }
+  if (loadout_.active() == weapon::WeaponSlot::kPistol) {
+    AppendPistolDraws();
+  } else {
+    rifle_pose_.AppendDraws(active_viewmodel().model_matrix(), draws_);
+  }
+  return true;
+}
 
+void App::AppendEffectDraws() {
   for (const weapon::Projectile& bullet : projectiles_.projectiles()) {
     const float speed = glm::length(bullet.velocity);
     const float length = std::min(speed * kTracerSeconds, bullet.distance);
@@ -1247,14 +1256,42 @@ void App::AppendPistolDraws() {
   }
 }
 
-render::SceneView App::BuildSceneView() {
+void App::ApplyWeaponMotion(std::span<render::DrawItem> weapon_draws,
+                            float frame_seconds, VkExtent2D extent,
+                            render::Camera& camera) {
+  weapon_transforms_.clear();
+  for (const render::DrawItem& item : weapon_draws) {
+    weapon_transforms_.push_back(item.transform);
+  }
+  const std::optional<weapon::PreviousMotion> previous =
+      weapon_motion_.Advance({
+          .slot = static_cast<int>(loadout_.active()),
+          .width = static_cast<int>(extent.width),
+          .height = static_cast<int>(extent.height),
+          .frame_seconds = frame_seconds,
+          .view_projection = camera.projection * camera.view,
+          .transforms = weapon_transforms_,
+      });
+  if (!previous) {
+    return;  // The weapon goes out unblurred this frame.
+  }
+  camera.previous_view_projection = previous->view_projection;
+  for (size_t i = 0; i < weapon_draws.size(); ++i) {
+    weapon_draws[i].previous_transform = previous->transforms[i];
+  }
+}
+
+render::SceneView App::BuildSceneView(float frame_seconds) {
   const VkExtent2D extent = renderer_.swapchain().extent();
   const float aspect = static_cast<float>(extent.width) /
                        static_cast<float>(std::max(extent.height, 1u));
 
   draws_.clear();
   world_.AppendDraws(draws_);
-  AppendWeaponDraws();
+  const size_t weapon_first = draws_.size();
+  const bool weapon_drawn = AppendHeldWeaponDraws();
+  const size_t weapon_count = draws_.size() - weapon_first;
+  AppendEffectDraws();
 
   const ViewPose eye = CurrentView();
   render::SceneView view;
@@ -1264,6 +1301,14 @@ render::SceneView App::BuildSceneView() {
   view.camera.near_plane = kNearPlane;
   view.camera.projection = camera::ReversedInfinitePerspective(
       view.camera.vertical_fov_radians, aspect, kNearPlane);
+  view.camera.previous_view_projection =
+      view.camera.projection * view.camera.view;
+  if (weapon_drawn) {
+    ApplyWeaponMotion(std::span(draws_).subspan(weapon_first, weapon_count),
+                      frame_seconds, extent, view.camera);
+  } else {
+    weapon_motion_.Invalidate();  // E.g. a debug camera.
+  }
   view.point_lights = world_.point_lights();
   view.ambient = kAmbient;
   view.sun = scene_.sun;
@@ -1272,6 +1317,7 @@ render::SceneView App::BuildSceneView() {
   view.draws = draws_;
   view.sight = CurrentSight();
   view.post = post_settings_;
+  view.frame_seconds = frame_seconds;
   return view;
 }
 

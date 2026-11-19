@@ -281,10 +281,12 @@ blue_target_defaults(blue_player)
 target_link_libraries(blue_player PUBLIC blue_physics blue_input blue_camera glm::glm)
 
 # Weapon gameplay: loadout switching, firing mechanism, fire-animation driver, ballistic bullets swept against the physics
-# world, model calibration and the first-person viewmodel pose. No rendering.
+# world, model calibration, the first-person viewmodel pose and its motion history (for the
+# weapon motion blur). No rendering.
 add_library(blue_weapon STATIC
     src/weapon/firearm.cc
     src/weapon/loadout.cc
+    src/weapon/motion_history.cc
     src/weapon/projectile_system.cc
     src/weapon/target_log.cc
     src/weapon/viewmodel.cc
@@ -394,6 +396,7 @@ add_library(blue_render STATIC
     src/render/fullscreen_pass.cc
     src/render/image.cc
     src/render/material_system.cc
+    src/render/motion_blur_math.cc
     src/render/pipeline.cc
     src/render/render_targets.cc
     src/render/samplers.cc
@@ -406,6 +409,7 @@ add_library(blue_render STATIC
     src/render/passes/bloom_pass.cc
     src/render/passes/depth_prepass.cc
     src/render/passes/mesh_pass.cc
+    src/render/passes/motion_blur_pass.cc
     src/render/passes/overlay_pass.cc
     src/render/passes/present_pass.cc
     src/render/passes/reticle_pass.cc

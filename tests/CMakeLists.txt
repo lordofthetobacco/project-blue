@@ -19,6 +19,8 @@ add_executable(blue_tests
     mesh_data_test.cc
     debug_lines_test.cc
     frame_uniforms_test.cc
+    motion_blur_math_test.cc
+    motion_history_test.cc
     brdf_reference_test.cc
     editor_viewport_test.cc
     mscn_scene_data_test.cc
