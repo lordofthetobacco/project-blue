@@ -1,56 +1,60 @@
 #ifndef BLUE_RENDER_SHADER_PROGRAMS_H_
 #define BLUE_RENDER_SHADER_PROGRAMS_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <cstdint>
 #include <functional>
-#include <span>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "core/result.h"
+#include "render/metal_context.h"
 #include "shader/shader_compiler.h"
 #include "shader/shader_watcher.h"
 
 namespace blue::render {
 
 // Registry of the renderer's shader programs (a vertex shader plus an
-// optional fragment shader, each compiled from a GLSL file) with hot reload.
+// optional fragment shader, each compiled from an MSL file) with hot reload.
 //
 // Each program is registered together with a factory that (re)creates the
-// pipeline that uses it from SPIR-V. Add() compiles the program and creates
-// the pipeline immediately. ReloadChanged() polls the watched source files,
-// recompiles the programs whose sources (or includes) changed and recreates
-// their pipelines. A program is always recompiled as a whole, so a failed
-// edit in one stage is never masked by a later edit in the other.
+// pipeline that uses it from the compiled libraries. Add() compiles the
+// program and creates the pipeline immediately. ReloadChanged() polls the
+// watched source files, recompiles the programs whose sources (or includes)
+// changed and recreates their pipelines. A program is always recompiled as a
+// whole, so a failed edit in one stage is never masked by a later edit in
+// the other.
 //
-// If a recompile fails, the old pipeline stays in use and the compiler
-// message is kept for last_error() until a later reload of that same program
-// succeeds. A pipeline factory that fails is fatal like any other Vulkan
-// error: a shader that compiles but no longer matches the pipeline's vertex
-// layout is not detected here.
+// If a recompile fails, or the factory reports an error for the new
+// libraries (e.g. stages that no longer link), the old pipeline stays in use
+// and the message is kept for last_error() until a later reload of that same
+// program succeeds. The program keeps its current libraries alive.
 //
-// Borrows nothing but the device handle, which must outlive this object. Not
-// thread-safe; call it from the thread that records frames, between frames.
+// Borrows `context`, which must outlive this object. Not thread-safe; call
+// it from the thread that records frames, between frames.
 class ShaderPrograms {
  public:
-  // Creates (or replaces) a pipeline from SPIR-V. The spans are only valid for
-  // the duration of the call; `fragment` is empty for programs without a
-  // fragment stage. Replacing the pipeline destroys the old one; the GPU is
-  // idle when that happens.
-  using PipelineFactory = std::function<void(
-      std::span<const uint32_t> vertex, std::span<const uint32_t> fragment)>;
+  // Creates (or replaces) a pipeline from compiled shaders. The libraries
+  // are borrowed for the call; `fragment` is null for programs without a
+  // fragment stage. Returns an error text, and leaves the current pipeline
+  // untouched, when the pipeline cannot be created; nullopt on success.
+  // When a pipeline is replaced, the GPU is idle.
+  using PipelineFactory = std::function<std::optional<std::string>(
+      const shader::ShaderLibrary& vertex,
+      const shader::ShaderLibrary* fragment)>;
 
-  ShaderPrograms(VkDevice device, shader::CompileMode mode);
+  ShaderPrograms(const MetalContext& context, shader::CompileMode mode);
 
   ShaderPrograms(const ShaderPrograms&) = delete;
   ShaderPrograms& operator=(const ShaderPrograms&) = delete;
 
   // Compiles the program from `vertex_path` and `fragment_path` (empty for
   // none), calls `create` with the result and starts watching the sources.
-  // A compile error is fatal: there is no previous pipeline to keep.
+  // A compile or factory error is fatal: there is no previous pipeline to
+  // keep.
   void Add(const std::string& vertex_path, const std::string& fragment_path,
            PipelineFactory create);
 
@@ -60,37 +64,42 @@ class ShaderPrograms {
   // replaced. Cheap when nothing changed.
   void ReloadChanged();
 
-  // Returns the compiler message of the most recent failed reload that has
-  // not been cleared by a later successful reload of the same program, or an
-  // empty view. Valid until the next call to Add() or ReloadChanged().
+  // Returns the message of the most recent failed reload that has not been
+  // cleared by a later successful reload of the same program, or an empty
+  // view. Valid until the next call to Add() or ReloadChanged().
   [[nodiscard]] std::string_view last_error() const;
 
  private:
+  // The successful result of compiling every stage of a program.
+  struct CompiledProgram {
+    shader::CompiledShader vertex;
+    // An empty library without a fragment stage.
+    shader::CompiledShader fragment;
+  };
+
   struct Program {
     std::string vertex_path;
     std::string fragment_path;
     PipelineFactory create;
-    std::vector<uint32_t> vertex_spirv;
-    std::vector<uint32_t> fragment_spirv;
+    // The libraries of the current pipeline.
+    CompiledProgram current;
     // The message of the last failed reload; empty while the program is fine.
     std::string error;
     // Orders failures: the highest one is the "most recent". Zero = no error.
     uint64_t error_serial = 0;
   };
 
-  // The successful result of compiling every stage of a program.
-  struct CompiledProgram {
-    shader::CompiledShader vertex;
-    shader::CompiledShader fragment;  // Empty spirv without a fragment stage.
-  };
-
   [[nodiscard]] core::Result<CompiledProgram, shader::ShaderError>
   CompileProgram(const Program& program) const;
-  // Makes `compiled` the program's current shaders: creates the pipeline,
-  // starts watching the sources and clears the error.
-  void Apply(Program& program, CompiledProgram compiled);
+  // Creates the pipeline from `compiled`. On success makes it the program's
+  // current shaders, starts watching the sources and clears the error;
+  // otherwise returns the factory's message and changes nothing.
+  [[nodiscard]] std::optional<std::string> Apply(Program& program,
+                                                 CompiledProgram compiled);
+  // Records `message` as the program's latest error and logs it.
+  void SetError(Program& program, std::string message);
 
-  VkDevice device_;
+  const MetalContext& context_;
   shader::ShaderCompiler compiler_;
   shader::ShaderWatcher watcher_;
   std::vector<Program> programs_;

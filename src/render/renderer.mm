@@ -13,6 +13,7 @@
 #include <glm/vec4.hpp>
 
 #include "core/log.h"
+#include "core/path.h"
 #include "material/material.h"
 #include "platform/window.h"
 #include "render/encoders.h"
@@ -28,12 +29,6 @@ namespace {
 // output (BGRA8Unorm_sRGB), so the UI shows it as the game window would.
 constexpr MTLPixelFormat kViewportFormat = MTLPixelFormatRGBA8Unorm_sRGB;
 
-// TODO(metal-stage3): replaced by the present pass. What the Stage 2 frame
-// shows where the scene will be: a dark teal (linear; the drawable and the
-// viewport image encode it to sRGB), so a working Metal output is easy to
-// recognise.
-constexpr MTLClearColor kPlaceholderSceneColor{0.0, 0.08, 0.08, 1.0};
-
 // Neutral grey dielectric: what kDefaultMaterial looks like.
 material::MaterialDesc DefaultMaterialDesc() {
   material::MaterialDesc desc;
@@ -41,20 +36,6 @@ material::MaterialDesc DefaultMaterialDesc() {
   desc.base_color = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
   desc.roughness = 0.6f;
   return desc;
-}
-
-// Records a render pass that clears `texture` to `color` and draws nothing.
-void RecordClearPass(const FrameContext& ctx, id<MTLTexture> texture,
-                     MTLClearColor color, const char* label) {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
-  MTLRenderPassColorAttachmentDescriptor* attachment =
-      descriptor.colorAttachments[0];
-  attachment.texture = texture;
-  attachment.loadAction = MTLLoadActionClear;
-  attachment.storeAction = MTLStoreActionStore;
-  attachment.clearColor = color;
-  [BeginRenderPass(ctx, descriptor, label) endEncoding];
 }
 
 }  // namespace
@@ -70,14 +51,36 @@ RendererImpl::RendererImpl(const platform::Window& window,
       samplers_(context_),
       targets_(context_, swapchain_.extent()),
       textures_(context_),
-      materials_(context_, textures_, samplers_) {
+      materials_(context_, textures_, samplers_),
+      shader_programs_(context_, shader_mode_),
+      debug_gradient_pass_(
+          context_, shader_programs_, shader_dir_,
+          {.fragment_path =
+               core::JoinPath(shader_dir_, "debug_gradient.frag.metal"),
+           .input_count = 0,
+           .output_format = RenderTargets::kHdrFormat,
+           .label = "debug gradient"}),
+      bloom_pass_(context_, shader_programs_, shader_dir_),
+      tonemap_pass_(context_, shader_programs_, shader_dir_),
+      present_pass_(context_, shader_programs_, shader_dir_,
+                    swapchain_.format()) {
   const MaterialId default_material = materials_.Create(DefaultMaterialDesc());
   if (default_material != kDefaultMaterial) {
     core::log::Fatal("The default material must be created first");
   }
+  BindTargets();
 }
 
 RendererImpl::~RendererImpl() { context_.WaitIdle(); }
+
+void RendererImpl::BindTargets() {
+  bloom_pass_.BindTargets(targets_, samplers_);
+  tonemap_pass_.BindTargets(targets_, samplers_);
+  present_pass_.BindTargets(targets_, samplers_);
+  if (viewport_present_pass_) {
+    viewport_present_pass_->BindTargets(targets_, samplers_);
+  }
+}
 
 MeshId RendererImpl::UploadMesh(const asset::MeshData& data) {
   meshes_.emplace_back(context_, data);
@@ -132,6 +135,7 @@ bool RendererImpl::RebuildSwapchain() {
   }
   if (viewport_.generation == 0) {  // Otherwise they follow the viewport.
     targets_.Resize(swapchain_.extent());
+    BindTargets();
   }
   swapchain_dirty_ = false;
   return true;
@@ -153,7 +157,11 @@ void RendererImpl::WaitForFramesInFlight() const {
 
 ViewportImage RendererImpl::PrepareViewport(core::Extent2D size) {
   size = {std::max(size.width, 1u), std::max(size.height, 1u)};
-  // TODO(metal-stage3): create the present pass into kViewportFormat.
+  if (!viewport_present_pass_) {
+    viewport_present_pass_.emplace(context_, shader_programs_, shader_dir_,
+                                   kViewportFormat);
+    viewport_present_pass_->BindTargets(targets_, samplers_);
+  }
   const bool changed = size != viewport_.extent;
   const bool may_resize =
       viewport_.generation == 0 ||
@@ -179,6 +187,7 @@ void RendererImpl::ResizeViewport(core::Extent2D size) {
                                               MTLTextureUsageShaderRead,
                                      .label = "viewport"});
   targets_.Resize(size);
+  BindTargets();
   viewport_ = {
       .texture = ToImTextureId(viewport_image_.texture()),
       .extent = size,
@@ -315,29 +324,33 @@ void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
     gpu_timer_.EndScope(scope);
   };
 
-  // TODO(metal-stage3): replaced by the present pass (and the passes before
-  // it); the LDR image is cleared so the frame touches a render target.
-  timed(GpuScope::kTonemap, [&] {
-    RecordClearPass(ctx, ctx.targets.ldr().texture(), kPlaceholderSceneColor,
-                    "ldr clear");
+  // TODO(metal-stage4): replaced by the scene pass; the test pattern shows
+  // the orientation and colour handling of the post chain.
+  timed(GpuScope::kScene, [&] {
+    debug_gradient_pass_.Record(ctx, {.texture = ctx.targets.hdr().texture(),
+                                      .extent = ctx.targets.extent()});
   });
+  if (ctx.view.post.bloom_enabled) {
+    timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });
+  }
+  timed(GpuScope::kTonemap, [&] { tonemap_pass_.Record(ctx); });
+  // TODO(metal-stage5): the overlay pass (debug lines, selection outline).
 
   if (output == Output::kSwapchain) {
     if (AcquireDrawable(ctx)) {
-      // TODO(metal-stage3): the present pass renders the scene to the
-      // drawable and the UI loads it (UiBackground::kScene).
-      timed(GpuScope::kUi, [&] {
-        RecordUiPass(ctx, ui, UiBackground::kClear, kPlaceholderSceneColor);
+      timed(GpuScope::kPresent, [&] {
+        present_pass_.Record(ctx, {.texture = ctx.drawable.texture,
+                                   .extent = ctx.output_extent});
       });
+      timed(GpuScope::kUi,
+            [&] { RecordUiPass(ctx, ui, UiBackground::kScene); });
     }
     return;
   }
 
   timed(GpuScope::kPresent, [&] {
-    // TODO(metal-stage3): replaced by the present pass into the viewport
-    // image.
-    RecordClearPass(ctx, viewport_image_.texture(), kPlaceholderSceneColor,
-                    "viewport clear");
+    viewport_present_pass_->Record(ctx, {.texture = viewport_image_.texture(),
+                                         .extent = viewport_.extent});
     RecordViewportReadbacks(ctx);
   });
   if (AcquireDrawable(ctx)) {
@@ -446,11 +459,13 @@ void Renderer::RequestSwapchainRebuild() { impl_->swapchain_dirty_ = true; }
 
 void Renderer::SetVsync(bool enabled) { impl_->SetVsync(enabled); }
 
-// TODO(metal-stage3): shader hot reload (ShaderPrograms); until then there
-// are no shaders to reload and never an error.
-void Renderer::ReloadChangedShaders() {}
+void Renderer::ReloadChangedShaders() {
+  impl_->shader_programs_.ReloadChanged();
+}
 
-std::string_view Renderer::last_shader_error() const { return {}; }
+std::string_view Renderer::last_shader_error() const {
+  return impl_->shader_programs_.last_error();
+}
 
 bool Renderer::vsync() const { return impl_->vsync_; }
 

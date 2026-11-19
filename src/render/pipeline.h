@@ -1,10 +1,14 @@
 #ifndef BLUE_RENDER_PIPELINE_H_
 #define BLUE_RENDER_PIPELINE_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
-#include <cstdint>
+#include <memory>
 #include <span>
+#include <string>
+
+#include "core/result.h"
+#include "shader/shader_compiler.h"
 
 namespace blue::render {
 
@@ -15,60 +19,80 @@ enum class BlendMode {
   kAlpha,     // src * src.a + dst * (1 - src.a); alpha unchanged.
 };
 
-// Describes a graphics pipeline. The spans are borrowed and only need to stay
-// valid for the duration of the Pipeline constructor call.
+// Describes a graphics pipeline. Everything is borrowed and only needs to
+// stay valid for the duration of the Pipeline::Create() call.
 struct GraphicsPipelineDesc {
-  std::span<const uint32_t> vertex_spirv;
-  // Empty for a pipeline without a fragment stage (depth-only).
-  std::span<const uint32_t> fragment_spirv;
-  // Values of the fragment shader's specialization constants: element i is
-  // constant_id i, read as a 32-bit int / uint / bool (0 = false).
-  std::span<const uint32_t> fragment_constants;
+  // Compiled on the device the pipeline is created for; the entry points are
+  // "VertexMain" and "FragmentMain".
+  const shader::ShaderLibrary* vertex = nullptr;
+  // Null for a pipeline without a fragment stage (depth-only).
+  const shader::ShaderLibrary* fragment = nullptr;
+  // Values of the fragment function's function constants: element i is
+  // [[function_constant(i)]] (indices in shaders/bindings.h).
+  std::span<const bool> fragment_constants;
 
-  std::span<const VkVertexInputBindingDescription> vertex_bindings;
-  std::span<const VkVertexInputAttributeDescription> vertex_attributes;
-  std::span<const VkDescriptorSetLayout> set_layouts;
-  std::span<const VkPushConstantRange> push_constants;
-
-  // VK_FORMAT_UNDEFINED means no color attachment (depth-only pipeline).
-  VkFormat color_format = VK_FORMAT_UNDEFINED;
-  // VK_FORMAT_UNDEFINED means no depth attachment and no depth test (e.g. a
-  // full-screen pass).
-  VkFormat depth_format = VK_FORMAT_UNDEFINED;
-  VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT;
-  VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  // EQUAL lets a pass shade only the surfaces a depth pre-pass kept.
-  VkCompareOp depth_compare_op = VK_COMPARE_OP_GREATER;
+  // nil for a vertex stage without vertex buffers (e.g. a full-screen
+  // triangle generated from the vertex id).
+  MTLVertexDescriptor* vertex_descriptor = nil;
+  // MTLPixelFormatInvalid means no color attachment (depth-only pipeline).
+  MTLPixelFormat color_format = MTLPixelFormatInvalid;
+  // MTLPixelFormatInvalid means no depth attachment and no depth test (e.g.
+  // a full-screen pass).
+  MTLPixelFormat depth_format = MTLPixelFormatInvalid;
+  // The front face is always counter-clockwise.
+  MTLCullMode cull_mode = MTLCullModeBack;
+  // Equal lets a pass shade only the surfaces a depth pre-pass kept.
+  MTLCompareFunction depth_compare = MTLCompareFunctionGreater;
   // False keeps the depth test but leaves the depth buffer untouched, e.g.
   // for overlays drawn after the opaque scene.
   bool depth_write = true;
   BlendMode blend = BlendMode::kReplace;
-  // Clamps instead of clips fragments outside the near/far planes (needs the
-  // depthClamp device feature).
+  // Clamps instead of clips fragments outside the near/far planes.
   bool depth_clamp = false;
-  // Enables depth bias; the factors are dynamic, set with vkCmdSetDepthBias.
+  // The pipeline uses depth bias: the pass sets the factors itself
+  // (setDepthBias:slopeScale:clamp:) after Bind(). Without it Bind() resets
+  // the bias to zero, so a biased pipeline's factors never leak into the
+  // next draws of the encoder.
   bool depth_bias = false;
-  VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  MTLPrimitiveTopologyClass topology = MTLPrimitiveTopologyClassTriangle;
+  // Names the pipeline in GPU captures; nullptr gives a generic name.
+  const char* label = nullptr;
 };
 
-// Graphics pipeline for dynamic rendering, with its layout. Viewport and
-// scissor (and the depth bias, if enabled) are dynamic. Neither copyable nor
-// movable. Invalid SPIR-V or a failed Vulkan call is fatal. Not thread-safe.
+// A graphics pipeline: the render pipeline state together with the
+// encoder state Metal keeps outside of it (depth-stencil state, cull mode,
+// winding, depth clip mode, depth bias), all applied by Bind(). Neither
+// copyable nor movable (held by unique_ptr so a hot reload can swap it).
+// Not thread-safe.
 class Pipeline {
  public:
-  Pipeline(VkDevice device, const GraphicsPipelineDesc& desc);
-  ~Pipeline();
+  // Creates the pipeline on `device`, which must be the device the shader
+  // libraries were compiled on (the system default device; a mismatch is
+  // fatal). Returns the Metal error text when a function is missing or the
+  // stages do not link (e.g. varyings that stopped matching after a shader
+  // edit): during a hot reload that is an ordinary failure.
+  [[nodiscard]] static core::Result<std::unique_ptr<Pipeline>, std::string>
+  Create(id<MTLDevice> device, const GraphicsPipelineDesc& desc);
 
   Pipeline(const Pipeline&) = delete;
   Pipeline& operator=(const Pipeline&) = delete;
 
-  [[nodiscard]] VkPipeline handle() const { return pipeline_; }
-  [[nodiscard]] VkPipelineLayout layout() const { return layout_; }
+  // Sets the pipeline and its fixed-function state on `encoder`.
+  void Bind(id<MTLRenderCommandEncoder> encoder) const;
+
+  [[nodiscard]] id<MTLRenderPipelineState> state() const { return state_; }
+  [[nodiscard]] bool depth_bias() const { return depth_bias_; }
 
  private:
-  VkDevice device_ = VK_NULL_HANDLE;
-  VkPipelineLayout layout_ = VK_NULL_HANDLE;
-  VkPipeline pipeline_ = VK_NULL_HANDLE;
+  Pipeline() = default;
+
+  id<MTLRenderPipelineState> state_ = nil;
+  // nil without a depth attachment: the encoder's default (no test, no
+  // write) is what such a pipeline needs.
+  id<MTLDepthStencilState> depth_stencil_ = nil;
+  MTLCullMode cull_mode_ = MTLCullModeBack;
+  MTLDepthClipMode depth_clip_mode_ = MTLDepthClipModeClip;
+  bool depth_bias_ = false;
 };
 
 }  // namespace blue::render

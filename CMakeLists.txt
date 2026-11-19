@@ -370,6 +370,7 @@ add_library(blue_render STATIC
     src/render/debug_lines.cc
     src/render/encoders.mm
     src/render/frame_uniforms.cc
+    src/render/fullscreen_pass.mm
     src/render/gpu_scope.cc
     src/render/gpu_timer.mm
     src/render/image.mm
@@ -377,12 +378,17 @@ add_library(blue_render STATIC
     src/render/mesh.mm
     src/render/metal_check.mm
     src/render/metal_context.mm
+    src/render/pipeline.mm
     src/render/render_targets.mm
     src/render/renderer.mm
     src/render/samplers.mm
+    src/render/shader_programs.mm
     src/render/swapchain.mm
     src/render/texture_cache.mm
     src/render/texture_types.cc
+    src/render/passes/bloom_pass.mm
+    src/render/passes/present_pass.mm
+    src/render/passes/tonemap_pass.mm
     src/render/passes/ui_pass.mm
 )
 

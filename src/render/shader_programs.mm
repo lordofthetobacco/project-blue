@@ -1,8 +1,7 @@
 #include "render/shader_programs.h"
 
-#include <vulkan/vulkan.h>
-
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -11,7 +10,6 @@
 #include "core/log.h"
 #include "core/path.h"
 #include "core/result.h"
-#include "render/vk_check.h"
 #include "shader/shader_compiler.h"
 
 namespace blue::render {
@@ -24,8 +22,9 @@ bool Contains(const std::vector<std::string>& paths, const std::string& path) {
 
 }  // namespace
 
-ShaderPrograms::ShaderPrograms(VkDevice device, shader::CompileMode mode)
-    : device_(device), compiler_(mode) {}
+ShaderPrograms::ShaderPrograms(const MetalContext& context,
+                               shader::CompileMode mode)
+    : context_(context), compiler_(mode) {}
 
 core::Result<ShaderPrograms::CompiledProgram, shader::ShaderError>
 ShaderPrograms::CompileProgram(const Program& program) const {
@@ -45,17 +44,30 @@ ShaderPrograms::CompileProgram(const Program& program) const {
   return CompileResult::Ok(std::move(compiled));
 }
 
-void ShaderPrograms::Apply(Program& program, CompiledProgram compiled) {
-  program.vertex_spirv = std::move(compiled.vertex.spirv);
-  program.fragment_spirv = std::move(compiled.fragment.spirv);
-  program.create(program.vertex_spirv, program.fragment_spirv);
-
+std::optional<std::string> ShaderPrograms::Apply(Program& program,
+                                                 CompiledProgram compiled) {
+  const shader::ShaderLibrary* fragment =
+      compiled.fragment.library ? &compiled.fragment.library : nullptr;
+  std::optional<std::string> error =
+      program.create(compiled.vertex.library, fragment);
+  if (error) {
+    return error;
+  }
   watcher_.Watch(program.vertex_path, compiled.vertex.dependencies);
   if (!program.fragment_path.empty()) {
     watcher_.Watch(program.fragment_path, compiled.fragment.dependencies);
   }
+  program.current = std::move(compiled);
   program.error.clear();
   program.error_serial = 0;
+  return std::nullopt;
+}
+
+void ShaderPrograms::SetError(Program& program, std::string message) {
+  program.error = std::move(message);
+  program.error_serial = next_error_serial_++;
+  core::log::Error("Shader reload failed, keeping the previous one:\n{}",
+                   program.error);
 }
 
 void ShaderPrograms::Add(const std::string& vertex_path,
@@ -73,7 +85,14 @@ void ShaderPrograms::Add(const std::string& vertex_path,
     core::log::Fatal("Shader compilation failed:\n{}",
                      compiled.error().message);
   }
-  Apply(program, std::move(compiled).value());
+  if (const std::optional<std::string> error =
+          Apply(program, std::move(compiled).value())) {
+    core::log::Fatal("Creating the pipeline of {} failed:\n{}",
+                     core::FileName(program.fragment_path.empty()
+                                        ? program.vertex_path
+                                        : program.fragment_path),
+                     *error);
+  }
   programs_.push_back(std::move(program));
 }
 
@@ -99,20 +118,21 @@ void ShaderPrograms::ReloadChanged() {
     if (compiled.ok()) {
       rebuilt.push_back({&program, std::move(compiled).value()});
     } else {
-      program.error = compiled.error().message;
-      program.error_serial = next_error_serial_++;
-      core::log::Error("Shader reload failed, keeping the previous one:\n{}",
-                       program.error);
+      SetError(program, compiled.error().message);
     }
   }
   if (rebuilt.empty()) {
     return;
   }
 
-  CheckVk(vkDeviceWaitIdle(device_));
+  context_.WaitIdle();
   for (Rebuilt& entry : rebuilt) {
-    const Program& program = *entry.program;
-    Apply(*entry.program, std::move(entry.compiled));
+    Program& program = *entry.program;
+    if (std::optional<std::string> error =
+            Apply(program, std::move(entry.compiled))) {
+      SetError(program, std::move(*error));
+      continue;
+    }
     for (const std::string& path :
          {program.vertex_path, program.fragment_path}) {
       if (Contains(changed, path)) {
