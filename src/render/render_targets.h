@@ -78,6 +78,13 @@ class RenderTargets {
   }
   // Returns the extent of bloom mip `level`.
   [[nodiscard]] VkExtent2D bloom_mip_extent(uint32_t level) const;
+  // Device memory of all the targets, in bytes.
+  [[nodiscard]] VkDeviceSize size_bytes() const {
+    return hdr_.size_bytes() + depth_.size_bytes() + ldr_.size_bytes() +
+           ssao_raw_.size_bytes() + ssao_blur_.size_bytes() +
+           ssao_.size_bytes() + bloom_.size_bytes() +
+           selection_mask_.size_bytes();
+  }
 
  private:
   // Moves every image into the layout documented above.

@@ -26,6 +26,8 @@ include(SampleAssets)
 add_library(blue_core STATIC
     src/core/path.cc
     src/platform/file_system.cc
+    src/platform/mapped_file.cc
+    src/platform/process_memory.cc
 )
 
 target_include_directories(blue_core PUBLIC src)
@@ -399,6 +401,7 @@ add_library(blue_render STATIC
     src/render/gpu_timer.cc
     src/render/mesh.cc
     src/render/renderer.cc
+    src/render/staging_upload.cc
     src/render/texture_cache.cc
     src/render/passes/bloom_pass.cc
     src/render/passes/depth_prepass.cc

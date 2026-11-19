@@ -44,24 +44,35 @@ struct StbiDeleter {
   void operator()(void* pixels) const { stbi_image_free(pixels); }
 };
 
-// Returns why `bytes` cannot be decoded before decoding it: kDecodeFailed if
+// Reads the dimensions from the header of `bytes`: kDecodeFailed if
 // stb_image does not recognise it, kTooLarge if a dimension exceeds
-// kMaxImageDimension. nullopt means "go ahead".
-std::optional<ImageError> CheckHeader(std::span<const std::byte> bytes) {
+// kMaxImageDimension.
+core::Result<ImageSize, ImageError> ReadHeader(
+    std::span<const std::byte> bytes) {
+  using Result = core::Result<ImageSize, ImageError>;
   if (bytes.empty() || bytes.size() > static_cast<size_t>(INT_MAX)) {
-    return ImageError::kDecodeFailed;
+    return Result::Error(ImageError::kDecodeFailed);
   }
-  int width = 0;
-  int height = 0;
+  ImageSize size;
   int channels = 0;
   if (stbi_info_from_memory(reinterpret_cast<const stbi_uc*>(bytes.data()),
-                            static_cast<int>(bytes.size()), &width, &height,
-                            &channels) == 0) {
-    return ImageError::kDecodeFailed;
+                            static_cast<int>(bytes.size()), &size.width,
+                            &size.height, &channels) == 0) {
+    return Result::Error(ImageError::kDecodeFailed);
   }
-  if (width <= 0 || height <= 0 || width > kMaxImageDimension ||
-      height > kMaxImageDimension) {
-    return ImageError::kTooLarge;
+  if (size.width <= 0 || size.height <= 0 || size.width > kMaxImageDimension ||
+      size.height > kMaxImageDimension) {
+    return Result::Error(ImageError::kTooLarge);
+  }
+  return Result::Ok(size);
+}
+
+// Returns why `bytes` cannot be decoded before decoding it (see
+// ReadHeader()); nullopt means "go ahead".
+std::optional<ImageError> CheckHeader(std::span<const std::byte> bytes) {
+  const core::Result<ImageSize, ImageError> header = ReadHeader(bytes);
+  if (!header.ok()) {
+    return header.error();
   }
   return std::nullopt;
 }
@@ -133,6 +144,20 @@ core::Result<ImageData, ImageError> DecodeImage(
                       pixels.get() + static_cast<size_t>(width) *
                                          static_cast<size_t>(height) * 4);
   return ImageResult::Ok(std::move(image));
+}
+
+core::Result<ImageSize, ImageError> ProbeImage(
+    std::span<const std::byte> bytes) {
+  return ReadHeader(bytes);
+}
+
+core::Result<ImageSize, ImageError> ProbeImageFile(const std::string& path) {
+  const auto bytes = platform::ReadFile(path, kMaxImageFileSize);
+  if (!bytes.ok()) {
+    return core::Result<ImageSize, ImageError>::Error(
+        ImageError::kFileNotFound);
+  }
+  return ReadHeader(bytes.value());
 }
 
 core::Result<ImageData, ImageError> LoadImageFile(const std::string& path) {

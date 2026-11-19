@@ -1,5 +1,6 @@
 #include "prefab/prefab_file.h"
 
+#include <SDL3/SDL_iostream.h>
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include "asset/mesh_data.h"
 #include "core/path.h"
 #include "platform/file_system.h"
+#include "platform/mapped_file.h"
 #include "prefab/prefab.h"
 #include "scene/binary_stream.h"
 #include "tests/prefab_samples.h"
@@ -510,6 +512,131 @@ TEST_CASE("Byte flips never crash the decoder, even with valid checksums") {
   }
   MESSAGE("flips decoded as valid prefabs (bulk bytes, float values): ",
           accepted);
+}
+
+namespace {
+
+// The sample prefab with its paths inside `scratch` (absolute), so it loads
+// back unchanged from a file there.
+Prefab SampleIn(const testing::ScratchDirectory& scratch) {
+  Prefab prefab = testing::MakeSamplePrefab();
+  prefab.children[0].path = scratch.Child("parts/sight.pbo");
+  prefab.edit.source_model = scratch.Child("sources/glock.gltf");
+  prefab.edit.texture_sources = {{scratch.Child("sources/albedo.png")},
+                                 {scratch.Child("sources/normal.png")}};
+  return prefab;
+}
+
+}  // namespace
+
+TEST_CASE("LoadPrefab maps the file instead of copying it") {
+  const testing::ScratchDirectory scratch("pbo_map");
+  const std::string path = scratch.Child("mapped.pbo");
+  REQUIRE(SavePrefab(SampleIn(scratch), path).ok());
+  const auto bytes = platform::ReadFile(path, kMaxPrefabFileSize);
+  REQUIRE(bytes.ok());
+
+  auto loaded = LoadPrefab(path);
+  REQUIRE(loaded.ok());
+  const BulkStorage& storage = loaded.value().storage;
+  REQUIRE(storage.block_count() == 1);
+  CHECK(storage.blocks()[0].kind == BlockKind::kMapped);
+  CHECK(storage.byte_size(BlockKind::kMapped) == bytes.value().size());
+  CHECK(storage.byte_size(BlockKind::kHeap) == 0);
+  CheckSamePrefab(SampleIn(scratch), loaded.value());
+}
+
+TEST_CASE("Saving over a loaded prefab's file keeps the loaded prefab intact") {
+  const testing::ScratchDirectory scratch("pbo_resave");
+  const std::string path = scratch.Child("doc.pbo");
+  const Prefab original = SampleIn(scratch);
+  REQUIRE(SavePrefab(original, path).ok());
+  auto loaded = LoadPrefab(path);
+  REQUIRE(loaded.ok());
+
+  // The editor saves an edited copy that still views the mapped file over
+  // that same file, then keeps the old version for undo.
+  Prefab edited = loaded.value();
+  edited.materials[0].name = "brass";
+  edited.textures.pop_back();
+  edited.materials[0].textures[2] = -1;
+  edited.edit.texture_sources.pop_back();
+  REQUIRE(SavePrefab(edited, path).ok());
+
+  CheckSamePrefab(original, loaded.value());
+  auto reloaded = LoadPrefab(path);
+  REQUIRE(reloaded.ok());
+  CHECK(reloaded.value().materials[0].name == "brass");
+  CHECK(reloaded.value().textures.size() == 1);
+  CheckSamePrefab(edited, reloaded.value());
+
+  // Saving again while both versions are mapped works too.
+  REQUIRE(SavePrefab(loaded.value(), path).ok());
+  CheckSamePrefab(edited, reloaded.value());
+  auto third = LoadPrefab(path);
+  REQUIRE(third.ok());
+  CheckSamePrefab(original, third.value());
+}
+
+TEST_CASE("A loaded prefab outlives its file being deleted or replaced") {
+  const testing::ScratchDirectory scratch("pbo_gone");
+  const std::string path = scratch.Child("gone.pbo");
+  REQUIRE(SavePrefab(SampleIn(scratch), path).ok());
+  {
+    auto loaded = LoadPrefab(path);
+    REQUIRE(loaded.ok());
+    // What a cooker regenerating the file does: write elsewhere, rename over.
+    const std::vector<std::byte> other = Encode(Prefab{});
+    REQUIRE(platform::WriteFileAtomic(path, other).ok());
+    CheckSamePrefab(SampleIn(scratch), loaded.value());
+    CHECK(platform::RemovePath(path));
+    CHECK_FALSE(platform::PathExists(path));
+    CheckSamePrefab(SampleIn(scratch), loaded.value());
+  }
+  // Writing a new file at the path works once the mapping is gone.
+  REQUIRE(SavePrefab(SampleIn(scratch), path).ok());
+  CHECK(LoadPrefab(path).ok());
+}
+
+#ifdef _WIN32
+TEST_CASE("A mapped prefab file cannot be rewritten in place") {
+  const testing::ScratchDirectory scratch("pbo_inplace");
+  const std::string path = scratch.Child("locked.pbo");
+  REQUIRE(SavePrefab(SampleIn(scratch), path).ok());
+  auto loaded = LoadPrefab(path);
+  REQUIRE(loaded.ok());
+  // Opening for writing (which would truncate) is refused; reading is fine.
+  SDL_IOStream* stream = SDL_IOFromFile(path.c_str(), "wb");
+  CHECK(stream == nullptr);
+  if (stream != nullptr) {
+    SDL_CloseIO(stream);
+  }
+  CHECK(platform::ReadFile(path, kMaxPrefabFileSize).ok());
+  CheckSamePrefab(SampleIn(scratch), loaded.value());
+}
+#endif
+
+TEST_CASE("MappedFile maps whole files and reports errors") {
+  const testing::ScratchDirectory scratch("mapped_file");
+  const std::vector<std::byte> bytes = testing::PatternBytes(100000, 3);
+  const std::string path = scratch.Child("data.bin");
+  REQUIRE(platform::WriteFileAtomic(path, bytes).ok());
+  auto mapped = platform::MappedFile::Open(path, bytes.size());
+  REQUIRE(mapped.ok());
+  CHECK(std::ranges::equal(mapped.value()->bytes(), bytes));
+
+  auto too_large = platform::MappedFile::Open(path, bytes.size() - 1);
+  REQUIRE_FALSE(too_large.ok());
+  CHECK(too_large.error() == platform::FileError::kTooLarge);
+  auto missing = platform::MappedFile::Open(scratch.Child("no.bin"), 1000);
+  REQUIRE_FALSE(missing.ok());
+  CHECK(missing.error() == platform::FileError::kNotFound);
+
+  const std::string empty = scratch.Child("empty.bin");
+  REQUIRE(platform::WriteFileAtomic(empty, {}).ok());
+  auto empty_mapped = platform::MappedFile::Open(empty, 1000);
+  REQUIRE(empty_mapped.ok());
+  CHECK(empty_mapped.value()->bytes().empty());
 }
 
 TEST_CASE("Large prefab timing") {

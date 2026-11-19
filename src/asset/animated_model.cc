@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -22,8 +23,10 @@
 #include <glm/vec4.hpp>
 #include <glm/vector_relational.hpp>
 
+#include "asset/internal/embedded_textures.h"
 #include "asset/internal/material_import.h"
 #include "asset/internal/mesh_import.h"
+#include "asset/texture_loader.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "platform/file_system.h"
@@ -260,7 +263,8 @@ Bounds PoseBounds(std::span<const ModelPart> parts,
 }
 
 core::Result<AnimatedModel, ImportError> ImportAnimatedModel(
-    const std::string& path, const ImportOptions& options) {
+    const std::string& path, const ImportOptions& options,
+    EmbeddedImages* embedded) {
   using Result = core::Result<AnimatedModel, ImportError>;
   if (!platform::IsRegularFile(path)) {
     return Result::Error(ImportError::kFileNotFound);
@@ -304,6 +308,11 @@ core::Result<AnimatedModel, ImportError> ImportAnimatedModel(
     model.clips.push_back(ImportClip(path, *animation, model.hierarchy));
   }
   model.rest_bounds = RestBounds(model);
+  if (embedded != nullptr) {
+    // The scene's other data goes with `owned`; the encoded images stay.
+    const std::unique_ptr<aiScene> owned(importer.GetOrphanedScene());
+    *embedded = EmbeddedImages(internal::TakeEmbeddedTextures(*owned));
+  }
 
   const auto elapsed = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start);

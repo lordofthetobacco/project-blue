@@ -3,6 +3,7 @@
 // tools live in mcp_scene_tools.cc and mcp_prefab_tools.cc.
 //
 //   editor_get_state         mode, documents, selection, undo / redo labels
+//   editor_get_memory        process, document, undo history and GPU memory
 //   editor_list_commands     the text command registry (name: usage)
 //   editor_run_command       runs editor command lines, returns their output
 //   editor_open / editor_save / editor_undo / editor_redo / editor_set_mode
@@ -43,6 +44,7 @@
 #include "editor/mcp/mcp_export.h"
 #include "editor/mcp/mcp_tool_util.h"
 #include "editor/mcp/png_encode.h"
+#include "editor/memory_report.h"
 #include "editor/panel.h"
 #include "editor/viewport/editor_camera.h"
 #include "editor/viewport/viewport_panel.h"
@@ -213,6 +215,24 @@ void EditorTools::RegisterEditorTools() {
            .read_only = true},
           [&context](const ToolCall&) -> ToolReturn {
             return ToolResult::Structured(mcp_tools::EditorStateJson(context));
+          });
+
+  AddTool(server_, context,
+          {.name = "editor_get_memory",
+           .title = "Get editor memory use",
+           .description =
+               "Returns the editor's own memory numbers: process private "
+               "bytes and working set (with peaks; Windows only), the open "
+               "prefab document's bulk data (heap vs mapped from the .pbo), "
+               "what its undo history keeps alive and its budget, GPU memory "
+               "per heap and per owner (textures, meshes, render targets, "
+               "environment, staging), the prefab cache and thumbnails. "
+               "Bytes are integers; 'text' has readable lines.",
+           .input_schema = ObjectSchema(Json::Object()),
+           .read_only = true},
+          [&context](const ToolCall&) -> ToolReturn {
+            return ToolResult::Structured(
+                MemoryReportJson(context.memory_report()));
           });
 
   AddTool(server_, context,

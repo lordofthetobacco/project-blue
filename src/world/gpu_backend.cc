@@ -6,7 +6,6 @@
 #include <span>
 #include <vector>
 
-#include "asset/mesh_data.h"
 #include "material/material.h"
 #include "prefab/prefab.h"
 #include "render/renderer.h"
@@ -44,13 +43,9 @@ std::optional<render::TextureId> Slot(
 }  // namespace
 
 render::MeshId RendererBackend::UploadMesh(const prefab::Mesh& mesh) {
-  // The renderer takes owning MeshData; this copy happens once per load.
-  asset::MeshData data;
-  data.vertices.assign(mesh.vertices.begin(), mesh.vertices.end());
-  data.indices.assign(mesh.indices.begin(), mesh.indices.end());
-  data.submeshes = mesh.submeshes;
-  data.bounds = mesh.bounds;
-  return renderer_.UploadMesh(data);
+  // Straight from the prefab's bulk data (a mapped file when loaded): no
+  // intermediate heap copy.
+  return renderer_.UploadMesh(mesh.vertices, mesh.indices);
 }
 
 std::vector<render::TextureId> RendererBackend::UploadTextures(
@@ -94,6 +89,8 @@ void RendererBackend::ReleaseMesh(render::MeshId id) {
 void RendererBackend::ReleaseTextures(std::span<const render::TextureId> ids) {
   renderer_.ReleaseTextures(ids);
 }
+
+void RendererBackend::FlushReleases() { renderer_.FlushReleases(); }
 
 void RendererBackend::ReleaseMaterial(render::MaterialId id) {
   renderer_.ReleaseMaterial(id);

@@ -62,6 +62,7 @@ add_executable(blue_tests
     environment_test.cc
     sample_content_test.cc
     texture_upload_test.cc
+    staging_upload_test.cc
     editor_core_test.cc
     cook_clip_test.cc
     cook_collision_test.cc
@@ -72,6 +73,7 @@ add_executable(blue_tests
     editor_scene_edit_test.cc
     editor_mcp_args_test.cc
     editor_mcp_settings_test.cc
+    editor_memory_test.cc
     mcp_http_test.cc
     mcp_json_test.cc
     mcp_protocol_test.cc

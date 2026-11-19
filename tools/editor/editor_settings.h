@@ -26,11 +26,19 @@ struct McpSettings {
 // Returns the command that adds the editor's server to Claude Code.
 [[nodiscard]] std::string McpClaudeCommand(int port);
 
+// Bulk data (textures, meshes) the prefab document's undo history may keep
+// alive on top of the document, in MiB (see TrimHistoryBulk()).
+inline constexpr int kMinHistoryBudgetMb = 16;
+inline constexpr int kMaxHistoryBudgetMb = 65536;
+inline constexpr int kDefaultHistoryBudgetMb = 512;
+
 // User preferences of the editor, persisted in a small "key = value" text
 // file in the pref dir (next to the layout ini). Add new settings here as
 // fields with their defaults and a key in editor_settings.cc. Copyable.
 struct EditorSettings {
   McpSettings mcp;  // keys "mcp.enabled", "mcp.port"
+  // key "history.budget_mb", kMinHistoryBudgetMb..kMaxHistoryBudgetMb
+  int history_budget_mb = kDefaultHistoryBudgetMb;
 
   friend bool operator==(const EditorSettings&,
                          const EditorSettings&) = default;

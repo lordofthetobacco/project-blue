@@ -75,6 +75,11 @@ class Environment {
   // The sun found in the current panorama (found == false for the default
   // sky).
   [[nodiscard]] const lighting::SunEstimate& sun() const { return sun_; }
+  // Device memory of the cubes and the BRDF LUT, in bytes.
+  [[nodiscard]] VkDeviceSize size_bytes() const {
+    return sky_cube_.size_bytes() + source_cube_.size_bytes() +
+           specular_cube_.size_bytes() + brdf_lut_.size_bytes();
+  }
 
  private:
   // Records the GGX prefilter of the specular source cube (all mips in

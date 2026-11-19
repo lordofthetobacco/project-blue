@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 
+#include "core/log.h"
 #include "core/path.h"
 #include "core/result.h"
 #include "prefab/prefab.h"
@@ -66,6 +67,21 @@ VoidResult SavePrefabDocument(PrefabDocument& document,
   }
   document.set_path(*target);
   document.MarkSaved();
+  // View the bulk data in the file just written instead of the heap or an
+  // older mapping. Best effort: if the reload fails the document simply keeps
+  // its current blocks.
+  core::Result<prefab::Prefab, prefab::PrefabError> reloaded =
+      prefab::LoadPrefab(*target);
+  bool rebased = false;
+  if (reloaded.ok()) {
+    document.RewriteState([&](prefab::Prefab& state) {
+      rebased = prefab::RebaseBulk(state, reloaded.value());
+    });
+  }
+  if (!rebased) {
+    core::log::Warn("{}: saved, but the document keeps its old bulk data",
+                    *target);
+  }
   return VoidResult::Ok();
 }
 

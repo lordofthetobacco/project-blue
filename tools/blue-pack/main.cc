@@ -36,6 +36,7 @@
 #include "physics/physics_runtime.h"
 #include "physics/shape_cooking.h"
 #include "platform/file_system.h"
+#include "platform/process_memory.h"
 #include "prefab/prefab.h"
 #include "prefab/prefab_file.h"
 #include "scene/mscn_serializer.h"
@@ -341,6 +342,18 @@ bool ApplyClipEdit(prefab::Prefab& prefab, const ClipEdit& edit) {
   return ok;
 }
 
+// Prints the process's peak memory, where the platform reports it.
+void PrintMemoryPeaks() {
+  const platform::ProcessMemory memory = platform::QueryProcessMemory();
+  if (!memory.available) {
+    return;
+  }
+  constexpr double kMiB = 1024.0 * 1024.0;
+  Print("peak memory: working set {:.0f} MiB, private {:.0f} MiB\n",
+        static_cast<double>(memory.peak_working_set) / kMiB,
+        static_cast<double>(memory.peak_private_bytes) / kMiB);
+}
+
 int RunImport(const ImportCommand& command) {
   const auto start = std::chrono::steady_clock::now();
   auto cooked = cook::CookModel(command.model, command.options);
@@ -390,6 +403,7 @@ int RunImport(const ImportCommand& command) {
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
           .count();
   Print("wrote {} in {:.2f} s\n", command.output, seconds);
+  PrintMemoryPeaks();
   return kExitOk;
 }
 

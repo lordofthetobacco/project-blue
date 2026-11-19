@@ -1,8 +1,8 @@
 #include "render/buffer.h"
 
-#include <cstring>
 #include <utility>
 
+#include "render/staging_upload.h"
 #include "render/vk_check.h"
 
 namespace blue::render {
@@ -68,20 +68,12 @@ void Buffer::Release() {
 Buffer CreateGpuBuffer(const VulkanContext& context,
                        std::span<const std::byte> data,
                        VkBufferUsageFlags usage) {
-  const VkDeviceSize size = data.size_bytes();
-
-  Buffer staging(context.allocator(), size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 Buffer::Access::kCpuSequentialWrite);
-  std::memcpy(staging.mapped(), data.data(), size);
-
-  Buffer buffer(context.allocator(), size,
+  Buffer buffer(context.allocator(), data.size_bytes(),
                 usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 Buffer::Access::kGpuOnly);
-
-  context.SubmitImmediate([&](VkCommandBuffer cmd) {
-    const VkBufferCopy region{.size = size};
-    vkCmdCopyBuffer(cmd, staging.handle(), buffer.handle(), 1, &region);
-  });
+  StagingUploader uploader(context, data.size_bytes());
+  uploader.CopyToBuffer(data, buffer.handle(), 0);
+  uploader.Finish();
   return buffer;
 }
 

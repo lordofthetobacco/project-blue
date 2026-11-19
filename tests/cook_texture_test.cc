@@ -253,6 +253,53 @@ TEST_CASE("Cooking is deterministic") {
   CHECK(AllBytes(first.value()) == AllBytes(second.value()));
 }
 
+TEST_CASE("EncodeTexture then StoreTexture give CookTexture's texture") {
+  const ImageData gradient = Gradient(37, 23);
+  const ImageData normals = NormalMap(37, 23);
+  struct Case {
+    const ImageData* image;
+    TextureCookOptions options;
+  };
+  const Case cases[] = {
+      {&gradient,
+       {.usage = TextureUsage::kColor, .quality = CookQuality::kFast}},
+      {&gradient,
+       {.usage = TextureUsage::kLinear, .quality = CookQuality::kFast}},
+      {&normals,
+       {.usage = TextureUsage::kNormal, .quality = CookQuality::kFast}},
+      {&gradient,
+       {.usage = TextureUsage::kColor, .compress = false, .max_size = 16}},
+      {&normals,
+       {.usage = TextureUsage::kNormal,
+        .compress = false,
+        .generate_mips = false}},
+  };
+  for (const Case& test : cases) {
+    CAPTURE(static_cast<int>(test.options.usage));
+    CAPTURE(test.options.compress);
+    prefab::BulkStorage storage;
+    auto cooked = CookTexture(*test.image, test.options, storage);
+    REQUIRE(cooked.ok());
+    auto encoded = EncodeTexture(*test.image, test.options);
+    REQUIRE(encoded.ok());
+    CHECK(encoded.value().texture.mips.front().data.empty());
+    const size_t blocks = storage.block_count();
+    const prefab::Texture stored =
+        StoreTexture(std::move(encoded).value(), storage);
+    CHECK(storage.block_count() == blocks + 1);
+    CHECK(stored.format == cooked.value().format);
+    CHECK(stored.width == cooked.value().width);
+    CHECK(stored.height == cooked.value().height);
+    REQUIRE(stored.mip_count() == cooked.value().mip_count());
+    for (size_t i = 0; i < stored.mips.size(); ++i) {
+      CHECK(stored.mips[i].width == cooked.value().mips[i].width);
+      CHECK(stored.mips[i].height == cooked.value().mips[i].height);
+    }
+    CHECK(AllBytes(stored) == AllBytes(cooked.value()));
+  }
+  CHECK(EncodeTexture(ImageData{}, {}).error() == CookError::kInvalidImage);
+}
+
 TEST_CASE("Uncompressed textures keep the mip chain bytes") {
   prefab::BulkStorage storage;
   const ImageData image = Gradient(8, 8);

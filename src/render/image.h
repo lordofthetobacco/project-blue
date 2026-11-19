@@ -149,8 +149,9 @@ struct MipChainUpload {
 };
 
 // Creates sampled images from ready mip chains, block-compressed formats
-// included: every level of every image goes through one staging buffer and
-// one submission, with no blits; blocks until the copies finished. Level
+// included, with no blits: the levels stream through bounded staging memory
+// (StagingUploader: submissions of at most 16 MiB each, never a staging
+// buffer of the whole batch); blocks until the copies finished. Level
 // sizes are the caller's contract (see TextureCache::Upload(), which
 // validates them). The usage flags the upload needs are added. Leaves every
 // image in SHADER_READ_ONLY_OPTIMAL. Returns the images in the order of

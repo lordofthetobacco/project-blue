@@ -52,6 +52,41 @@ TEST_CASE("BulkStorage stores aligned blocks that copies share") {
   CHECK(stored[5] == bytes[5]);
 }
 
+TEST_CASE("CompactStorage drops blocks no array views any more") {
+  Prefab prefab = testing::MakeSamplePrefab();
+  const size_t blocks = prefab.storage.block_count();
+  CHECK(prefab.storage.byte_size(BlockKind::kHeap) ==
+        prefab.storage.byte_size());
+  CHECK(CompactStorage(prefab) == 0);
+  CHECK(prefab.storage.block_count() == blocks);
+
+  // Replacing a texture leaves its old block behind until compacted; a copy
+  // taken before (an undo snapshot) keeps it alive.
+  const Prefab before = prefab;
+  const Texture old = prefab.textures[1];
+  size_t old_bytes = 0;
+  for (const TextureMip& mip : old.mips) {
+    old_bytes += mip.data.size();
+  }
+  prefab.textures[1] = testing::MakePatternTexture(
+      prefab, "normal2", TextureFormat::kBc5Unorm, 8, 8, 7);
+  CHECK(prefab.storage.block_count() ==
+        blocks + static_cast<size_t>(prefab.textures[1].mip_count()));
+  CHECK(CompactStorage(prefab) == old_bytes);
+  CHECK(prefab.storage.block_count() == blocks);
+  CHECK_FALSE(ValidatePrefab(prefab).has_value());
+  CHECK(before.storage.block_count() == blocks);
+  CHECK(before.textures[1].mips[0].data[3] == old.mips[0].data[3]);
+
+  // Removing every array releases everything.
+  prefab.meshes.clear();
+  prefab.textures.clear();
+  prefab.materials[0].textures = {-1, -1, -1, -1};
+  prefab.physics = {};
+  CompactStorage(prefab);
+  CHECK(prefab.storage.block_count() == 0);
+}
+
 TEST_CASE("Texture format sizes") {
   CHECK(IsBlockCompressed(TextureFormat::kBc7Srgb));
   CHECK(IsBlockCompressed(TextureFormat::kBc5Unorm));

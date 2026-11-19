@@ -234,6 +234,59 @@ TEST_CASE("LoadTextures decodes the Glock's embedded textures") {
   CHECK(file.value().width == 1024);
 }
 
+TEST_CASE("The import hands over embedded images to decode one at a time") {
+  EmbeddedImages embedded;
+  const auto model = ImportAnimatedModel(GlockPath(), {}, &embedded);
+  REQUIRE(model.ok());
+  REQUIRE(embedded.count() > 0);
+  const size_t held = embedded.byte_size();
+  CHECK(held > 0);
+
+  // Same pixels as the separate parse of LoadTextures().
+  const material::TextureRef& ref =
+      model.value().materials.front().base_color_texture;
+  REQUIRE(ref.embedded());
+  const auto probed = embedded.Probe(ref.embedded_index);
+  REQUIRE(probed.ok());
+  const auto decoded = embedded.Decode(ref.embedded_index);
+  REQUIRE(decoded.ok());
+  CHECK(probed.value().width == decoded.value().width);
+  CHECK(probed.value().height == decoded.value().height);
+  const auto loaded = LoadTexture(ref);
+  REQUIRE(loaded.ok());
+  CHECK(decoded.value().pixels == loaded.value().pixels);
+
+  // Released images free their bytes and cannot be decoded any more.
+  embedded.Release(ref.embedded_index);
+  CHECK(embedded.byte_size() < held);
+  CHECK(
+      (embedded.Decode(ref.embedded_index).error() == ImageError::kNoTexture));
+  CHECK((embedded.Probe(ref.embedded_index).error() == ImageError::kNoTexture));
+  CHECK((embedded.Decode(-1).error() == ImageError::kNoTexture));
+  CHECK((embedded.Decode(embedded.count()).error() == ImageError::kNoTexture));
+  embedded.Release(embedded.count());  // ignored
+
+  // A separate parse finds the same images.
+  const auto reopened = LoadEmbeddedImages(GlockPath());
+  REQUIRE(reopened.ok());
+  CHECK(reopened.value().count() == embedded.count());
+  CHECK((LoadEmbeddedImages(core::JoinPath(BLUE_SAMPLES_DIR, "missing.glb"))
+             .error() == ImageError::kFileNotFound));
+}
+
+TEST_CASE("ProbeImage reads the size from the header only") {
+  const std::string path =
+      core::JoinPath(BLUE_SAMPLES_DIR, "textures/metal032/metalness.jpg");
+  const auto size = ProbeImageFile(path);
+  REQUIRE(size.ok());
+  CHECK(size.value().width == 1024);
+  CHECK(size.value().height == 1024);
+  CHECK(
+      (ProbeImageFile(path + ".missing").error() == ImageError::kFileNotFound));
+  const std::array<std::byte, 4> junk{};
+  CHECK((ProbeImage(junk).error() == ImageError::kDecodeFailed));
+}
+
 TEST_CASE("PackMetallicRoughness puts roughness in G and metallic in B") {
   ImageData roughness{.width = 2, .height = 2};
   roughness.pixels = {10, 0, 0, 255, 20, 0, 0, 255,

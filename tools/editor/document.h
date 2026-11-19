@@ -86,6 +86,17 @@ class Document {
   [[nodiscard]] const SnapshotHistory<State>& history() const {
     return history_;
   }
+  // Drops the oldest undo step (e.g. to bound the memory the history holds);
+  // returns false when there is none.
+  bool DropOldestUndoStep() { return history_.DropOldest(); }
+
+  // Calls `rewrite(State&)`, which must change how the state is represented
+  // but not its value (e.g. point bulk data at an equal copy): no undo step,
+  // the revision and the dirty flag stay.
+  template <typename Rewrite>
+  void RewriteState(Rewrite&& rewrite) {
+    std::forward<Rewrite>(rewrite)(state_);
+  }
 
   // Where the document is saved; empty while untitled.
   [[nodiscard]] const std::string& path() const { return path_; }
@@ -131,8 +142,10 @@ using SceneDocument = Document<scene::SceneData>;
     const std::string& path);
 // Validates the prefab (prefab::ValidatePrefab) and writes it to `path`
 // (empty: the document's path, which must be set). On success the document
-// takes `path` and is clean; on failure it is unchanged and the error is
-// readable. An open edit is committed first.
+// takes `path` and is clean, and its bulk data is re-pointed at the saved
+// file (mapped; prefab::RebaseBulk), so cooked or edited data stops taking
+// heap memory once saved; undo steps keep what they reference. On failure it
+// is unchanged and the error is readable. An open edit is committed first.
 [[nodiscard]] core::Result<void, std::string> SavePrefabDocument(
     PrefabDocument& document, const std::string& path = {});
 

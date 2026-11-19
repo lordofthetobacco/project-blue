@@ -91,7 +91,7 @@ class TextureCache {
   TextureCache& operator=(const TextureCache&) = delete;
 
   // Uploads already-encoded textures with their mip chains as sampled
-  // images: one staging buffer and one submission for the whole batch, no
+  // images through bounded staging memory (CreateImagesFromMipChains()), no
   // decoding and no mip generation. Returns their ids in the order of
   // `textures`. Blocks until the copies finished; logs the count, bytes and
   // time. A malformed description (no mips, wrong mip size or count) is

@@ -4,6 +4,7 @@
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <memory>
 #include <optional>
@@ -263,18 +264,113 @@ std::span<const std::byte> BulkStorage::Store(
 }
 
 std::span<const std::byte> BulkStorage::Adopt(std::vector<std::byte> bytes) {
-  auto block = std::make_shared<const std::vector<std::byte>>(std::move(bytes));
-  const std::span<const std::byte> view(*block);
+  auto owner = std::make_shared<const std::vector<std::byte>>(std::move(bytes));
+  const std::byte* data = owner->data();
+  const size_t size = owner->size();
+  // Aliasing constructor: the block points at the bytes, owns the vector.
+  return AdoptBlock({.data = std::shared_ptr<const std::byte>(owner, data),
+                     .size = size,
+                     .kind = BlockKind::kHeap});
+}
+
+std::span<const std::byte> BulkStorage::AdoptBlock(BulkBlock block) {
+  const std::span<const std::byte> view = block.bytes();
   blocks_.push_back(std::move(block));
   return view;
 }
 
+size_t BulkStorage::DropUnviewed(
+    std::span<const std::span<const std::byte>> views) {
+  const auto viewed = [views](const BulkBlock& block) {
+    const auto begin = reinterpret_cast<uintptr_t>(block.data.get());
+    const uintptr_t end = begin + block.size;
+    return std::ranges::any_of(views, [begin, end](auto view) {
+      const auto at = reinterpret_cast<uintptr_t>(view.data());
+      return !view.empty() && at >= begin && at < end;
+    });
+  };
+  size_t released = 0;
+  std::erase_if(blocks_, [&](const BulkBlock& block) {
+    if (viewed(block)) {
+      return false;
+    }
+    released += block.size;
+    return true;
+  });
+  return released;
+}
+
 size_t BulkStorage::byte_size() const {
   size_t total = 0;
-  for (const auto& block : blocks_) {
-    total += block->size();
+  for (const BulkBlock& block : blocks_) {
+    total += block.size;
   }
   return total;
+}
+
+size_t BulkStorage::byte_size(BlockKind kind) const {
+  size_t total = 0;
+  for (const BulkBlock& block : blocks_) {
+    total += block.kind == kind ? block.size : 0;
+  }
+  return total;
+}
+
+void CollectBulkViews(const Prefab& prefab,
+                      std::vector<std::span<const std::byte>>& views) {
+  for (const Mesh& mesh : prefab.meshes) {
+    views.push_back(std::as_bytes(mesh.vertices));
+    views.push_back(std::as_bytes(mesh.indices));
+  }
+  for (const Texture& texture : prefab.textures) {
+    for (const TextureMip& mip : texture.mips) {
+      views.push_back(mip.data);
+    }
+  }
+  views.push_back(prefab.physics.cooked_shape);
+}
+
+size_t CompactStorage(Prefab& prefab) {
+  std::vector<std::span<const std::byte>> views;
+  CollectBulkViews(prefab, views);
+  return prefab.storage.DropUnviewed(views);
+}
+
+bool RebaseBulk(Prefab& prefab, const Prefab& source) {
+  std::vector<std::span<const std::byte>> from;
+  std::vector<std::span<const std::byte>> to;
+  CollectBulkViews(prefab, from);
+  CollectBulkViews(source, to);
+  // Equal shapes list the arrays in the same order.
+  const bool same = prefab.meshes.size() == source.meshes.size() &&
+                    std::ranges::equal(prefab.textures, source.textures,
+                                       [](const Texture& a, const Texture& b) {
+                                         return a.mips.size() == b.mips.size();
+                                       }) &&
+                    std::ranges::equal(from, to, [](auto a, auto b) {
+                      return a.size() == b.size();
+                    });
+  if (!same) {
+    return false;
+  }
+  size_t next = 0;
+  const auto take = [&to, &next]() { return to[next++]; };
+  for (Mesh& mesh : prefab.meshes) {
+    const std::span<const std::byte> vertices = take();
+    const std::span<const std::byte> indices = take();
+    mesh.vertices = {reinterpret_cast<const asset::Vertex*>(vertices.data()),
+                     mesh.vertices.size()};
+    mesh.indices = {reinterpret_cast<const asset::Index*>(indices.data()),
+                    mesh.indices.size()};
+  }
+  for (Texture& texture : prefab.textures) {
+    for (TextureMip& mip : texture.mips) {
+      mip.data = take();
+    }
+  }
+  prefab.physics.cooked_shape = take();
+  prefab.storage = source.storage;
+  return true;
 }
 
 bool IsBlockCompressed(TextureFormat format) {

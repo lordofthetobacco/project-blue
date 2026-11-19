@@ -30,9 +30,10 @@
 // Small metadata lives in ordinary vectors and strings. Bulk data (vertices,
 // indices, texture mips, cooked collision) is viewed through spans into
 // immutable byte blocks owned by Prefab::storage. A loaded prefab has a single
-// block, the file itself, so nothing is copied or parsed per element; a cooked
-// prefab has one block per array the cook stored. Copying a Prefab copies the
-// metadata and shares the blocks, which is cheap (editor undo snapshots).
+// block, the file itself mapped read-only (see LoadPrefab), so nothing is
+// copied or parsed per element and the bulk costs no private memory; a cooked
+// prefab has one heap block per array the cook stored. Copying a Prefab copies
+// the metadata and shares the blocks, which is cheap (editor undo snapshots).
 //
 // Filling a prefab (cook, editor):
 //
@@ -48,6 +49,24 @@ namespace blue::prefab {
 // Alignment of every block BulkStorage hands out and of every bulk array in a
 // .pbo file, enough for any vertex attribute, index or SIMD copy.
 inline constexpr size_t kBulkAlignment = 16;
+
+// Where the bytes of a BulkStorage block live.
+enum class BlockKind : uint8_t {
+  kHeap,    // owned heap memory (cooked or edited data): private commit
+  kMapped,  // a read-only file mapping (a loaded .pbo): backed by the file
+};
+
+// One block of a BulkStorage: `size` immutable bytes at `data`, kept alive
+// by the shared pointer.
+struct BulkBlock {
+  std::shared_ptr<const std::byte> data;
+  size_t size = 0;
+  BlockKind kind = BlockKind::kHeap;
+
+  [[nodiscard]] std::span<const std::byte> bytes() const {
+    return {data.get(), size};
+  }
+};
 
 // Shared immutable byte blocks backing the spans of a Prefab. Copying shares
 // the blocks (reference counted): a block is freed when the last storage
@@ -71,6 +90,11 @@ class BulkStorage {
   // it. Its data is aligned to kBulkAlignment (operator new guarantees it).
   std::span<const std::byte> Adopt(std::vector<std::byte> bytes);
 
+  // Takes a block owned elsewhere (e.g. a file mapping kept alive by
+  // `block.data`'s control block) and returns a view of all of it. Its data
+  // must be aligned to kBulkAlignment and never change while referenced.
+  std::span<const std::byte> AdoptBlock(BulkBlock block);
+
   // Copies `values` into a new block and returns a typed view of it.
   template <typename T>
   std::span<const T> StoreArray(std::span<const T> values) {
@@ -80,13 +104,21 @@ class BulkStorage {
     return {reinterpret_cast<const T*>(stored.data()), values.size()};
   }
 
+  // Drops every block that none of `views` points into (views may be empty
+  // or point elsewhere) and returns the bytes released from this storage.
+  // Copies of the storage keep their blocks.
+  size_t DropUnviewed(std::span<const std::span<const std::byte>> views);
+
+  [[nodiscard]] std::span<const BulkBlock> blocks() const { return blocks_; }
   // Returns the number of blocks held.
   [[nodiscard]] size_t block_count() const { return blocks_.size(); }
   // Returns the total size of the blocks held, in bytes.
   [[nodiscard]] size_t byte_size() const;
+  // Returns the size of the blocks of `kind`, in bytes.
+  [[nodiscard]] size_t byte_size(BlockKind kind) const;
 
  private:
-  std::vector<std::shared_ptr<const std::vector<std::byte>>> blocks_;
+  std::vector<BulkBlock> blocks_;
 };
 
 // GPU formats of cooked textures. BC formats use 4x4 blocks of 16 bytes;
@@ -273,6 +305,26 @@ struct Prefab {
   asset::Bounds bounds;  // all meshes at rest, in prefab space
   BulkStorage storage;
 };
+
+// Appends a view of every bulk array of `prefab` (vertex and index arrays,
+// texture mips, the cooked shape) to `views`.
+void CollectBulkViews(const Prefab& prefab,
+                      std::vector<std::span<const std::byte>>& views);
+
+// Drops the blocks of prefab.storage that no bulk array of `prefab` views any
+// more (superseded by edits, e.g. a replaced texture) and returns the bytes
+// released. Other copies of the prefab keep their blocks.
+size_t CompactStorage(Prefab& prefab);
+
+// Points every bulk array of `prefab` at the array in the same place of
+// `source` and makes `prefab` share source.storage instead of its own: e.g.
+// `source` is `prefab` saved and loaded again, so its data is a mapped file
+// rather than heap blocks. Returns false and changes nothing unless both have
+// the same meshes, textures, mips and cooked shape of equal byte sizes.
+// Contents are not compared (that would read every page of the file): the
+// caller guarantees they are equal. Metadata (names, paths, parameters) is
+// left alone.
+bool RebaseBulk(Prefab& prefab, const Prefab& source);
 
 // Returns a description of the first problem that makes `prefab` unsavable,
 // or nullopt if it is valid: an index out of range, an invalid hierarchy or

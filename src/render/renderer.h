@@ -27,6 +27,7 @@
 #include "render/gpu_timer.h"
 #include "render/image.h"
 #include "render/material_system.h"
+#include "render/memory_stats.h"
 #include "render/mesh.h"
 #include "render/passes/bloom_pass.h"
 #include "render/passes/depth_prepass.h"
@@ -182,7 +183,13 @@ class Renderer {
 
   // Uploads `data` and returns its handle. Meshes stay resident until
   // ReleaseMesh().
-  [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data);
+  [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data) {
+    return UploadMesh(data.vertices, data.indices);
+  }
+  // Same, from borrowed vertex and index arrays (e.g. the bulk data of a
+  // loaded prefab), without an intermediate copy.
+  [[nodiscard]] MeshId UploadMesh(std::span<const asset::Vertex> vertices,
+                                  std::span<const asset::Index> indices);
 
   // Releasing GPU resources. Each call takes effect at once for new frames
   // and destroys the GPU objects only once no frame in flight can use them.
@@ -196,6 +203,12 @@ class Renderer {
   void ReleaseMesh(MeshId id);
   void ReleaseTextures(std::span<const TextureId> ids);
   void ReleaseMaterial(MaterialId id) { materials_.Release(id); }
+  // Destroys every released mesh and texture now instead of after the
+  // frames in flight: waits for those frames' fences (not for the whole
+  // device). For loads that replace large resources, between releasing the
+  // old ones and uploading the new ones, so both never coexist in device
+  // memory; not meant for every frame.
+  void FlushReleases();
   // Returns the view of uploaded texture `id` (the white default when it is
   // unknown or released), e.g. to show it in the UI.
   [[nodiscard]] VkImageView texture_view(TextureId id) const {
@@ -231,6 +244,9 @@ class Renderer {
   }
   [[nodiscard]] size_t material_count() const { return materials_.count(); }
   [[nodiscard]] TextureStats texture_stats() const { return textures_.stats(); }
+  // Returns what the renderer holds in device memory, per heap and per
+  // owner; cheap enough to call every frame (see MemoryStats).
+  [[nodiscard]] MemoryStats memory_stats() const;
 
   // Replaces the environment (sky and image-based lighting) by the
   // equirectangular HDR image `equirect`, scaled by `intensity` and turned
@@ -303,6 +319,10 @@ class Renderer {
   // Destroys the retired meshes and images no frame in flight can use any
   // more. Call after the current frame's fence was waited on.
   void DestroyRetired();
+  // Destroys every retired mesh and image if no frame is in flight any more
+  // (all fences signalled; does not wait). Keeps releases moving while
+  // frames are skipped (minimized window, out-of-date swapchain).
+  void DestroyRetiredIfIdle();
   // Points the passes that read render targets at the current ones.
   void BindTargets();
   [[nodiscard]] bool RebuildSwapchain();
@@ -345,6 +365,9 @@ class Renderer {
   Environment environment_;
   // Declared before the passes that borrow it.
   std::vector<Mesh> meshes_;
+  // Device memory of the resident meshes in meshes_ and their count.
+  VkDeviceSize mesh_bytes_ = 0;
+  uint32_t mesh_count_ = 0;
   // Released GPU objects waiting until no frame in flight uses them
   // (ReleaseMesh(), ReleaseTextures()); declared after the context so they
   // are destroyed before it.

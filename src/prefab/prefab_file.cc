@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -28,6 +29,7 @@
 #include "core/path.h"
 #include "material/material.h"
 #include "platform/file_system.h"
+#include "platform/mapped_file.h"
 #include "scene/binary_stream.h"
 
 namespace blue::prefab {
@@ -1039,12 +1041,13 @@ BytesResult EncodePrefab(const Prefab& prefab, std::string_view base_dir) {
   return BytesResult::Ok(std::move(file));
 }
 
-PrefabResult DecodePrefab(std::vector<std::byte> file,
-                          std::string_view base_dir,
-                          const LoadOptions& options) {
-  Prefab prefab;
-  // The prefab's spans view this block, so parse from the adopted copy.
-  const std::span<const std::byte> data = prefab.storage.Adopt(std::move(file));
+namespace {
+
+// Parses the file bytes `data`, which `prefab`'s storage already holds as
+// its only block, into `prefab`.
+PrefabResult DecodeStoredFile(Prefab prefab, std::span<const std::byte> data,
+                              std::string_view base_dir,
+                              const LoadOptions& options) {
   auto toc = ReadToc(data);
   if (!toc.ok()) {
     return PrefabResult::Error(toc.error());
@@ -1092,6 +1095,17 @@ PrefabResult DecodePrefab(std::vector<std::byte> file,
   return PrefabResult::Ok(std::move(prefab));
 }
 
+}  // namespace
+
+PrefabResult DecodePrefab(std::vector<std::byte> file,
+                          std::string_view base_dir,
+                          const LoadOptions& options) {
+  Prefab prefab;
+  // The prefab's spans view this block, so parse from the adopted copy.
+  const std::span<const std::byte> data = prefab.storage.Adopt(std::move(file));
+  return DecodeStoredFile(std::move(prefab), data, base_dir, options);
+}
+
 core::Result<void, PrefabError> SavePrefab(const Prefab& prefab,
                                            const std::string& path) {
   using SaveResult = core::Result<void, PrefabError>;
@@ -1113,24 +1127,45 @@ core::Result<void, PrefabError> SavePrefab(const Prefab& prefab,
 
 PrefabResult LoadPrefab(const std::string& path, const LoadOptions& options) {
   const auto start = std::chrono::steady_clock::now();
-  auto file = platform::ReadFile(path, kMaxPrefabFileSize);
-  if (!file.ok()) {
+  Prefab prefab;
+  std::span<const std::byte> data;
+  const char* how = "mapped";
+  auto mapped = platform::MappedFile::Open(path, kMaxPrefabFileSize);
+  if (mapped.ok()) {
+    // The block's control block owns the mapping: it is unmapped when the
+    // last prefab copy viewing it is gone.
+    std::shared_ptr<const platform::MappedFile> mapping =
+        std::move(mapped).value();
+    const std::span<const std::byte> bytes = mapping->bytes();
+    data = prefab.storage.AdoptBlock(
+        {.data = std::shared_ptr<const std::byte>(mapping, bytes.data()),
+         .size = bytes.size(),
+         .kind = BlockKind::kMapped});
+  } else if (mapped.error() == platform::FileError::kReadFailed) {
+    // Mapping is unsupported here (e.g. some network shares): read instead.
+    auto file = platform::ReadFile(path, kMaxPrefabFileSize);
+    if (!file.ok()) {
+      return PrefabResult::Error(PrefabError::kCannotOpen);
+    }
+    data = prefab.storage.Adopt(std::move(file).value());
+    how = "read";
+  } else {
     return PrefabResult::Error(PrefabError::kCannotOpen);
   }
-  const double read_ms = MillisecondsSince(start);
-  const size_t size = file.value().size();
+  const double open_ms = MillisecondsSince(start);
+  const size_t size = data.size();
   const std::string base_dir = core::ParentPath(platform::AbsolutePath(path));
-  PrefabResult prefab =
-      DecodePrefab(std::move(file).value(), base_dir, options);
-  if (!prefab.ok()) {
-    return prefab;
+  PrefabResult loaded =
+      DecodeStoredFile(std::move(prefab), data, base_dir, options);
+  if (!loaded.ok()) {
+    return loaded;
   }
   core::log::Info(
-      "Loaded prefab {} ({:.2f} MB) in {:.1f} ms (read {:.1f} ms, decode "
+      "Loaded prefab {} ({:.2f} MB, {}) in {:.1f} ms (open {:.1f} ms, decode "
       "{:.1f} ms)",
-      path, static_cast<double>(size) / (1024.0 * 1024.0),
-      MillisecondsSince(start), read_ms, MillisecondsSince(start) - read_ms);
-  return prefab;
+      path, static_cast<double>(size) / (1024.0 * 1024.0), how,
+      MillisecondsSince(start), open_ms, MillisecondsSince(start) - open_ms);
+  return loaded;
 }
 
 }  // namespace blue::prefab

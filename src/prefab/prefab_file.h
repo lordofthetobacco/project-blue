@@ -100,14 +100,24 @@ struct LoadOptions {
     const LoadOptions& options = {});
 
 // Writes `prefab` to `path` (missing directories created, existing file
-// replaced atomically). Returns kInvalidPrefab without touching the file
-// system if the prefab fails validation, kWriteFailed on I/O failure.
+// replaced atomically: written to a temporary file, then renamed over it).
+// Saving over a file that is loaded (mapped) is safe, also when `prefab`
+// views that very file: the old mapping keeps the old contents. Returns
+// kInvalidPrefab without touching the file system if the prefab fails
+// validation, kWriteFailed on I/O failure.
 [[nodiscard]] core::Result<void, PrefabError> SavePrefab(
     const Prefab& prefab, const std::string& path);
 
-// Loads the .pbo at `path` with one file read and validation; logs the time
-// taken. Returns kCannotOpen if the file cannot be read or exceeds
-// kMaxPrefabFileSize, and the matching error for malformed contents.
+// Loads the .pbo at `path`: maps the file read-only (platform::MappedFile;
+// falls back to reading it when mapping fails) and validates it; logs the
+// time taken. The returned prefab's storage holds the mapping as its one
+// block (BlockKind::kMapped), so bulk data costs no private memory and is
+// only read from disk when used; validation reads the metadata chunks and
+// mesh indices, not the texture data. The file stays mapped while any copy of
+// the prefab lives; see platform/mapped_file.h for what may happen to the
+// file meanwhile (replace by rename and delete are safe). Returns kCannotOpen
+// if the file cannot be opened or exceeds kMaxPrefabFileSize, and the
+// matching error for malformed contents.
 [[nodiscard]] core::Result<Prefab, PrefabError> LoadPrefab(
     const std::string& path, const LoadOptions& options = {});
 

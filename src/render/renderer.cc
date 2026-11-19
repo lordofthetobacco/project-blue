@@ -18,6 +18,7 @@
 #include "render/barriers.h"
 #include "render/passes/scene_pass.h"
 #include "render/passes/ui_pass.h"
+#include "render/staging_upload.h"
 #include "render/vk_check.h"
 
 namespace blue::render {
@@ -142,8 +143,11 @@ void Renderer::BindTargets() {
   }
 }
 
-MeshId Renderer::UploadMesh(const asset::MeshData& data) {
-  meshes_.emplace_back(context_, data);
+MeshId Renderer::UploadMesh(std::span<const asset::Vertex> vertices,
+                            std::span<const asset::Index> indices) {
+  const Mesh& mesh = meshes_.emplace_back(context_, vertices, indices);
+  mesh_bytes_ += mesh.size_bytes();
+  mesh_count_ += 1;
   return static_cast<MeshId>(meshes_.size() - 1);
 }
 
@@ -152,6 +156,8 @@ void Renderer::ReleaseMesh(MeshId id) {
   if (index >= meshes_.size() || !meshes_[index].resident()) {
     return;
   }
+  mesh_bytes_ -= meshes_[index].size_bytes();
+  mesh_count_ -= 1;
   // The moved-from mesh left in the slot is the tombstone (resident() false).
   retired_meshes_.push_back(
       {.object = std::move(meshes_[index]), .last_frame = frame_serial_});
@@ -177,6 +183,77 @@ void Renderer::DestroyRetired() {
   std::erase_if(retired_images_, [&](const Retired<Image>& retired) {
     return done(retired.last_frame);
   });
+}
+
+void Renderer::DestroyRetiredIfIdle() {
+  if (retired_meshes_.empty() && retired_images_.empty()) {
+    return;
+  }
+  // A frame's fence is reset only right before its work is submitted, so
+  // all fences signalled means no submitted frame can still use anything.
+  for (const Frame& frame : frames_) {
+    if (vkGetFenceStatus(context_.device(), frame.in_flight) != VK_SUCCESS) {
+      return;
+    }
+  }
+  retired_meshes_.clear();
+  retired_images_.clear();
+}
+
+void Renderer::FlushReleases() {
+  if (retired_meshes_.empty() && retired_images_.empty()) {
+    return;
+  }
+  WaitForFramesInFlight();
+  retired_meshes_.clear();
+  retired_images_.clear();
+}
+
+MemoryStats Renderer::memory_stats() const {
+  MemoryStats stats;
+  const VmaAllocator allocator = context_.allocator();
+  const VkPhysicalDeviceMemoryProperties* properties = nullptr;
+  vmaGetMemoryProperties(allocator, &properties);
+  std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+  vmaGetHeapBudgets(allocator, budgets.data());
+  stats.heap_count = properties->memoryHeapCount;
+  stats.driver_budget = context_.memory_budget();
+  for (uint32_t i = 0; i < stats.heap_count; ++i) {
+    const VmaBudget& budget = budgets[i];
+    stats.heaps[i] = {
+        .heap_size = properties->memoryHeaps[i].size,
+        .device_local = (properties->memoryHeaps[i].flags &
+                         VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0,
+        .block_bytes = budget.statistics.blockBytes,
+        .allocation_bytes = budget.statistics.allocationBytes,
+        .block_count = budget.statistics.blockCount,
+        .allocation_count = budget.statistics.allocationCount,
+        .usage = budget.usage,
+        .budget = budget.budget,
+    };
+  }
+
+  const TextureStats textures = textures_.stats();
+  stats.texture_bytes = textures.bytes;
+  stats.texture_count = static_cast<uint32_t>(textures.count);
+  stats.mesh_bytes = mesh_bytes_;
+  stats.mesh_count = mesh_count_;
+  stats.render_target_bytes = targets_.size_bytes() +
+                              viewport_image_.size_bytes() +
+                              shadow_pass_.map_bytes();
+  stats.environment_bytes = environment_.size_bytes();
+  // Usually empty, a handful of entries right after a release.
+  for (const Retired<Mesh>& retired : retired_meshes_) {
+    stats.retired_bytes += retired.object.size_bytes();
+  }
+  for (const Retired<Image>& retired : retired_images_) {
+    stats.retired_bytes += retired.object.size_bytes();
+  }
+  const VulkanContext::StagingUsage staging = context_.staging_usage();
+  stats.staging_budget_bytes = 2 * StagingUploader::kChunkBytes;
+  stats.staging_peak_bytes = staging.peak;
+  stats.staging_current_bytes = staging.current;
+  return stats;
 }
 
 void Renderer::SetVsync(bool enabled) {
@@ -347,6 +424,8 @@ void Renderer::RecordViewportReadbacks(VkCommandBuffer cmd) {
 
 void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
                            Output output) {
+  // Before any early return: skipped frames must not hold released memory.
+  DestroyRetiredIfIdle();
   const VkExtent2D window_size = window_.PixelSize();
   if (window_size.width == 0 || window_size.height == 0) {
     return;  // Minimized: nothing to present to.
@@ -369,6 +448,9 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   // deadlocks.
   CheckVk(vkResetFences(context_.device(), 1, &frame.in_flight));
   ++frame_serial_;
+  // Lets VMA refresh the driver's memory budget once per frame.
+  vmaSetCurrentFrameIndex(context_.allocator(),
+                          static_cast<uint32_t>(frame_serial_));
   materials_.BeginFrame(frame_serial_);
   DestroyRetired();
 
