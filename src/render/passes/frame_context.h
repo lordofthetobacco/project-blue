@@ -8,6 +8,7 @@
 
 #include "camera/frustum.h"
 #include "core/extent.h"
+#include "lighting/cascades.h"
 #include "render/draw_list.h"
 #include "render/frame_globals.h"
 #include "render/gpu_timer.h"
@@ -41,9 +42,11 @@ struct FrameContext {
   // the camera frustum.
   std::span<const camera::Aabb> world_bounds;
   const camera::Frustum& camera_frustum;
+  // The sun's shadow cascades; only meaningful when `shadows` is true.
+  std::span<const lighting::Cascade> cascades;
+  bool shadows = false;
   // The visible submeshes, sorted (DrawList), for the camera passes.
   std::span<const DrawEntry> draw_list;
-  // TODO(metal-stage5): the sun's shadow cascades and `shadows`.
 
   RenderStats& stats;
   // Encoders opened through render/encoders.h report here.

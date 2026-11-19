@@ -31,8 +31,11 @@
 #include "render/passes/depth_prepass.h"
 #include "render/passes/frame_context.h"
 #include "render/passes/mesh_pass.h"
+#include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
+#include "render/passes/shadow_pass.h"
 #include "render/passes/skybox_pass.h"
+#include "render/passes/ssao_pass.h"
 #include "render/passes/tonemap_pass.h"
 #include "render/passes/ui_pass.h"
 #include "render/render_targets.h"
@@ -50,8 +53,7 @@
 // --------------------
 // RendererImpl::RecordCommands() is the wiring: it records the passes in
 // order into the frame's one command buffer, each wrapped in a GPU timer
-// scope. The target design (Stage 5 of the Metal port brings back the
-// shadow, SSAO, reticle and overlay passes; see RecordCommands()):
+// scope (Stage 5b of the Metal port brings back the reticle pass):
 //
 //   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
@@ -193,17 +195,19 @@ struct RendererImpl {
   std::vector<Retired<Image>> retired_images_;
   DrawList draw_list_;
 
+  ShadowPass shadow_pass_;
   DepthPrepass depth_prepass_;
+  SsaoPass ssao_pass_;
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
+  // TODO(metal-stage5): ReticlePass reticle_pass_.
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
+  OverlayPass overlay_pass_;
   // Into the drawable.
   PresentPass present_pass_;
   // Into viewport_image_; created by the first PrepareViewport().
   std::optional<PresentPass> viewport_present_pass_;
-  // TODO(metal-stage5): ShadowPass shadow_pass_, SsaoPass ssao_pass_,
-  // ReticlePass reticle_pass_, OverlayPass overlay_pass_.
   // The ImGui backend.
   UiRenderer ui_;
 

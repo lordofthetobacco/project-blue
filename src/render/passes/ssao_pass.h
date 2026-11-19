@@ -1,20 +1,23 @@
 #ifndef BLUE_RENDER_PASSES_SSAO_PASS_H_
 #define BLUE_RENDER_PASSES_SSAO_PASS_H_
 
+#include "render/metal_types.h"
+
 #include <string>
 
 #include "render/fullscreen_pass.h"
+#include "render/metal_context.h"
 #include "render/passes/frame_context.h"
 #include "render/render_targets.h"
 #include "render/samplers.h"
 #include "render/shader_programs.h"
-#include "render/vulkan_context.h"
 
 namespace blue::render {
 
-// Screen-space ambient occlusion at half resolution (shaders/ssao.frag), then
-// a separable depth-aware blur (shaders/ssao_blur.frag) into the R8 target
-// that FrameGlobals binds as binding 4. Settings come from
+// Screen-space ambient occlusion at half resolution
+// (shaders/ssao.frag.metal, reading the scene depth), then a separable
+// depth-aware blur (shaders/ssao_blur.frag.metal) into the R8 target that
+// FrameGlobals binds at kTextureAmbientOcclusion. Settings come from
 // SceneView::post (ssao_enabled, ssao_radius, ssao_intensity). When SSAO is
 // off the pass costs nothing beyond one clear of the target to white when
 // it is switched off. Borrows `context` and `programs`, which must outlive
@@ -26,20 +29,19 @@ class SsaoPass {
   // a screen-wide one.
   static constexpr float kMaxRadiusScreenFraction = 0.1f;
 
-  SsaoPass(const VulkanContext& context, ShaderPrograms& programs,
+  SsaoPass(const MetalContext& context, ShaderPrograms& programs,
            const std::string& shader_dir);
 
   SsaoPass(const SsaoPass&) = delete;
   SsaoPass& operator=(const SsaoPass&) = delete;
 
   // Points the pass at the current targets; call after they were created or
-  // resized (which leaves the AO target white), while the GPU is idle.
+  // resized (which leaves the AO target white).
   void BindTargets(const RenderTargets& targets, const Samplers& samplers);
 
-  // Expects the depth target in DEPTH_READ_ONLY_OPTIMAL (DepthPrepass leaves
-  // it there). Leaves every SSAO target in SHADER_READ_ONLY_OPTIMAL. Must be
-  // recorded outside of a rendering pass. With SSAO off it records nothing,
-  // except one clear to white right after it was switched off.
+  // Records the occlusion and the blur, three render encoders, after the
+  // depth pre-pass. With SSAO off it records nothing, except one clear to
+  // white right after it was switched off.
   void Record(const FrameContext& ctx);
 
  private:
@@ -48,7 +50,7 @@ class SsaoPass {
   // Records a clear of the AO target to white (no occlusion).
   static void RecordClearToWhite(const FrameContext& ctx);
 
-  FullscreenPass occlusion_;
+  FullscreenPass occlusion_;        // depth -> ssao_raw (RG16F)
   FullscreenPass blur_horizontal_;  // ssao_raw -> ssao_blur (RG16F)
   FullscreenPass blur_vertical_;    // ssao_blur -> ssao (R8)
   // True while the AO target holds white, so turning SSAO off clears it

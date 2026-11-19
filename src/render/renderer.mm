@@ -1,6 +1,7 @@
 #include "render/renderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,6 +15,7 @@
 
 #include "camera/frustum.h"
 #include "core/log.h"
+#include "lighting/cascades.h"
 #include "material/material.h"
 #include "platform/window.h"
 #include "render/encoders.h"
@@ -58,28 +60,33 @@ RendererImpl::RendererImpl(const platform::Window& window,
       shader_programs_(context_, shader_mode_),
       environment_(context_, shader_programs_, shader_dir_, samplers_,
                    frame_globals_),
+      shadow_pass_(context_, shader_programs_, shader_dir_, meshes_),
       depth_prepass_(context_, shader_programs_, shader_dir_, materials_,
                      meshes_),
+      ssao_pass_(context_, shader_programs_, shader_dir_),
       mesh_pass_(context_, shader_programs_, shader_dir_, materials_, meshes_),
       skybox_pass_(context_, shader_programs_, shader_dir_, environment_),
       bloom_pass_(context_, shader_programs_, shader_dir_),
       tonemap_pass_(context_, shader_programs_, shader_dir_),
+      overlay_pass_(context_, shader_programs_, shader_dir_, meshes_),
       present_pass_(context_, shader_programs_, shader_dir_,
                     swapchain_.format()) {
   const MaterialId default_material = materials_.Create(DefaultMaterialDesc());
   if (default_material != kDefaultMaterial) {
     core::log::Fatal("The default material must be created first");
   }
+  frame_globals_.BindShadowMap(shadow_pass_.map());
   BindTargets();
 }
 
 RendererImpl::~RendererImpl() { context_.WaitIdle(); }
 
 void RendererImpl::BindTargets() {
-  // TODO(metal-stage5): the SSAO pass writes it; until then it stays white.
   frame_globals_.BindAmbientOcclusion(targets_.ssao().texture());
+  ssao_pass_.BindTargets(targets_, samplers_);
   bloom_pass_.BindTargets(targets_, samplers_);
   tonemap_pass_.BindTargets(targets_, samplers_);
+  overlay_pass_.BindTargets(targets_, samplers_);
   present_pass_.BindTargets(targets_, samplers_);
   if (viewport_present_pass_) {
     viewport_present_pass_->BindTargets(targets_, samplers_);
@@ -299,13 +306,16 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     FatalIfNil(frame.command_buffer, nil, "commandBuffer");
     frame.command_buffer.label = @"frame";
 
-    // TODO(metal-stage5): shadows (view.shadows_enabled &&
-    // view.sun.casts_shadows) with lighting::FitCascades(); until the shadow
-    // pass exists the uniforms say "no shadows" and need no cascades.
-    FrameUniforms uniforms =
-        MakeFrameUniforms(view, {}, /*shadows=*/false, targets_.extent());
-    environment_.FillUniforms(uniforms);
-    frame_globals_.Write(frame_index_, uniforms);
+    const bool shadows = view.shadows_enabled && view.sun.casts_shadows;
+    std::array<lighting::Cascade, lighting::kCascadeCount> cascades{};
+    const core::Extent2D extent = targets_.extent();
+    if (shadows) {
+      const float aspect = static_cast<float>(extent.width) /
+                           static_cast<float>(std::max(extent.height, 1u));
+      cascades = lighting::FitCascades(
+          view.camera.view, view.camera.vertical_fov_radians, aspect,
+          view.camera.near_plane, view.sun.direction);
+    }
 
     ComputeWorldBounds(view);
     const camera::Frustum camera_frustum(view.camera.projection *
@@ -313,6 +323,9 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     stats_ = {};
     draw_list_.Build(view, world_bounds_, camera_frustum, materials_, meshes_,
                      stats_);
+    FrameUniforms uniforms = MakeFrameUniforms(view, cascades, shadows, extent);
+    environment_.FillUniforms(uniforms);
+    frame_globals_.Write(frame_index_, uniforms);
     FrameContext ctx{
         .cmd = frame.command_buffer,
         .frame_index = frame_index_,
@@ -322,6 +335,8 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
         .output_extent = swapchain_.extent(),
         .world_bounds = world_bounds_,
         .camera_frustum = camera_frustum,
+        .cascades = cascades,
+        .shadows = shadows,
         .draw_list = draw_list_.entries(),
         .stats = stats_,
         .timer = gpu_timer_,
@@ -354,11 +369,15 @@ void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
     gpu_timer_.EndScope(scope);
   };
 
-  // TODO(metal-stage5): the shadow cascades (GpuScope::kShadow) when
-  // shadows are on.
+  if (ctx.shadows) {
+    timed(GpuScope::kShadow, [&] { shadow_pass_.Record(ctx); });
+  }
   timed(GpuScope::kDepthPrepass, [&] { depth_prepass_.Record(ctx); });
-  // TODO(metal-stage5): SSAO (GpuScope::kSsao) when view.post.ssao_enabled;
-  // until then the occlusion stays the white RenderTargets::ssao().
+  if (ctx.view.post.ssao_enabled) {
+    timed(GpuScope::kSsao, [&] { ssao_pass_.Record(ctx); });
+  } else {
+    ssao_pass_.Record(ctx);  // At most a one-time clear to white.
+  }
   timed(GpuScope::kScene, [&] {
     const id<MTLRenderCommandEncoder> encoder = BeginScenePass(ctx);
     mesh_pass_.Draw(ctx, encoder);
@@ -370,7 +389,9 @@ void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
     timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });
   }
   timed(GpuScope::kTonemap, [&] { tonemap_pass_.Record(ctx); });
-  // TODO(metal-stage5): the overlay pass (debug lines, selection outline).
+  if (OverlayPass::HasWork(ctx.view)) {
+    timed(GpuScope::kOverlay, [&] { overlay_pass_.Record(ctx); });
+  }
 
   if (output == Output::kSwapchain) {
     if (AcquireDrawable(ctx)) {

@@ -392,9 +392,12 @@ add_library(blue_render STATIC
     src/render/passes/bloom_pass.mm
     src/render/passes/depth_prepass.mm
     src/render/passes/mesh_pass.mm
+    src/render/passes/overlay_pass.mm
     src/render/passes/present_pass.mm
     src/render/passes/scene_pass.mm
+    src/render/passes/shadow_pass.mm
     src/render/passes/skybox_pass.mm
+    src/render/passes/ssao_pass.mm
     src/render/passes/tonemap_pass.mm
     src/render/passes/ui_pass.mm
 )

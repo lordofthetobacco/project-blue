@@ -6,8 +6,6 @@
 #include <cstring>
 #include <span>
 
-#include "lighting/cascades.h"
-#include "render/metal_check.h"
 #include "shaders/bindings.h"
 
 namespace blue::render {
@@ -33,34 +31,6 @@ Image MakeDefaultImage(const MetalContext& context, MTLPixelFormat format,
                             std::span(texels).first(texel.size() * layers));
 }
 
-// Returns a 1 x 1 shadow map with one layer per cascade, cleared to depth 1:
-// every comparison passes, so everything is lit.
-Image MakeDefaultShadowMap(const MetalContext& context) {
-  Image map(context, {.extent = {1, 1},
-                      .format = MTLPixelFormatDepth16Unorm,
-                      .usage = MTLTextureUsageRenderTarget |
-                               MTLTextureUsageShaderRead,
-                      .array_layers = lighting::kCascadeCount,
-                      .label = "Default shadow map"});
-  context.SubmitImmediate([&map](id<MTLCommandBuffer> cmd) {
-    for (uint32_t layer = 0; layer < map.array_layers(); ++layer) {
-      MTLRenderPassDescriptor* pass =
-          [MTLRenderPassDescriptor renderPassDescriptor];
-      pass.depthAttachment.texture = map.texture();
-      pass.depthAttachment.slice = layer;
-      pass.depthAttachment.loadAction = MTLLoadActionClear;
-      pass.depthAttachment.storeAction = MTLStoreActionStore;
-      pass.depthAttachment.clearDepth = 1.0;
-      id<MTLRenderCommandEncoder> encoder =
-          [cmd renderCommandEncoderWithDescriptor:pass];
-      FatalIfNil(encoder, nil, "render encoder: clear default shadow map");
-      encoder.label = @"Clear default shadow map";
-      [encoder endEncoding];
-    }
-  });
-  return map;
-}
-
 }  // namespace
 
 FrameGlobals::FrameGlobals(const MetalContext& context,
@@ -69,7 +39,6 @@ FrameGlobals::FrameGlobals(const MetalContext& context,
   constexpr std::array<std::byte, 8> kZeroHalf4{};
   constexpr std::array<std::byte, 4> kZeroHalf2{};
   constexpr std::array<std::byte, 1> kWhiteR8{std::byte{255}};
-  default_shadow_map_ = MakeDefaultShadowMap(context);
   default_cube_ = MakeDefaultImage(context, MTLPixelFormatRGBA16Float,
                                    kZeroHalf4, /*cube=*/true,
                                    "Default environment");
@@ -83,7 +52,6 @@ FrameGlobals::FrameGlobals(const MetalContext& context,
     buffer = Buffer(context, sizeof(FrameUniforms),
                     Buffer::Access::kCpuSequentialWrite, "Frame uniforms");
   }
-  BindShadowMap(default_shadow_map_.texture());
   BindEnvironment(default_cube_.texture(), default_lut_.texture());
   BindAmbientOcclusion(default_ambient_occlusion_.texture());
 }

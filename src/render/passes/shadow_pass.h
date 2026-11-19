@@ -1,7 +1,7 @@
 #ifndef BLUE_RENDER_PASSES_SHADOW_PASS_H_
 #define BLUE_RENDER_PASSES_SHADOW_PASS_H_
 
-#include <vulkan/vulkan.h>
+#include "render/metal_types.h"
 
 #include <memory>
 #include <string>
@@ -9,10 +9,10 @@
 
 #include "render/image.h"
 #include "render/mesh.h"
+#include "render/metal_context.h"
 #include "render/passes/frame_context.h"
 #include "render/pipeline.h"
 #include "render/shader_programs.h"
-#include "render/vulkan_context.h"
 
 namespace blue::render {
 
@@ -20,45 +20,35 @@ namespace blue::render {
 // every draw item whose world bounds reach the cascade. Alpha-masked
 // materials cast solid shadows (the pass reads positions only).
 //
-// There is one map for all frames in flight. That is safe because the first
-// barrier of Record() has the previous frame's fragment-shader sampled reads
-// as its source scope: on the single queue it orders this pass's depth
-// writes after those reads (and, transitively, after the previous writes).
+// There is one map for all frames in flight: Metal's hazard tracking orders
+// this frame's depth writes after the previous frame's reads on the single
+// queue. While shadows are off the map is bound but never sampled
+// (FrameUniforms::shadow_params.x is 0).
 //
-// Borrows `context`, `programs` and `meshes`, which must outlive it.
-// Neither copyable nor movable. Not thread-safe.
+// Borrows `programs` and `meshes`, which must outlive it. Neither copyable
+// nor movable. Not thread-safe.
 class ShadowPass {
  public:
-  static constexpr VkFormat kFormat = VK_FORMAT_D16_UNORM;
+  static constexpr MTLPixelFormat kFormat = MTLPixelFormatDepth16Unorm;
 
-  ShadowPass(const VulkanContext& context, ShaderPrograms& programs,
+  ShadowPass(const MetalContext& context, ShaderPrograms& programs,
              const std::string& shader_dir, const std::vector<Mesh>& meshes);
-  ~ShadowPass();
 
   ShadowPass(const ShadowPass&) = delete;
   ShadowPass& operator=(const ShadowPass&) = delete;
 
-  // Renders the cascades when ctx.shadows is true; otherwise only makes sure
-  // the map is readable. Must be recorded outside of a rendering pass,
-  // before anything samples the map. Leaves the map in
-  // DEPTH_READ_ONLY_OPTIMAL.
-  void Record(const FrameContext& ctx);
+  // Renders the cascades (one render encoder each) when ctx.shadows is
+  // true; records nothing otherwise.
+  void Record(const FrameContext& ctx) const;
 
-  // The 2D-array view of all cascades and its comparison sampler (PCF).
-  [[nodiscard]] VkImageView map_view() const { return map_.view(); }
-  [[nodiscard]] VkSampler sampler() const { return sampler_; }
+  // The 2D-array texture of all cascades, sampled with
+  // Samplers::shadow() (FrameGlobals::BindShadowMap()).
+  [[nodiscard]] id<MTLTexture> map() const { return map_.texture(); }
 
  private:
-  // Moves the map out of its initial layout the first time, so it can be
-  // bound while shadows are off.
-  void InitializeLayout(VkCommandBuffer cmd);
-
-  VkDevice device_;
+  id<MTLDevice> device_ = nil;
   const std::vector<Mesh>& meshes_;
   Image map_;
-  VkSampler sampler_ = VK_NULL_HANDLE;
-  // False until the map has been moved out of its initial layout.
-  bool initialized_ = false;
   // Replaced when its shader is reloaded; never null after construction.
   std::unique_ptr<Pipeline> pipeline_;
 };

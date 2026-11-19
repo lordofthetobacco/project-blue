@@ -24,9 +24,10 @@ namespace blue::render {
 //   kTextureBrdfLut:             BRDF lookup table (RG: scale, bias)
 //   kTextureAmbientOcclusion:    ambient occlusion (R)
 //   kSamplerShadow, kSamplerLinearClamp, kSamplerNearestClamp
-// The textures start as 1 x 1 defaults, so shaders can sample them before
-// the passes that produce them exist: a 4-layer shadow map at depth 1 (lit
-// everywhere), a black cube, a zero LUT and white occlusion.
+// The environment and occlusion textures start as 1 x 1 defaults, so shaders
+// can sample them before the passes that produce them exist: a black cube, a
+// zero LUT and white occlusion. The shadow map has no default: the renderer
+// binds ShadowPass's map before recording any frame.
 // Borrows `samplers`, which must outlive it. Neither copyable nor movable.
 // Not thread-safe.
 class FrameGlobals {
@@ -57,8 +58,6 @@ class FrameGlobals {
  private:
   const Samplers& samplers_;
   std::array<Buffer, kFramesInFlight> uniforms_;
-  // TODO(metal-stage5): replaced through BindShadowMap() by the shadow pass.
-  Image default_shadow_map_;
   Image default_cube_;
   Image default_lut_;
   Image default_ambient_occlusion_;
