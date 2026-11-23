@@ -22,12 +22,17 @@ class D3d12Context;
 // model forbids sRGB buffer formats), DXGI_SWAP_EFFECT_FLIP_DISCARD, a
 // frame latency waitable object with a maximum latency of kFramesInFlight,
 // tearing allowed when vsync is off and DXGI supports it, Alt+Enter left to
-// the application. Created in exactly one function (CreateSwapchain() in
-// swapchain.cc) so a frame generation interposer can wrap it later (§6).
+// the application (SDL; the window is never exclusive full-screen, so
+// tearing is always allowed in windowed and borderless mode). Created in
+// exactly one function (CreateSwapchain() in swapchain.cc) so a frame
+// generation interposer can wrap it later (§6).
 //
-// Package D1 state: presents what the frame renders; resize, vsync and
-// pacing follow the design but have only been reviewed, not run (workers do
-// not open windows); package D5 completes and verifies the window path.
+// Frame pacing: WaitForFrame() at the start of every frame blocks until
+// fewer than kFramesInFlight presents are queued, then the renderer records
+// into buffer() and Present()s it. Present() never fails for an occluded or
+// minimised window (DXGI_STATUS_OCCLUDED is a success code); a removed
+// device is fatal with its reason (CheckHr()).
+//
 // Borrows `context`, which must outlive it. Neither copyable nor movable.
 // Not thread-safe.
 class Swapchain {
@@ -35,6 +40,7 @@ class Swapchain {
   static constexpr uint32_t kBufferCount = 3;
   static constexpr DXGI_FORMAT kBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
   static constexpr DXGI_FORMAT kViewFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+  static constexpr DWORD kFrameWaitMs = 1000;
 
   // `window` is the HWND to present to.
   Swapchain(const D3d12Context& context, HWND window, core::Extent2D extent);
@@ -44,9 +50,11 @@ class Swapchain {
   Swapchain& operator=(const Swapchain&) = delete;
 
   // Resizes the buffers to `extent` (each side at least 1). The GPU must no
-  // longer use them.
+  // longer use them; every buffer is in PRESENT afterwards.
   void Resize(core::Extent2D extent);
-  // Blocks until DXGI accepts another frame (the latency waitable object).
+  // Blocks until DXGI accepts another frame (the latency waitable object),
+  // at most kFrameWaitMs (a hung present then shows as a slow frame, not a
+  // frozen application).
   void WaitForFrame() const;
   // Presents the current buffer (PRESENT state); vsync on: synchronized to
   // the display, off: immediately (tearing when supported).

@@ -1,5 +1,6 @@
 #include <SDL3/SDL_init.h>
 #include <doctest/doctest.h>
+#include <imgui.h>
 
 #include <algorithm>
 #include <chrono>
@@ -50,25 +51,71 @@ std::unique_ptr<render::Renderer> MakeRenderer(render::Backend backend) {
   return renderer;
 }
 
+// An ImGui context with `renderer`'s ImGui backend, for the frames of one
+// scene with a UI (TestScene::ui); headless: no platform backend, a fixed
+// display size and frame time.
+class SceneUi {
+ public:
+  explicit SceneUi(render::Renderer& renderer)
+      : renderer_(renderer), context_(ImGui::CreateContext()) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.LogFilename = nullptr;
+    io.DisplaySize = ImVec2(static_cast<float>(kSceneWidth),
+                            static_cast<float>(kSceneHeight));
+    io.DeltaTime = 1.0f / 60.0f;
+    renderer_.InitImGuiRenderer();
+  }
+  ~SceneUi() {
+    renderer_.WaitIdle();
+    renderer_.ShutdownImGuiRenderer();
+    ImGui::DestroyContext(context_);
+  }
+
+  SceneUi(const SceneUi&) = delete;
+  SceneUi& operator=(const SceneUi&) = delete;
+
+  // Builds `scene`'s UI frame and returns its draw data.
+  ImDrawData* Frame(const TestScene& scene) const {
+    ImGui::NewFrame();
+    DrawUi(scene, renderer_);
+    ImGui::Render();
+    return ImGui::GetDrawData();
+  }
+
+ private:
+  render::Renderer& renderer_;
+  ImGuiContext* context_;
+};
+
 // Draws `scene` with `renderer` and reads back its last frame (alpha forced
-// to 255).
+// to 255): the viewport image for a viewport scene without UI, else the
+// window output.
 SceneResult DrawScene(render::Renderer* renderer, const TestScene* scene) {
+  std::optional<SceneUi> ui;
+  if (scene->ui) {
+    ui.emplace(*renderer);
+  }
+  const bool read_viewport = scene->viewport_output && !scene->ui;
   uint64_t ticket = 0;
   for (int frame = 0; frame < scene->frames; ++frame) {
     const bool last = frame + 1 == scene->frames;
     if (scene->viewport_output) {
+      // Before the UI that shows it, as in the editor.
       const render::ViewportImage viewport =
-          renderer->PrepareViewport({kSceneWidth, kSceneHeight});
-      REQUIRE(viewport.extent.width == kSceneWidth);
-      if (last) {
-        ticket = renderer->RequestViewportReadback();
-      }
-      renderer->DrawViewportFrame(scene->view, nullptr);
+          renderer->PrepareViewport(scene->viewport_extent);
+      REQUIRE(viewport.extent.width == scene->viewport_extent.width);
+      REQUIRE(viewport.extent.height == scene->viewport_extent.height);
+    }
+    ImDrawData* const draw_data = ui ? ui->Frame(*scene) : nullptr;
+    if (last) {
+      ticket = read_viewport ? renderer->RequestViewportReadback()
+                             : renderer->RequestOutputReadback();
+    }
+    if (scene->viewport_output) {
+      renderer->DrawViewportFrame(scene->view, draw_data);
     } else {
-      if (last) {
-        ticket = renderer->RequestOutputReadback();
-      }
-      renderer->DrawFrame(scene->view, nullptr);
+      renderer->DrawFrame(scene->view, draw_data);
     }
   }
   renderer->WaitIdle();

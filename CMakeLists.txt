@@ -56,12 +56,37 @@ if(NOT BLUE_SHADER_HOT_RELOAD AND BLUE_RENDERER_METAL)
         "BLUE_RENDERER_METAL yet")
 endif()
 
-# The backend used unless --renderer= or BLUE_RENDERER names another one.
+# The backend used unless --renderer= or BLUE_RENDERER names another one:
+# Metal on Apple, Direct3D 12 on Windows, Vulkan elsewhere (design §1.4).
 if(BLUE_RENDERER_METAL)
     set(blue_default_renderer metal)
+elseif(BLUE_RENDERER_D3D12)
+    set(blue_default_renderer d3d12)
 else()
     set(blue_default_renderer vulkan)
 endif()
+# A cache that still holds the automatic default of an earlier configure
+# follows the new automatic default; a value set by hand (or by -D) is kept.
+# Caches written by a configure from before this record (they carry the
+# STRINGS property, a fresh -D value does not) held "vulkan" automatically.
+get_property(blue_renderer_strings CACHE BLUE_DEFAULT_RENDERER PROPERTY STRINGS)
+if(DEFINED BLUE_DEFAULT_RENDERER_AUTO)
+    set(blue_previous_auto_renderer "${BLUE_DEFAULT_RENDERER_AUTO}")
+elseif(blue_renderer_strings)
+    set(blue_previous_auto_renderer vulkan)
+else()
+    set(blue_previous_auto_renderer "")
+endif()
+if(DEFINED BLUE_DEFAULT_RENDERER AND blue_previous_auto_renderer)
+    if(BLUE_DEFAULT_RENDERER STREQUAL blue_previous_auto_renderer
+       AND NOT BLUE_DEFAULT_RENDERER STREQUAL blue_default_renderer)
+        message(STATUS "BLUE_DEFAULT_RENDERER follows the new automatic default: "
+            "${blue_previous_auto_renderer} -> ${blue_default_renderer}")
+        set_property(CACHE BLUE_DEFAULT_RENDERER PROPERTY VALUE "${blue_default_renderer}")
+    endif()
+endif()
+set(BLUE_DEFAULT_RENDERER_AUTO "${blue_default_renderer}" CACHE INTERNAL
+    "The automatic BLUE_DEFAULT_RENDERER of the last configure")
 set(BLUE_DEFAULT_RENDERER "${blue_default_renderer}" CACHE STRING
     "Renderer backend used unless --renderer= or BLUE_RENDERER names another (vulkan, d3d12, metal)")
 set_property(CACHE BLUE_DEFAULT_RENDERER PROPERTY STRINGS vulkan d3d12 metal)

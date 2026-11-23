@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/extent.h"
 #include "render/debug_lines.h"
 #include "render/renderer.h"
 #include "render/scene_view.h"
@@ -30,10 +31,17 @@ struct TestScene {
   TestScene(const TestScene&) = delete;
   TestScene& operator=(const TestScene&) = delete;
 
-  // Rendered through PrepareViewport() + DrawViewportFrame() and read back
-  // from the viewport image (the editor path) instead of DrawFrame() and
-  // the output image.
+  // Rendered through PrepareViewport() + DrawViewportFrame() (the editor
+  // path) instead of DrawFrame(); read back from the viewport image, or from
+  // the window output when the scene has a UI (the editor's double output:
+  // the UI showing the viewport image).
   bool viewport_output = false;
+  // The viewport image's size (viewport_output only).
+  core::Extent2D viewport_extent{kSceneWidth, kSceneHeight};
+  // Draws a fixed ImGui frame (DrawUi()) over the window output.
+  bool ui = false;
+  // Textures the UI shows (Renderer::ui_texture()).
+  std::vector<render::TextureId> ui_textures;
   // Frames drawn; the last one is read back.
   int frames = 2;
 
@@ -67,6 +75,12 @@ inline constexpr uint32_t kTextureSize = 64;
 // returns it. `name` must be one of SceneNames().
 [[nodiscard]] std::unique_ptr<TestScene> BuildScene(std::string_view name,
                                                     render::Renderer& renderer);
+
+// Builds `scene`'s ImGui frame (TestScene::ui) between ImGui::NewFrame() and
+// ImGui::Render(): fixed windows and widgets at whole-pixel positions, the
+// default font, no input. ImGui's display size must be kSceneWidth x
+// kSceneHeight.
+void DrawUi(const TestScene& scene, const render::Renderer& renderer);
 
 }  // namespace blue::render_test
 

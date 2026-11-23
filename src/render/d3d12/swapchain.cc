@@ -109,10 +109,17 @@ void Swapchain::Resize(core::Extent2D extent) {
 }
 
 void Swapchain::WaitForFrame() const {
-  WaitForSingleObjectEx(frame_latency_waitable_, 1000, TRUE);
+  const DWORD result =
+      WaitForSingleObjectEx(frame_latency_waitable_, kFrameWaitMs, FALSE);
+  if (result != WAIT_OBJECT_0) {
+    core::log::Warn("Swapchain frame wait ended without a frame: {}",
+                    result == WAIT_TIMEOUT ? "timeout" : "failed");
+  }
 }
 
 void Swapchain::Present(bool vsync) {
+  // ALLOW_TEARING needs sync interval 0, the ALLOW_TEARING creation flag and
+  // a window that is not exclusive full-screen (never the case here).
   const bool tear = !vsync && context_.tearing_supported();
   CheckHr(swapchain_->Present(vsync ? 1 : 0,
                               tear ? DXGI_PRESENT_ALLOW_TEARING : 0));

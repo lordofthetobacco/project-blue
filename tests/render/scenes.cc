@@ -1,5 +1,7 @@
 #include "tests/render/scenes.h"
 
+#include <imgui.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -42,11 +44,15 @@ using render::TextureFormat;
 using render::TextureId;
 using render::TextureUpload;
 
-constexpr std::array<std::string_view, 9> kSceneNames = {
-    "clear_and_upload", "lit_basic",     "lit_full_aces",
-    "lit_full_neutral", "lit_full_clamp", "materials",
-    "weapon_motion",    "scope",          "editor_overlay",
+constexpr std::array<std::string_view, 11> kSceneNames = {
+    "clear_and_upload", "lit_basic",  "lit_full_aces", "lit_full_neutral",
+    "lit_full_clamp",   "materials",  "weapon_motion", "scope",
+    "editor_overlay",   "ui_overlay", "ui_viewport",
 };
+
+// The viewport image of ui_viewport: 16:9 like the scenes' cameras.
+constexpr uint32_t kUiViewportWidth = 384;
+constexpr uint32_t kUiViewportHeight = 216;
 
 constexpr float kPi = std::numbers::pi_v<float>;
 
@@ -414,8 +420,8 @@ void ClearAndUpload(TestScene& scene, Renderer& renderer) {
 }
 
 // Ground, a red cube and a metal sphere under the sun; no shadows, SSAO or
-// bloom; FXAA, ACES.
-void LitBasic(TestScene& scene, Renderer& renderer) {
+// bloom; FXAA, ACES. Returns what it uploaded.
+Assets LitBasic(TestScene& scene, Renderer& renderer) {
   const Assets assets = UploadAssets(renderer);
   scene.draws.push_back(Item(assets.ground, At({0.0f, 0.0f, 0.0f}),
                              Plain(renderer, glm::vec3(0.5f), 0.8f)));
@@ -428,6 +434,7 @@ void LitBasic(TestScene& scene, Renderer& renderer) {
   scene.view.post = PlainPost();
   scene.view.post.fxaa_enabled = true;
   scene.view.post.exposure_ev = kLitExposureEv;
+  return assets;
 }
 
 // Everything lit: shadows, SSAO, bloom, two point lights, a generated
@@ -662,6 +669,90 @@ void EditorOverlay(TestScene& scene, Renderer& renderer) {
   scene.selected.push_back(2);
 }
 
+// The game's UI path: a fixed ImGui frame (DrawUi()) over lit_basic in the
+// window output, showing two uploaded textures.
+void UiOverlay(TestScene& scene, Renderer& renderer) {
+  const Assets assets = LitBasic(scene, renderer);
+  scene.ui = true;
+  scene.ui_textures = {assets.checker, assets.bc7};
+  scene.frames = 3;  // ImGui lays a new window out over its first frames.
+}
+
+// The editor's double output: lit_basic with overlay lines into a smaller
+// viewport image, shown 1:1 by an ImGui window in the window output.
+void UiViewport(TestScene& scene, Renderer& renderer) {
+  LitBasic(scene, renderer);
+  scene.viewport_output = true;
+  scene.viewport_extent = {kUiViewportWidth, kUiViewportHeight};
+  scene.lines.AddGrid({0.0f, 0.001f, 0.0f}, 5.0f, 0.5f,
+                      {0.6f, 0.6f, 0.6f, 0.5f}, 4, {0.9f, 0.9f, 0.9f, 0.8f});
+  scene.selected.push_back(1);
+  scene.ui = true;
+  scene.frames = 3;
+}
+
+// Whole-pixel positions keep the UI's rasterization the same on every
+// backend.
+constexpr ImVec2 kUiPanelPos{16.0f, 16.0f};
+constexpr ImVec2 kUiPanelSize{250.0f, 236.0f};
+constexpr ImVec2 kUiNotePos{300.0f, 200.0f};
+constexpr ImVec2 kUiNoteSize{220.0f, 120.0f};
+constexpr ImVec2 kUiViewportPos{120.0f, 40.0f};
+
+void DrawOverlayUi(const TestScene& scene, const Renderer& renderer) {
+  ImGui::SetNextWindowPos(kUiPanelPos);
+  ImGui::SetNextWindowSize(kUiPanelSize);
+  ImGui::Begin("Render test", nullptr, ImGuiWindowFlags_NoSavedSettings);
+  ImGui::TextUnformatted("Headless UI overlay");
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Coloured text 0123");
+  ImGui::Button("Button");
+  ImGui::SameLine();
+  bool checked = true;
+  ImGui::Checkbox("Check", &checked);
+  float value = 0.35f;
+  ImGui::SliderFloat("Slider", &value, 0.0f, 1.0f, "%.2f");
+  ImGui::ProgressBar(0.6f, ImVec2(-1.0f, 0.0f));
+  ImGui::Separator();
+  for (const TextureId texture : scene.ui_textures) {
+    ImGui::Image(ImTextureRef(renderer.ui_texture(texture)),
+                 ImVec2(64.0f, 64.0f));
+    ImGui::SameLine();
+  }
+  ImGui::NewLine();
+  ImGui::End();
+
+  ImGui::SetNextWindowPos(kUiNotePos);
+  ImGui::SetNextWindowSize(kUiNoteSize);
+  ImGui::SetNextWindowBgAlpha(0.5f);
+  ImGui::Begin("Translucent", nullptr, ImGuiWindowFlags_NoSavedSettings);
+  ImGui::TextWrapped(
+      "Half transparent window over the scene, with wrapped text.");
+  ImGui::End();
+
+  // Anti-aliased shapes straight into the foreground list.
+  ImDrawList* draw = ImGui::GetForegroundDrawList();
+  draw->AddLine(ImVec2(300.0f, 40.0f), ImVec2(620.0f, 170.0f),
+                IM_COL32(255, 64, 64, 255), 3.0f);
+  draw->AddCircleFilled(ImVec2(560.0f, 80.0f), 30.0f,
+                        IM_COL32(64, 200, 255, 160));
+  draw->AddRect(ImVec2(540.0f, 250.0f), ImVec2(620.0f, 340.0f),
+                IM_COL32(255, 255, 255, 255), 6.0f, 2.0f);
+}
+
+void DrawViewportUi(const Renderer& renderer) {
+  const render::ViewportImage& viewport = renderer.viewport();
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::SetNextWindowPos(kUiViewportPos);
+  ImGui::Begin(
+      "Viewport", nullptr,
+      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
+  ImGui::Image(ImTextureRef(viewport.texture),
+               ImVec2(static_cast<float>(viewport.extent.width),
+                      static_cast<float>(viewport.extent.height)));
+  ImGui::End();
+  ImGui::PopStyleVar();
+}
+
 }  // namespace
 
 std::vector<TextureSource> TestTextures() {
@@ -699,11 +790,23 @@ std::unique_ptr<TestScene> BuildScene(std::string_view name,
     Scope(*scene, renderer);
   } else if (name == "editor_overlay") {
     EditorOverlay(*scene, renderer);
+  } else if (name == "ui_overlay") {
+    UiOverlay(*scene, renderer);
+  } else if (name == "ui_viewport") {
+    UiViewport(*scene, renderer);
   } else {
     core::log::Fatal("Unknown render test scene {}", name);
   }
   BindStorage(*scene);
   return scene;
+}
+
+void DrawUi(const TestScene& scene, const render::Renderer& renderer) {
+  if (scene.viewport_output) {
+    DrawViewportUi(renderer);
+  } else {
+    DrawOverlayUi(scene, renderer);
+  }
 }
 
 }  // namespace blue::render_test

@@ -522,8 +522,16 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   DestroyRetiredIfIdle();
   if (swapchain_) {
     const core::Extent2D window_size = window_->PixelSize();
-    if (window_size.width == 0 || window_size.height == 0) {
-      return;  // Minimized: nothing to present to.
+    if (window_size.width == 0 || window_size.height == 0 ||
+        window_->IsMinimized()) {
+      return;  // Nothing to present to (SDL keeps a minimized window's size).
+    }
+    // DXGI has no "out of date": a size change whose event was missed (or
+    // not sent, e.g. a DPI change) is caught here.
+    const core::Extent2D swapchain_size = swapchain_->extent();
+    if (window_size.width != swapchain_size.width ||
+        window_size.height != swapchain_size.height) {
+      swapchain_dirty_ = true;
     }
     if (swapchain_dirty_ && !RebuildSwapchain()) {
       return;
@@ -746,7 +754,9 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   RecordUi(cmd, ui, output, window_rtv);
   gpu_timer_.End(cmd, frame_index_, GpuScope::kUi);
 
-  {
+  // The headless output rests in COPY_SOURCE (the copies of the readbacks);
+  // the swapchain buffer passes through it only when one is pending.
+  if (!swapchain_ || HasPendingReadback(ReadbackSource::kOutput)) {
     BarrierBatch barriers(cmd);
     const D3D12_RESOURCE_STATES copy = D3D12_RESOURCE_STATE_COPY_SOURCE;
     if (swapchain_) {
