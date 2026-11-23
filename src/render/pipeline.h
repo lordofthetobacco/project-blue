@@ -8,6 +8,7 @@
 #include <string>
 
 #include "core/result.h"
+#include "render/metal_context.h"
 #include "shader/shader_compiler.h"
 
 namespace blue::render {
@@ -37,7 +38,8 @@ struct GraphicsPipelineDesc {
   // MTLPixelFormatInvalid means no color attachment (depth-only pipeline).
   MTLPixelFormat color_format = MTLPixelFormatInvalid;
   // MTLPixelFormatInvalid means no depth attachment and no depth test (e.g.
-  // a full-screen pass).
+  // a full-screen pass). A Metal 4 pipeline state does not name the depth
+  // format itself; any other value only enables the depth-stencil state.
   MTLPixelFormat depth_format = MTLPixelFormatInvalid;
   // The front face is always counter-clockwise.
   MTLCullMode cull_mode = MTLCullModeBack;
@@ -66,19 +68,20 @@ struct GraphicsPipelineDesc {
 // Not thread-safe.
 class Pipeline {
  public:
-  // Creates the pipeline on `device`, which must be the device the shader
-  // libraries were compiled on (the system default device; a mismatch is
-  // fatal). Returns the Metal error text when a function is missing or the
+  // Creates the pipeline with the MTL4Compiler of `context`, whose device
+  // must be the one the shader libraries were compiled on (the system
+  // default device; a mismatch is fatal). Blocks until it is compiled.
+  // Returns the Metal error text when a function is missing or the
   // stages do not link (e.g. varyings that stopped matching after a shader
   // edit): during a hot reload that is an ordinary failure.
   [[nodiscard]] static core::Result<std::unique_ptr<Pipeline>, std::string>
-  Create(id<MTLDevice> device, const GraphicsPipelineDesc& desc);
+  Create(const MetalContext& context, const GraphicsPipelineDesc& desc);
 
   Pipeline(const Pipeline&) = delete;
   Pipeline& operator=(const Pipeline&) = delete;
 
   // Sets the pipeline and its fixed-function state on `encoder`.
-  void Bind(id<MTLRenderCommandEncoder> encoder) const;
+  void Bind(id<MTL4RenderCommandEncoder> encoder) const;
 
   [[nodiscard]] id<MTLRenderPipelineState> state() const { return state_; }
   [[nodiscard]] bool depth_bias() const { return depth_bias_; }

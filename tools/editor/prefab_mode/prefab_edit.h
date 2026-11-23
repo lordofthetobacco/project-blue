@@ -205,6 +205,18 @@ std::optional<std::vector<std::string>> ReadChildPathsFromFile(
 int AddSocket(prefab::Prefab& prefab, int node,
               std::string_view base_name = "socket");
 
+// Sets tag `key` of `prefab` to `value` (changes the value in place, or
+// appends a new tag). Returns the problem instead for a key that is not 1 to
+// prefab::kMaxTagKeyLength of [a-z0-9_.], a value longer than
+// prefab::kMaxTagValueLength, or a new tag beyond prefab::kMaxTagCount.
+[[nodiscard]] std::optional<std::string> SetPrefabTag(prefab::Prefab& prefab,
+                                                      std::string_view key,
+                                                      std::string_view value);
+
+// Removes tag `key`; returns the problem instead if there is none.
+[[nodiscard]] std::optional<std::string> RemovePrefabTag(prefab::Prefab& prefab,
+                                                         std::string_view key);
+
 // Adds a white point light (made-unique name "light", 10 m range) at the
 // origin of `node` and returns its index.
 int AddPointLight(prefab::Prefab& prefab, int node);

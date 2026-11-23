@@ -62,6 +62,11 @@ bool IsRegularFile(const std::string& path);
 // same path: the file system decides the granularity.
 std::optional<int64_t> LastWriteTime(const std::string& path);
 
+// Returns the names (not paths) of the entries of the directory `path`,
+// sorted by byte value, or nullopt if `path` is not a readable directory.
+// "." and ".." are not listed.
+std::optional<std::vector<std::string>> ListDirectory(const std::string& path);
+
 // Removes a file or an empty directory. Returns true on success, and also
 // when nothing exists at `path`; false if the removal failed (for example a
 // non-empty directory).

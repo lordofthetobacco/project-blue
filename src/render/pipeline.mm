@@ -31,8 +31,10 @@ std::string ErrorText(const char* what, NSError* error) {
 
 // Sets the blend state of `mode` on the single color attachment.
 void ApplyBlend(BlendMode mode,
-                MTLRenderPipelineColorAttachmentDescriptor* attachment) {
-  attachment.blendingEnabled = mode != BlendMode::kReplace;
+                MTL4RenderPipelineColorAttachmentDescriptor* attachment) {
+  attachment.blendingState = mode != BlendMode::kReplace
+                                 ? MTL4BlendStateEnabled
+                                 : MTL4BlendStateDisabled;
   attachment.rgbBlendOperation = MTLBlendOperationAdd;
   attachment.sourceRGBBlendFactor = MTLBlendFactorOne;
   attachment.destinationRGBBlendFactor = MTLBlendFactorOne;
@@ -45,6 +47,16 @@ void ApplyBlend(BlendMode mode,
     attachment.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
     attachment.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
   }
+}
+
+// Returns the descriptor of entry point `name` of `library`.
+MTL4LibraryFunctionDescriptor* FunctionOf(id<MTLLibrary> library,
+                                          const char* name) {
+  MTL4LibraryFunctionDescriptor* function =
+      [[MTL4LibraryFunctionDescriptor alloc] init];
+  function.library = library;
+  function.name = @(name);
+  return function;
 }
 
 // Returns the library of `library`, which must have been compiled on
@@ -66,32 +78,34 @@ id<MTLLibrary> LibraryOn(id<MTLDevice> device,
 
 }  // namespace
 
-CreateResult Pipeline::Create(id<MTLDevice> device,
+CreateResult Pipeline::Create(const MetalContext& context,
                               const GraphicsPipelineDesc& desc) {
   if (desc.vertex == nullptr) {
     core::log::Fatal("A pipeline needs a vertex shader");
   }
-  MTLRenderPipelineDescriptor* descriptor =
-      [[MTLRenderPipelineDescriptor alloc] init];
+  const id<MTLDevice> device = context.device();
+  MTL4RenderPipelineDescriptor* descriptor =
+      [[MTL4RenderPipelineDescriptor alloc] init];
   descriptor.label = desc.label != nullptr ? @(desc.label) : @"pipeline";
 
-  id<MTLLibrary> vertex_library = LibraryOn(device, *desc.vertex);
-  descriptor.vertexFunction =
-      [vertex_library newFunctionWithName:@(kVertexEntryPoint)];
-  if (descriptor.vertexFunction == nil) {
+  // A missing entry point would only surface as a link error of the whole
+  // pipeline: name it here.
+  if (!desc.vertex->HasFunction(kVertexEntryPoint)) {
     return CreateResult::Error(
         std::string("The vertex shader has no function ") + kVertexEntryPoint);
   }
+  descriptor.vertexFunctionDescriptor =
+      FunctionOf(LibraryOn(device, *desc.vertex), kVertexEntryPoint);
   if (desc.fragment != nullptr) {
-    id<MTLLibrary> library = LibraryOn(device, *desc.fragment);
+    if (!desc.fragment->HasFunction(kFragmentEntryPoint)) {
+      return CreateResult::Error(
+          std::string("The fragment shader has no function ") +
+          kFragmentEntryPoint);
+    }
+    MTL4LibraryFunctionDescriptor* function =
+        FunctionOf(LibraryOn(device, *desc.fragment), kFragmentEntryPoint);
     if (desc.fragment_constants.empty()) {
-      descriptor.fragmentFunction =
-          [library newFunctionWithName:@(kFragmentEntryPoint)];
-      if (descriptor.fragmentFunction == nil) {
-        return CreateResult::Error(
-            std::string("The fragment shader has no function ") +
-            kFragmentEntryPoint);
-      }
+      descriptor.fragmentFunctionDescriptor = function;
     } else {
       MTLFunctionConstantValues* values =
           [[MTLFunctionConstantValues alloc] init];
@@ -99,15 +113,11 @@ CreateResult Pipeline::Create(id<MTLDevice> device,
         const bool value = desc.fragment_constants[i];
         [values setConstantValue:&value type:MTLDataTypeBool atIndex:i];
       }
-      NSError* error = nil;
-      descriptor.fragmentFunction =
-          [library newFunctionWithName:@(kFragmentEntryPoint)
-                        constantValues:values
-                                 error:&error];
-      if (descriptor.fragmentFunction == nil) {
-        return CreateResult::Error(
-            ErrorText("Specializing the fragment shader failed", error));
-      }
+      MTL4SpecializedFunctionDescriptor* specialized =
+          [[MTL4SpecializedFunctionDescriptor alloc] init];
+      specialized.functionDescriptor = function;
+      specialized.constantValues = values;
+      descriptor.fragmentFunctionDescriptor = specialized;
     }
   }
 
@@ -115,18 +125,19 @@ CreateResult Pipeline::Create(id<MTLDevice> device,
   descriptor.inputPrimitiveTopology = desc.topology;
   descriptor.rasterSampleCount = 1;
   if (desc.color_format != MTLPixelFormatInvalid) {
-    MTLRenderPipelineColorAttachmentDescriptor* attachment =
+    MTL4RenderPipelineColorAttachmentDescriptor* attachment =
         descriptor.colorAttachments[0];
     attachment.pixelFormat = desc.color_format;
     ApplyBlend(desc.blend, attachment);
   }
-  descriptor.depthAttachmentPixelFormat = desc.depth_format;
 
   NSError* error = nil;
   // Not `std::make_unique`: the constructor is private.
   std::unique_ptr<Pipeline> pipeline(new Pipeline());
-  pipeline->state_ = [device newRenderPipelineStateWithDescriptor:descriptor
-                                                            error:&error];
+  pipeline->state_ =
+      [context.compiler() newRenderPipelineStateWithDescriptor:descriptor
+                                           compilerTaskOptions:nil
+                                                         error:&error];
   if (pipeline->state_ == nil) {
     return CreateResult::Error(
         ErrorText("Creating the pipeline failed", error));
@@ -148,7 +159,7 @@ CreateResult Pipeline::Create(id<MTLDevice> device,
   return CreateResult::Ok(std::move(pipeline));
 }
 
-void Pipeline::Bind(id<MTLRenderCommandEncoder> encoder) const {
+void Pipeline::Bind(id<MTL4RenderCommandEncoder> encoder) const {
   [encoder setRenderPipelineState:state_];
   if (depth_stencil_ != nil) {
     [encoder setDepthStencilState:depth_stencil_];

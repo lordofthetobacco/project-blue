@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -31,6 +33,7 @@
 #include "editor/editor_context.h"
 #include "editor/editor_settings.h"
 #include "editor/mcp/mcp_host.h"
+#include "editor/memory_report.h"
 #include "editor/panel.h"
 #include "editor/selection.h"
 #include "editor/viewport/viewport_panel.h"
@@ -51,6 +54,8 @@ constexpr const char* kPrefApplication = "blue-editor";
 constexpr const char* kLayoutFileName = "editor_layout.ini";
 constexpr const char* kRecentFileName = "recent_files.txt";
 constexpr const char* kSettingsFileName = "editor_settings.cfg";
+// How often the memory readout (status bar, Settings) is refreshed, in frames.
+constexpr uint64_t kMemoryRefreshFrames = 30;
 // Recent MCP activity lines shown in the Settings window.
 constexpr size_t kShownActivity = 12;
 constexpr const char* kAssetDirectory = "assets";
@@ -138,6 +143,7 @@ EditorApp::EditorApp(EditorOptions options)
     mcp.port = options_.mcp_port.value_or(mcp.port);
   }
   SetMcpSettings(mcp, /*persist=*/false);
+  SetHistoryBudget(settings_.history_budget_mb, /*persist=*/false);
 }
 
 EditorApp::~EditorApp() {
@@ -267,6 +273,11 @@ void EditorApp::Frame(float dt) {
     pending_mcp_.reset();
   }
   context_->SyncPrefabPreview();
+  if (memory_frame_ == 0 ||
+      context_->frame_count() >= memory_frame_ + kMemoryRefreshFrames) {
+    memory_ = context_->memory_report();
+    memory_frame_ = std::max<uint64_t>(context_->frame_count(), 1);
+  }
   if (context_->frame_count() % kShaderPollFrames == 0) {
     renderer_.ReloadChangedShaders();
   }
@@ -431,6 +442,23 @@ void EditorApp::DrawStatusBar() {
         }
         if (ImGui::IsItemClicked()) {
           settings_open_ = true;
+        }
+      }
+      if (memory_.process.available) {
+        ImGui::Separator();
+        ImGui::Text("RAM %s",
+                    FormatBytes(memory_.process.private_bytes).c_str());
+        if (ImGui::IsItemHovered()) {
+          std::string tip;
+          for (const std::string& line : MemoryReportLines(memory_)) {
+            tip += line + "\n";
+          }
+          tip += "Click for details (Edit > Settings... > Memory)";
+          ImGui::SetTooltip("%s", tip.c_str());
+        }
+        if (ImGui::IsItemClicked()) {
+          settings_open_ = true;
+          show_memory_ = true;
         }
       }
       ImGui::Separator();
@@ -907,6 +935,28 @@ void EditorApp::RegisterShellCommands() {
                       context.Status(std::move(text));
                       return VoidResult::Ok();
                     });
+  commands.Register(
+      "memory",
+      "memory [budget <MiB>]: prints the memory readout (process, documents, "
+      "undo history, GPU) or sets the undo history budget",
+      [this](std::span<const std::string> args) {
+        if (args.size() == 2 && args[0] == "budget") {
+          int megabytes = 0;
+          const auto [end, ec] = std::from_chars(
+              args[1].data(), args[1].data() + args[1].size(), megabytes);
+          if (ec != std::errc{} || end != args[1].data() + args[1].size()) {
+            return VoidResult::Error("budget expects a number of MiB");
+          }
+          SetHistoryBudget(megabytes, /*persist=*/true);
+        } else if (!args.empty()) {
+          return VoidResult::Error("expects no argument or budget <MiB>");
+        }
+        memory_ = context_->memory_report();
+        for (const std::string& line : MemoryReportLines(memory_)) {
+          context_->Status(line);
+        }
+        return VoidResult::Ok();
+      });
   commands.Register("settings", "settings: opens Edit > Settings...",
                     [this](std::span<const std::string>) {
                       settings_open_ = true;
@@ -984,8 +1034,53 @@ void EditorApp::DrawSettingsWindow() {
     if (ImGui::CollapsingHeader("MCP server", ImGuiTreeNodeFlags_DefaultOpen)) {
       DrawMcpSettings();
     }
+    if (show_memory_) {
+      ImGui::SetNextItemOpen(true);
+      ImGui::SetScrollHereY(0.0f);
+      show_memory_ = false;
+    }
+    if (ImGui::CollapsingHeader("Memory")) {
+      DrawMemorySettings();
+    }
   }
   ImGui::End();
+}
+
+void EditorApp::SetHistoryBudget(int megabytes, bool persist) {
+  megabytes = std::clamp(megabytes, kMinHistoryBudgetMb, kMaxHistoryBudgetMb);
+  context_->set_history_budget(uint64_t{static_cast<uint32_t>(megabytes)} *
+                               1024 * 1024);
+  history_budget_draft_ = megabytes;
+  if (persist && settings_.history_budget_mb != megabytes) {
+    settings_.history_budget_mb = megabytes;
+    (void)SaveEditorSettings(settings_, settings_path_);
+  }
+}
+
+void EditorApp::DrawMemorySettings() {
+  if (!memory_.process.available) {
+    ImGui::TextDisabled("Process memory counters are not available here.");
+  }
+  for (const std::string& line : MemoryReportLines(memory_)) {
+    ImGui::TextWrapped("%s", line.c_str());
+  }
+  ImGui::TextDisabled(
+      "Private memory includes GPU allocations (Windows charges them to the "
+      "process). Mapped prefab data is read from the .pbo file on demand and "
+      "is not private memory.");
+  ImGui::Separator();
+  ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+  ImGui::InputInt("Undo history budget (MiB)", &history_budget_draft_, 64);
+  ImGui::SameLine();
+  ImGui::BeginDisabled(history_budget_draft_ == settings_.history_budget_mb);
+  if (ImGui::Button("Apply##history")) {
+    SetHistoryBudget(history_budget_draft_, /*persist=*/true);
+  }
+  ImGui::EndDisabled();
+  ImGui::TextDisabled(
+      "Textures and meshes only undo steps still reference; the oldest steps "
+      "are dropped beyond it (%d..%d MiB).",
+      kMinHistoryBudgetMb, kMaxHistoryBudgetMb);
 }
 
 void EditorApp::DrawMcpSettings() {

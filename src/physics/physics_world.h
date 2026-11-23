@@ -62,6 +62,12 @@ struct ShapeBodyDesc {
   float mass = 1.0f;         // kg, > 0 for dynamic bodies
   float friction = 0.6f;     // >= 0
   float restitution = 0.1f;  // [0, 1]
+  // Dynamic bodies only: the velocities they start with (m/s, rad/s).
+  glm::vec3 linear_velocity{0.0f};
+  glm::vec3 angular_velocity{0.0f};
+  // False: characters walk through the body (it still collides with every
+  // other body), so e.g. a thrown item never shoves the player.
+  bool blocks_characters = true;
 };
 
 struct RayHit {

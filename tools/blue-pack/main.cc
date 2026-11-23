@@ -2,12 +2,15 @@
 // prints what a prefab holds. No window, no GPU.
 //
 //   blue-pack import <model> -o <file.pbo> [options]
-//   blue-pack info <file.pbo|file.mscn>
+//   blue-pack info <file.pbo|file.mscn> [--verbose] [--vertices <mesh>]
+//   blue-pack edit <file.pbo|file.mscn> [-o <out>] <edits>
+//   blue-pack split <in.pbo> -o <out.pbo> --nodes A,B,... [options] [edits]
 //   blue-pack samples --source <samples dir> --out <dir> [--fast]
 //
 // Exit codes: 0 success, 1 bad command line, 2 import or cook failure,
 // 3 prefab file read/write failure.
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -22,20 +25,28 @@
 #include <utility>
 #include <vector>
 
+#include <glm/gtc/quaternion.hpp>
+#include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include "animation/clip.h"
 #include "animation/hierarchy.h"
+#include "animation/transform.h"
 #include "asset/mesh_data.h"
 #include "cook/clip_tools.h"
 #include "cook/collision_cook.h"
 #include "cook/cook_error.h"
 #include "cook/model_cook.h"
+#include "cook/prefab_edits.h"
+#include "cook/prefab_split.h"
+#include "cook/scene_edits.h"
 #include "core/log.h"
 #include "material/material.h"
 #include "physics/physics_runtime.h"
 #include "physics/shape_cooking.h"
 #include "platform/file_system.h"
+#include "platform/process_memory.h"
 #include "prefab/prefab.h"
 #include "prefab/prefab_file.h"
 #include "scene/mscn_serializer.h"
@@ -53,7 +64,15 @@ constexpr int kExitFile = 3;
 constexpr std::string_view kUsage =
     "usage:\n"
     "  blue-pack import <model> -o <file.pbo> [options]\n"
-    "  blue-pack info <file.pbo|file.mscn>\n"
+    "  blue-pack info <file.pbo|file.mscn> [--verbose] [--vertices <mesh>]\n"
+    "                              --verbose: node rotations and scales, clip\n"
+    "                              channel keys; --vertices: the rest-pose\n"
+    "                              (prefab space) positions of a mesh\n"
+    "  blue-pack edit <file.pbo|file.mscn> [-o <out>] <edits>\n"
+    "                              change a cooked prefab without "
+    "re-importing\n"
+    "                              it, or a scene (in place unless -o;\n"
+    "                              atomic)\n"
     "  blue-pack samples --source <samples dir> --out <dir> [--fast]\n"
     "                              build the sample prefabs and range.mscn\n"
     "\n"
@@ -76,7 +95,21 @@ constexpr std::string_view kUsage =
     "  --trim-clip <clip>=<start>,<end>   cut a clip to [start, end] seconds\n"
     "  --loop <clip>               mark a clip as looping\n"
     "  --event <clip>=<name>@<time>       add a named event (seconds)\n"
-    "  --socket <name>=<node>@<x>,<y>,<z>  add a socket ('-' = root node)\n";
+    "  --socket <name>=<node>@<x>,<y>,<z>[/<dx>,<dy>,<dz>]\n"
+    "                              add a socket ('-' = root node), its +Z\n"
+    "                              along the optional direction\n"
+    "  --tag <key>=<value>         add a tag (key: [a-z0-9_.])\n"
+    "\n"
+    "edit options (applied in order; all or nothing):\n"
+    "  --tag <key>=<value>  --remove-tag <key>\n"
+    "  --socket <name>=<node>@<x>,<y>,<z>[/<dx>,<dy>,<dz>]\n"
+    "  --remove-socket <name>  --event <clip>=<name>@<time>\n"
+    "  --rename-clip <old>=<new>\n"
+    "\n"
+    "scene edit options (applied in order; all or nothing):\n"
+    "  --add-instance <name>=<prefab.pbo>@<x>,<y>,<z>[/<yaw degrees>]\n"
+    "                              root level, scale 1; the name must be new\n"
+    "  --remove-instance <name>    exactly one instance of that name\n";
 
 template <typename... Args>
 void Print(std::format_string<Args...> format, Args&&... args) {
@@ -119,19 +152,14 @@ struct ClipEdit {
   float end = 0.0f;
 };
 
-struct SocketSpec {
-  std::string name;
-  std::string node;  // "-" = root
-  glm::vec3 position{0.0f};
-};
-
 struct ImportCommand {
   std::string model;
   std::string output;
   cook::ModelCookOptions options;
   prefab::Physics physics;
   std::vector<ClipEdit> clip_edits;
-  std::vector<SocketSpec> sockets;
+  // --socket and --tag, applied after the clip edits.
+  std::vector<cook::PrefabEdit> prefab_edits;
 };
 
 std::optional<prefab::ColliderKind> ParseCollider(std::string_view text) {
@@ -267,25 +295,14 @@ std::optional<ImportCommand> ParseImport(
                                       .clip = std::string(parts->first),
                                       .name = std::string(event->first),
                                       .start = *time});
-      } else if (arg == "--socket") {
-        const auto parts = Split(*v, '=');
-        const auto place =
-            parts.has_value() ? Split(parts->second, '@') : std::nullopt;
-        const auto xy =
-            place.has_value() ? Split(place->second, ',') : std::nullopt;
-        const auto yz = xy.has_value() ? Split(xy->second, ',') : std::nullopt;
-        const auto x =
-            xy.has_value() ? ParseNumber<float>(xy->first) : std::nullopt;
-        const auto y =
-            yz.has_value() ? ParseNumber<float>(yz->first) : std::nullopt;
-        const auto z =
-            yz.has_value() ? ParseNumber<float>(yz->second) : std::nullopt;
-        if (!x.has_value() || !y.has_value() || !z.has_value()) {
-          return fail("expected <name>=<node>@<x>,<y>,<z>, got", *v);
+      } else if (arg == "--socket" || arg == "--tag") {
+        core::Result<cook::PrefabEdit, std::string> edit =
+            cook::ParsePrefabEdit(arg, *v);
+        if (!edit.ok()) {
+          core::log::Error("blue-pack import: {}", edit.error());
+          return std::nullopt;
         }
-        command.sockets.push_back({.name = std::string(parts->first),
-                                   .node = std::string(place->first),
-                                   .position = {*x, *y, *z}});
+        command.prefab_edits.push_back(std::move(edit).value());
       } else {
         return fail("unknown option", arg);
       }
@@ -341,6 +358,18 @@ bool ApplyClipEdit(prefab::Prefab& prefab, const ClipEdit& edit) {
   return ok;
 }
 
+// Prints the process's peak memory, where the platform reports it.
+void PrintMemoryPeaks() {
+  const platform::ProcessMemory memory = platform::QueryProcessMemory();
+  if (!memory.available) {
+    return;
+  }
+  constexpr double kMiB = 1024.0 * 1024.0;
+  Print("peak memory: working set {:.0f} MiB, private {:.0f} MiB\n",
+        static_cast<double>(memory.peak_working_set) / kMiB,
+        static_cast<double>(memory.peak_private_bytes) / kMiB);
+}
+
 int RunImport(const ImportCommand& command) {
   const auto start = std::chrono::steady_clock::now();
   auto cooked = cook::CookModel(command.model, command.options);
@@ -356,19 +385,13 @@ int RunImport(const ImportCommand& command) {
       return kExitCook;
     }
   }
-  for (const SocketSpec& socket : command.sockets) {
-    int node = -1;
-    if (socket.node != "-") {
-      node = animation::FindNode(prefab.hierarchy, socket.node);
-      if (node < 0) {
-        core::log::Error("blue-pack: socket '{}': no node '{}'", socket.name,
-                         socket.node);
-        return kExitCook;
-      }
+  for (const cook::PrefabEdit& edit : command.prefab_edits) {
+    if (core::Result<void, std::string> applied =
+            cook::ApplyPrefabEdit(prefab, edit);
+        !applied.ok()) {
+      core::log::Error("blue-pack: {}", applied.error());
+      return kExitCook;
     }
-    prefab.sockets.push_back({.name = socket.name,
-                              .node = node,
-                              .local = {.translation = socket.position}});
   }
   if (command.physics.kind != prefab::ColliderKind::kNone) {
     physics::PhysicsRuntime runtime;
@@ -390,6 +413,7 @@ int RunImport(const ImportCommand& command) {
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
           .count();
   Print("wrote {} in {:.2f} s\n", command.output, seconds);
+  PrintMemoryPeaks();
   return kExitOk;
 }
 
@@ -439,12 +463,102 @@ std::string NodeName(const prefab::Prefab& prefab, int node) {
                      prefab.hierarchy.nodes[static_cast<size_t>(node)].name);
 }
 
-void PrintPrefab(const prefab::Prefab& prefab) {
+// What `blue-pack info` prints beyond the summary.
+struct InfoOptions {
+  std::string path;
+  // Node rest rotations and scales, every clip channel's keys.
+  bool verbose = false;
+  // Mesh whose rest-pose vertex positions (prefab space) are printed.
+  std::optional<std::string> vertices_of;
+};
+
+const char* PathName(animation::TargetPath path) {
+  switch (path) {
+    case animation::TargetPath::kTranslation:
+      return "translation";
+    case animation::TargetPath::kRotation:
+      return "rotation";
+    case animation::TargetPath::kScale:
+      return "scale";
+  }
+  return "?";
+}
+
+const char* InterpolationName(animation::Interpolation interpolation) {
+  switch (interpolation) {
+    case animation::Interpolation::kStep:
+      return "step";
+    case animation::Interpolation::kLinear:
+      return "linear";
+    case animation::Interpolation::kCubicSpline:
+      return "cubic";
+  }
+  return "?";
+}
+
+// Prints every key of `channel`: its time and value (a cubic spline key
+// prints its value, not its tangents).
+void PrintChannelKeys(const prefab::Prefab& prefab,
+                      const animation::Channel& channel) {
+  const size_t components =
+      channel.path == animation::TargetPath::kRotation ? 4 : 3;
+  const size_t per_key =
+      channel.interpolation == animation::Interpolation::kCubicSpline ? 3 : 1;
+  const size_t value_offset = per_key == 3 ? 1 : 0;
+  Print("    node {} {} {}, {} keys\n", NodeName(prefab, channel.node),
+        PathName(channel.path), InterpolationName(channel.interpolation),
+        channel.times.size());
+  for (size_t key = 0; key < channel.times.size(); ++key) {
+    const size_t first = (key * per_key + value_offset) * components;
+    if (first + components > channel.values.size()) {
+      break;
+    }
+    std::string value;
+    for (size_t c = 0; c < components; ++c) {
+      value += std::format("{}{:.5g}", c == 0 ? "" : ", ",
+                           channel.values[first + c]);
+    }
+    Print("      {:.4f} s: ({})\n", channel.times[key], value);
+  }
+}
+
+// Prints the rest-pose position in prefab space of every vertex of mesh
+// `name`, one per line. Returns false if the prefab has no such mesh.
+bool PrintMeshVertices(const prefab::Prefab& prefab, std::string_view name) {
+  const auto mesh = std::ranges::find(prefab.meshes, name, &prefab::Mesh::name);
+  if (mesh == prefab.meshes.end()) {
+    return false;
+  }
+  const animation::Hierarchy& hierarchy = prefab.hierarchy;
+  std::vector<animation::Transform> pose(hierarchy.nodes.size());
+  animation::ResetToRest(hierarchy, pose);
+  std::vector<glm::mat4> world(hierarchy.nodes.size(), glm::mat4(1.0f));
+  animation::ComputeWorldMatrices(hierarchy, pose, world);
+  const glm::mat4 transform =
+      mesh->node >= 0 && static_cast<size_t>(mesh->node) < world.size()
+          ? world[static_cast<size_t>(mesh->node)]
+          : glm::mat4(1.0f);
+  Print("vertices of '{}' (prefab space, rest pose): {}\n", mesh->name,
+        mesh->vertices.size());
+  for (const asset::Vertex& vertex : mesh->vertices) {
+    const glm::vec3 p = glm::vec3(transform * glm::vec4(vertex.position, 1.0f));
+    Print("{:.6f} {:.6f} {:.6f}\n", p.x, p.y, p.z);
+  }
+  return true;
+}
+
+void PrintPrefab(const prefab::Prefab& prefab, bool verbose) {
   Print("nodes: {}\n", prefab.hierarchy.nodes.size());
   for (size_t i = 0; i < prefab.hierarchy.nodes.size(); ++i) {
     const animation::Node& node = prefab.hierarchy.nodes[i];
-    Print("  [{}] '{}' parent {} t {}\n", i, node.name, node.parent,
+    Print("  [{}] '{}' parent {} t {}", i, node.name, node.parent,
           Vec3(node.rest.translation));
+    if (verbose) {
+      const glm::quat& r = node.rest.rotation;
+      Print(" r (w {:.5g}, {:.5g}, {:.5g}, {:.5g}) s {}", r.w, r.x, r.y, r.z,
+            Vec3(node.rest.scale));
+    }
+    Print("\n");
   }
 
   size_t vertex_bytes = 0;
@@ -514,12 +628,26 @@ void PrintPrefab(const prefab::Prefab& prefab) {
     for (const animation::ClipEvent& event : clip.events) {
       Print("    event '{}' at {:.3f} s\n", event.name, event.time);
     }
+    if (verbose) {
+      for (const animation::Channel& channel : clip.channels) {
+        PrintChannelKeys(prefab, channel);
+      }
+    }
   }
 
   Print("sockets: {}\n", prefab.sockets.size());
   for (const prefab::Socket& socket : prefab.sockets) {
-    Print("  '{}' node {} at {}\n", socket.name, NodeName(prefab, socket.node),
+    Print("  '{}' node {} at {}", socket.name, NodeName(prefab, socket.node),
           Vec3(socket.local.translation));
+    const glm::quat& r = socket.local.rotation;
+    if (verbose || r != glm::quat(1.0f, 0.0f, 0.0f, 0.0f)) {
+      Print(" +Z along {}", Vec3(r * glm::vec3(0.0f, 0.0f, 1.0f)));
+    }
+    Print("\n");
+  }
+  Print("tags: {}\n", prefab.tags.size());
+  for (const prefab::Tag& tag : prefab.tags) {
+    Print("  {} = {}\n", tag.key, tag.value);
   }
   Print("lights: {}\n", prefab.lights.size());
   for (const prefab::PointLight& light : prefab.lights) {
@@ -570,7 +698,8 @@ void PrintPrefab(const prefab::Prefab& prefab) {
       physics.cooked_shape.size() / 1024);
 }
 
-int RunInfo(const std::string& path) {
+int RunInfo(const InfoOptions& options) {
+  const std::string& path = options.path;
   const auto start = std::chrono::steady_clock::now();
   auto loaded = prefab::LoadPrefab(path, {.verify_bulk_checksum = true});
   const double verified_ms = std::chrono::duration<double, std::milli>(
@@ -588,7 +717,7 @@ int RunInfo(const std::string& path) {
                              .count();
   const prefab::Prefab& prefab = loaded.value();
   Print("{}\n", path);
-  PrintPrefab(prefab);
+  PrintPrefab(prefab, options.verbose);
   size_t file_size = 0;
   if (auto bytes = platform::ReadFile(path, prefab::kMaxPrefabFileSize);
       bytes.ok()) {
@@ -612,6 +741,183 @@ int RunInfo(const std::string& path) {
             physics::ToString(shape.error()));
     }
   }
+  if (options.vertices_of && !PrintMeshVertices(prefab, *options.vertices_of)) {
+    core::log::Error("blue-pack info: no mesh '{}'", *options.vertices_of);
+    return kExitUsage;
+  }
+  return kExitOk;
+}
+
+// Parses the arguments after "info". Logs the problem and returns nullopt
+// on a bad command line.
+std::optional<InfoOptions> ParseInfo(std::span<const std::string_view> args) {
+  InfoOptions options;
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == "--verbose") {
+      options.verbose = true;
+    } else if (args[i] == "--vertices" && i + 1 < args.size()) {
+      options.vertices_of = std::string(args[++i]);
+    } else if (!args[i].starts_with("--") && options.path.empty()) {
+      options.path = args[i];
+    } else {
+      core::log::Error("blue-pack info: unexpected argument '{}'", args[i]);
+      return std::nullopt;
+    }
+  }
+  if (options.path.empty()) {
+    core::log::Error("blue-pack info: need a file");
+    return std::nullopt;
+  }
+  return options;
+}
+
+// Parses (option, value) pairs into edits with `is_option` / `parse` (the
+// cook:: functions for one file kind, named by `file_kind` in messages).
+// Logs and returns std::nullopt on the first bad option.
+template <typename Edit, typename IsOption, typename Parse>
+std::optional<std::vector<Edit>> ParseEdits(
+    std::span<const std::pair<std::string_view, std::string_view>> options,
+    IsOption is_option, Parse parse, std::string_view file_kind) {
+  std::vector<Edit> edits;
+  for (const auto& [option, value] : options) {
+    if (!is_option(option)) {
+      core::log::Error("blue-pack edit: '{}' does not apply to {}", option,
+                       file_kind);
+      return std::nullopt;
+    }
+    core::Result<Edit, std::string> edit = parse(option, value);
+    if (!edit.ok()) {
+      core::log::Error("blue-pack edit: {}", edit.error());
+      return std::nullopt;
+    }
+    edits.push_back(std::move(edit).value());
+  }
+  return edits;
+}
+
+// Parses and runs "edit": loads the prefab or the scene (by the file's
+// extension), applies the edits in order and writes it back (or to -o)
+// atomically.
+int RunEdit(std::span<const std::string_view> args) {
+  std::string input;
+  std::string output;
+  std::vector<std::pair<std::string_view, std::string_view>> options;
+  for (size_t i = 0; i < args.size(); ++i) {
+    const std::string_view arg = args[i];
+    if (!arg.starts_with("-")) {
+      if (!input.empty()) {
+        core::log::Error("blue-pack edit: unexpected argument '{}'", arg);
+        return kExitUsage;
+      }
+      input = arg;
+      continue;
+    }
+    if (i + 1 >= args.size()) {
+      core::log::Error("blue-pack edit: missing value after '{}'", arg);
+      return kExitUsage;
+    }
+    const std::string_view value = args[++i];
+    if (arg == "-o") {
+      output = value;
+    } else {
+      options.emplace_back(arg, value);
+    }
+  }
+  if (input.empty() || options.empty()) {
+    core::log::Error(
+        "blue-pack edit: need <file.pbo|file.mscn> and at least one edit");
+    return kExitUsage;
+  }
+  if (output.empty()) {
+    output = input;
+  }
+  const bool is_scene = input.ends_with(".mscn");
+  core::Result<void, std::string> edited =
+      core::Result<void, std::string>::Ok();
+  size_t count = 0;
+  if (is_scene) {
+    std::optional<std::vector<cook::SceneEdit>> edits =
+        ParseEdits<cook::SceneEdit>(options, cook::IsSceneEditOption,
+                                    cook::ParseSceneEdit, "a scene");
+    if (!edits) {
+      return kExitUsage;
+    }
+    count = edits->size();
+    edited = cook::EditSceneFile(input, output, *edits);
+  } else {
+    std::optional<std::vector<cook::PrefabEdit>> edits =
+        ParseEdits<cook::PrefabEdit>(options, cook::IsPrefabEditOption,
+                                     cook::ParsePrefabEdit, "a prefab");
+    if (!edits) {
+      return kExitUsage;
+    }
+    count = edits->size();
+    edited = cook::EditPrefabFile(input, output, *edits);
+  }
+  if (!edited.ok()) {
+    core::log::Error("blue-pack edit: {}", edited.error());
+    return kExitCook;
+  }
+  Print("wrote {} ({} edit{})\n", output, count, count == 1 ? "" : "s");
+  return kExitOk;
+}
+
+// Parses and runs "split": cuts a part out of a prefab into a new file.
+int RunSplit(std::span<const std::string_view> args) {
+  std::string input;
+  std::string output;
+  cook::SplitOptions options;
+  std::vector<cook::PrefabEdit> edits;
+  for (size_t i = 0; i < args.size(); ++i) {
+    const std::string_view arg = args[i];
+    if (!arg.starts_with("-")) {
+      if (!input.empty()) {
+        core::log::Error("blue-pack split: unexpected argument '{}'", arg);
+        return kExitUsage;
+      }
+      input = arg;
+      continue;
+    }
+    if (cook::ApplySplitFlag(options, arg)) {
+      continue;
+    }
+    if (i + 1 >= args.size()) {
+      core::log::Error("blue-pack split: missing value after '{}'", arg);
+      return kExitUsage;
+    }
+    const std::string_view value = args[++i];
+    if (arg == "-o") {
+      output = value;
+    } else if (cook::IsSplitOption(arg)) {
+      if (auto parsed = cook::ParseSplitOption(options, arg, value);
+          !parsed.ok()) {
+        core::log::Error("blue-pack split: {}", parsed.error());
+        return kExitUsage;
+      }
+    } else if (cook::IsPrefabEditOption(arg)) {
+      core::Result<cook::PrefabEdit, std::string> edit =
+          cook::ParsePrefabEdit(arg, value);
+      if (!edit.ok()) {
+        core::log::Error("blue-pack split: {}", edit.error());
+        return kExitUsage;
+      }
+      edits.push_back(std::move(edit).value());
+    } else {
+      core::log::Error("blue-pack split: unknown option '{}'", arg);
+      return kExitUsage;
+    }
+  }
+  if (input.empty() || output.empty() || options.nodes.empty()) {
+    core::log::Error(
+        "blue-pack split: need <in.pbo>, -o <out.pbo> and --nodes A,B,...");
+    return kExitUsage;
+  }
+  if (auto split = cook::SplitPrefabFile(input, output, options, edits);
+      !split.ok()) {
+    core::log::Error("blue-pack split: {}", split.error());
+    return kExitCook;
+  }
+  Print("wrote {}\n", output);
   return kExitOk;
 }
 
@@ -700,12 +1006,19 @@ int Run(std::span<const std::string_view> args) {
     return RunImport(*command);
   }
   if (args[0] == "info") {
-    if (args.size() != 2) {
+    const std::optional<InfoOptions> options = ParseInfo(args.subspan(1));
+    if (!options) {
       std::fputs(kUsage.data(), stderr);
       return kExitUsage;
     }
-    const std::string path(args[1]);
-    return path.ends_with(".mscn") ? RunSceneInfo(path) : RunInfo(path);
+    return options->path.ends_with(".mscn") ? RunSceneInfo(options->path)
+                                            : RunInfo(*options);
+  }
+  if (args[0] == "edit") {
+    return RunEdit(args.subspan(1));
+  }
+  if (args[0] == "split") {
+    return RunSplit(args.subspan(1));
   }
   if (args[0] == "samples") {
     return RunSamples(args.subspan(1));

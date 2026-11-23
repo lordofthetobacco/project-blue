@@ -12,7 +12,7 @@
 
 #include "core/extent.h"
 #include "render/metal_context.h"
-#include "render/passes/frame_context.h"
+#include "render/recording.h"
 #include "render/pipeline.h"
 #include "render/shader_programs.h"
 
@@ -48,6 +48,11 @@ struct FullscreenTarget {
   // Load keeps what is there (e.g. for additive blending); DontCare when
   // the triangle overwrites every pixel anyway.
   MTLLoadAction load_action = MTLLoadActionDontCare;
+  // The pixels to draw (the scissor), inside `extent`; pixels outside keep
+  // their contents (use MTLLoadActionLoad with it). An empty rectangle
+  // draws the whole target. The viewport, hence varyings.uv, always spans
+  // the whole target.
+  MTLScissorRect area{};
 };
 
 // A pass that runs one fragment shader over a whole target: tonemapping,
@@ -55,8 +60,9 @@ struct FullscreenTarget {
 // `programs`) and the input sets. The fragment shader sees varyings.uv in
 // [0, 1] with (0, 0) at the top-left pixel corner.
 //
-// Each Record() opens and ends its own render encoder. Borrows `context`
-// and `programs`, which must outlive it. Neither copyable nor movable. Not
+// Each Record() opens and ends its own render encoder through
+// render/encoders.h, so its inputs may be what the encoder before it
+// rendered. Borrows `context` and `programs`, which must outlive it. Neither copyable nor movable. Not
 // thread-safe.
 class FullscreenPass {
  public:
@@ -68,24 +74,20 @@ class FullscreenPass {
 
   // Points input set `set_index` at `textures` (input_count of them),
   // sampled with `sampler`. The pass keeps strong references until the set
-  // is pointed elsewhere; Metal keeps what a recorded frame uses alive, so
-  // this may be called at any time between frames.
+  // is pointed elsewhere, but that does not keep the textures resident: the
+  // owner of the textures keeps them alive while a frame in flight uses
+  // them (render targets are replaced only when the GPU is idle).
   void SetInputs(uint32_t set_index,
                  std::span<const id<MTLTexture> __strong> textures,
                  id<MTLSamplerState> sampler);
 
-  // Records rendering into `target` with input set `set_index` on the
-  // frame's command buffer (through render/encoders.h, so the encoder is
-  // timed). `constants` must be empty or exactly pass_constant_size bytes.
-  void Record(const FrameContext& ctx, const FullscreenTarget& target,
+  // Records rendering into `target` with input set `set_index` on `rec`: a
+  // frame's (FrameContext::rec) or the one of
+  // MetalContext::SubmitImmediate(). `constants` must be empty or exactly
+  // pass_constant_size bytes.
+  void Record(const Recording& rec, const FullscreenTarget& target,
               uint32_t set_index = 0,
               std::span<const std::byte> constants = {}) const;
-
-  // As Record(), on any command buffer: for work outside of a frame (e.g.
-  // inside MetalContext::SubmitImmediate()), which is not timed.
-  void RecordTo(id<MTLCommandBuffer> cmd, const FullscreenTarget& target,
-                uint32_t set_index = 0,
-                std::span<const std::byte> constants = {}) const;
 
  private:
   struct InputSet {
@@ -94,11 +96,8 @@ class FullscreenPass {
   };
 
   // Returns the render pass that renders into `target`.
-  [[nodiscard]] static MTLRenderPassDescriptor* DescribeTarget(
+  [[nodiscard]] static MTL4RenderPassDescriptor* DescribeTarget(
       const FullscreenTarget& target);
-  // Draws the triangle on `encoder` and ends it.
-  void Draw(id<MTLRenderCommandEncoder> encoder, const FullscreenTarget& target,
-            uint32_t set_index, std::span<const std::byte> constants) const;
 
   FullscreenPassDesc desc_;
   std::vector<InputSet> sets_;

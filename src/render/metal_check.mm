@@ -20,13 +20,4 @@ void FatalIfNil(id object, NSError* error, std::string_view what) {
   }
 }
 
-void CheckCommandBuffer(id<MTLCommandBuffer> command_buffer) {
-  if (command_buffer.status == MTLCommandBufferStatusError) {
-    core::log::Fatal(
-        "Metal: command buffer '{}' failed: {}",
-        Utf8Or(command_buffer.label, "unlabelled"),
-        Utf8Or(command_buffer.error.localizedDescription, "unknown error"));
-  }
-}
-
 }  // namespace blue::render

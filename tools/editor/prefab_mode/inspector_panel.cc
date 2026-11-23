@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "animation/transform.h"
 #include "asset/mesh_data.h"
@@ -86,6 +87,7 @@ void PrefabInspectorPanel::Draw(EditorContext& context) {
                 summary.clip_count, summary.socket_count, summary.light_count,
                 summary.child_count);
     BoundsText(document->state().bounds);
+    DrawTags(context, *document);
     return;
   }
   ImGui::SeparatorText(ItemLabel(document->state(), *primary).c_str());
@@ -222,6 +224,49 @@ void PrefabInspectorPanel::DrawMesh(EditorContext& context,
       break;  // `mesh` may be stale now.
     }
   }
+}
+
+void PrefabInspectorPanel::DrawTags(EditorContext& context,
+                                    PrefabDocument& document) {
+  ImGui::SeparatorText("Tags");
+  ImGui::TextDisabled("key = value; e.g. weapon = glock17 makes a weapon.");
+  // Copied: an edit replaces the document's state mid-loop.
+  const std::vector<prefab::Tag> tags = document.state().tags;
+  for (const prefab::Tag& tag : tags) {
+    ImGui::PushID(tag.key.c_str());
+    std::string edited;
+    if (InputTextCommit(shared_, tag.key.c_str(), tag.value, edited)) {
+      TryEdit(context, document, "Set tag", ChangeKind::kParameters,
+              [&](prefab::Prefab& prefab) {
+                return SetPrefabTag(prefab, tag.key, edited);
+              });
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Remove")) {
+      TryEdit(context, document, "Remove tag", ChangeKind::kParameters,
+              [&](prefab::Prefab& prefab) {
+                return RemovePrefabTag(prefab, tag.key);
+              });
+    }
+    ImGui::PopID();
+  }
+  ImGui::PushID("new tag");
+  (void)InputString("Key", new_tag_key_);
+  (void)InputString("Value", new_tag_value_);
+  if (ImGui::Button("Add tag") && !new_tag_key_.empty()) {
+    if (TryEdit(context, document, "Add tag", ChangeKind::kParameters,
+                [&](prefab::Prefab& prefab) -> std::optional<std::string> {
+                  if (prefab::FindTag(prefab, new_tag_key_)) {
+                    return std::format("tag '{}' exists; edit its value",
+                                       new_tag_key_);
+                  }
+                  return SetPrefabTag(prefab, new_tag_key_, new_tag_value_);
+                })) {
+      new_tag_key_.clear();
+      new_tag_value_.clear();
+    }
+  }
+  ImGui::PopID();
 }
 
 void PrefabInspectorPanel::DrawSocket(PrefabDocument& document, int socket) {

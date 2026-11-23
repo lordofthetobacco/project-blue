@@ -12,6 +12,7 @@
 #include "render/material_system.h"
 #include "render/mesh.h"
 #include "render/pipeline.h"
+#include "render/recording.h"
 #include "render/scene_view.h"
 
 namespace blue::render {
@@ -35,10 +36,13 @@ class DrawList {
   // Rebuilds the list from the items of `view` whose `world_bounds` (parallel
   // to view.draws) intersect `frustum`; counts the others in
   // stats.culled_draws. Items whose mesh is unknown or released are
-  // skipped; unknown or released materials draw as kDefaultMaterial.
+  // skipped; unknown or released materials draw as kDefaultMaterial. For a
+  // scope's picture (`scope_view`) the items hidden_in_scope are skipped
+  // too (not counted as culled).
   void Build(const SceneView& view, std::span<const camera::Aabb> world_bounds,
              const camera::Frustum& frustum, const MaterialSystem& materials,
-             const std::vector<Mesh>& meshes, RenderStats& stats);
+             const std::vector<Mesh>& meshes, RenderStats& stats,
+             bool scope_view = false);
 
   [[nodiscard]] std::span<const DrawEntry> entries() const { return entries_; }
 
@@ -55,14 +59,16 @@ struct DrawListPipelines {
   std::array<bool, kMaterialVariantCount> bind_material{};
 };
 
-// Records `entries` (sorted by DrawList) on `encoder` with the pipeline of
-// each entry's variant: binds the pipeline, the material where requested,
-// the mesh's vertex buffer, and sets the item's model matrix (DrawConstants,
-// 64 bytes) as vertex bytes at kBufferDraw before each item's first draw.
+// Records `entries` (sorted by DrawList) on `encoder`, opened on `rec`, with
+// the pipeline of each entry's variant: binds the pipeline, the material
+// where requested, the mesh's vertex buffer, and the item's model matrix
+// (DrawConstants, 64 bytes) as constants at kBufferDraw before each item's
+// first draw.
 // The caller has set the frame's globals on `encoder`
 // (FrameGlobals::Bind()). Adds to `stats` (draw calls and triangles) when
 // non-null.
-void RecordDrawList(id<MTLRenderCommandEncoder> encoder,
+void RecordDrawList(const Recording& rec,
+                    id<MTL4RenderCommandEncoder> encoder,
                     std::span<const DrawEntry> entries,
                     const DrawListPipelines& pipelines, const SceneView& view,
                     const MaterialSystem& materials,

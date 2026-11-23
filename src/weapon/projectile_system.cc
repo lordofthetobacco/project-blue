@@ -20,6 +20,14 @@ glm::vec3 Acceleration(glm::vec3 gravity, float drag, glm::vec3 velocity) {
 
 }  // namespace
 
+BallisticStep IntegrateBallisticStep(glm::vec3 velocity, glm::vec3 gravity,
+                                     float drag, float h) {
+  const glm::vec3 mid_velocity =
+      velocity + 0.5f * h * Acceleration(gravity, drag, velocity);
+  return {.displacement = mid_velocity * h,
+          .velocity = velocity + h * Acceleration(gravity, drag, mid_velocity)};
+}
+
 ProjectileSystem::ProjectileSystem(const ProjectileTuning& tuning)
     : tuning_(tuning) {
   tuning_.capacity = std::max(tuning_.capacity, 0);
@@ -91,13 +99,11 @@ bool ProjectileSystem::Advance(physics::PhysicsWorld& world, glm::vec3 gravity,
         kMaxSubsteps);
     const float h = seconds / static_cast<float>(substeps);
     for (int step = 0; step < substeps; ++step) {
-      // Midpoint method: exact for constant acceleration (no drag).
       const glm::vec3 velocity = bullet.velocity;
-      const glm::vec3 mid_velocity =
-          velocity + 0.5f * h * Acceleration(gravity, bullet.drag, velocity);
-      const glm::vec3 next_velocity =
-          velocity + h * Acceleration(gravity, bullet.drag, mid_velocity);
-      const glm::vec3 segment = mid_velocity * h;
+      const BallisticStep next =
+          IntegrateBallisticStep(velocity, gravity, bullet.drag, h);
+      const glm::vec3 next_velocity = next.velocity;
+      const glm::vec3 segment = next.displacement;
       const float length = glm::length(segment);
       const std::optional<physics::RayHit> hit =
           world.CastRay(bullet.position, segment, length);

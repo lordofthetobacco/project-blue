@@ -79,6 +79,12 @@ void ApplyLine(EditorSettings& settings, std::string_view line) {
       settings.mcp.port = std::clamp(*parsed, kMinMcpPort, kMaxMcpPort);
       return;
     }
+  } else if (key == "history.budget_mb") {
+    if (const std::optional<int> parsed = ParseInt(value)) {
+      settings.history_budget_mb =
+          std::clamp(*parsed, kMinHistoryBudgetMb, kMaxHistoryBudgetMb);
+      return;
+    }
   } else {
     core::log::Warn("editor settings: unknown key '{}'", key);
     return;
@@ -121,8 +127,11 @@ std::string FormatEditorSettings(const EditorSettings& settings) {
       "\n"
       "# MCP server (Edit > Settings...): http://127.0.0.1:<port>/mcp\n"
       "mcp.enabled = {}\n"
-      "mcp.port = {}\n",
-      settings.mcp.enabled, settings.mcp.port);
+      "mcp.port = {}\n"
+      "\n"
+      "# Texture/mesh memory the prefab undo history may hold, in MiB\n"
+      "history.budget_mb = {}\n",
+      settings.mcp.enabled, settings.mcp.port, settings.history_budget_mb);
 }
 
 EditorSettings LoadEditorSettings(const std::string& path) {

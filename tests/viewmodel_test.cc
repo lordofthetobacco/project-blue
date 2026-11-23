@@ -523,5 +523,154 @@ TEST_CASE("Reset clears blends, springs and the pending look kick") {
         1.0e-6f);
 }
 
+ViewmodelInput Inspecting(camera::LookAngles look = {},
+                          glm::vec3 eye = glm::vec3(0.0f)) {
+  ViewmodelInput input = Still(false, look, eye);
+  input.inspecting = true;
+  return input;
+}
+
+// The unit world direction of the sight axis as posed.
+glm::vec3 PosedSightAxis(const Viewmodel& viewmodel) {
+  const WeaponGeometry& geometry = viewmodel.geometry();
+  return glm::normalize(
+      ToWorld(viewmodel, geometry.sight_eye_point + geometry.sight_axis) -
+      ToWorld(viewmodel, geometry.sight_eye_point));
+}
+
+TEST_CASE("inspecting shows the weapon side-on ahead of and left of the eye") {
+  const WeaponGeometry& pistol = Glock17Geometry();
+  const camera::LookAngles look{0.7f, -0.2f};
+  const glm::vec3 eye(2.0f, 1.6f, -3.0f);
+  const glm::vec3 center(0.0f, 0.5f, -1.0f);
+  const float radius = 2.0f;
+  Viewmodel viewmodel(pistol, Glock17ViewmodelTuning());
+  viewmodel.SetInspectBounds(center, radius);
+  Settle(viewmodel, Inspecting(look, eye));
+  REQUIRE(viewmodel.inspect_fraction() == 1.0f);
+
+  const ViewmodelTuning& tuning = viewmodel.tuning();
+  const float distance =
+      std::max(tuning.inspect_min_distance,
+               tuning.inspect_distance_per_radius * radius * pistol.scale);
+  const EyeFrame frame = FrameOf(look, 0.0f);
+  const glm::vec3 posed = ToWorld(viewmodel, center) - eye;
+  CHECK(glm::dot(posed, frame.forward) == doctest::Approx(distance));
+  CHECK(glm::dot(posed, frame.right) ==
+        doctest::Approx(tuning.inspect_offset.x * distance));
+  CHECK(glm::dot(posed, frame.up) ==
+        doctest::Approx(tuning.inspect_offset.y * distance).epsilon(1.0e-4));
+  CHECK(tuning.inspect_offset.x < 0.0f);  // left of the middle
+  // Side-on: the muzzle points right, the weapon is upright.
+  CHECK(glm::dot(PosedSightAxis(viewmodel), frame.right) > 1.0f - 1.0e-5f);
+  CHECK(glm::dot(viewmodel.lens_up(), frame.up) > 1.0f - 1.0e-5f);
+}
+
+TEST_CASE("the whole weapon fits: a bigger weapon is shown further away") {
+  Viewmodel small(Glock17Geometry());
+  Viewmodel big(Glock17Geometry());
+  small.SetInspectBounds(glm::vec3(0.0f), 0.01f);
+  big.SetInspectBounds(glm::vec3(0.0f), 0.3f / Glock17Geometry().scale);
+  Settle(small, Inspecting());
+  Settle(big, Inspecting());
+  const glm::vec3 forward = FrameOf({}, 0.0f).forward;
+  const auto distance = [&](const Viewmodel& viewmodel) {
+    return glm::dot(ToWorld(viewmodel, glm::vec3(0.0f)), forward);
+  };
+  CHECK(distance(small) ==
+        doctest::Approx(small.tuning().inspect_min_distance));
+  CHECK(distance(big) ==
+        doctest::Approx(0.3f * big.tuning().inspect_distance_per_radius));
+}
+
+TEST_CASE("the inspect pose has no sway, bob or recoil") {
+  Viewmodel calm(M16Geometry());
+  Viewmodel busy(M16Geometry());
+  Settle(calm, Inspecting());
+  ViewmodelInput shaking = Inspecting();
+  shaking.velocity = glm::vec3(4.0f, 0.0f, 0.0f);
+  shaking.look_delta = glm::vec2(0.02f, 0.01f);
+  shaking.shots = 1;
+  Settle(busy, shaking);
+  CHECK(glm::length(calm.muzzle_position() - busy.muzzle_position()) < 1.0e-5f);
+  CHECK(glm::length(PosedSightAxis(calm) - PosedSightAxis(busy)) < 1.0e-5f);
+}
+
+TEST_CASE("the inspect blend is smooth, monotonic and takes inspect_time") {
+  Viewmodel viewmodel(M16Geometry());
+  Settle(viewmodel, Still(false));
+  float previous = viewmodel.inspect_fraction();
+  glm::vec3 muzzle = viewmodel.muzzle_position();
+  const ViewmodelInput input = Inspecting();
+  const int frames =
+      static_cast<int>(viewmodel.tuning().inspect_time / input.dt + 0.5f);
+  for (int i = 0; i < frames; ++i) {
+    viewmodel.Update(input);
+    CHECK(viewmodel.inspect_fraction() > previous);
+    // No jumps: the rifle's muzzle swings a quarter turn, smoothly.
+    CHECK(glm::length(viewmodel.muzzle_position() - muzzle) < 0.12f);
+    previous = viewmodel.inspect_fraction();
+    muzzle = viewmodel.muzzle_position();
+  }
+  CHECK(viewmodel.inspect_state().blend > 0.94f);
+  CHECK(viewmodel.inspect_state().blend < 1.0f);
+}
+
+TEST_CASE("dragging turns the inspected weapon; pitch is clamped") {
+  Viewmodel viewmodel(M16Geometry());
+  Settle(viewmodel, Inspecting());
+  ViewmodelInput turn = Inspecting();
+  turn.inspect_turn = glm::vec2(0.3f, 0.0f);
+  viewmodel.Update(turn);
+  // + yaw brings the near side right: the muzzle swings away from the eye.
+  const EyeFrame frame = FrameOf({}, 0.0f);
+  const glm::vec3 axis = PosedSightAxis(viewmodel);
+  CHECK(glm::dot(axis, frame.right) ==
+        doctest::Approx(std::cos(0.3f)).epsilon(1.0e-4));
+  CHECK(glm::dot(axis, frame.forward) ==
+        doctest::Approx(std::sin(0.3f)).epsilon(1.0e-4));
+
+  turn.inspect_turn = glm::vec2(0.0f, 10.0f);
+  viewmodel.Update(turn);
+  CHECK(viewmodel.inspect_state().angles.y ==
+        viewmodel.tuning().inspect_max_pitch);
+  turn.inspect_turn = glm::vec2(0.0f, -20.0f);
+  viewmodel.Update(turn);
+  CHECK(viewmodel.inspect_state().angles.y ==
+        -viewmodel.tuning().inspect_max_pitch);
+}
+
+TEST_CASE("closing the inspect screen returns to the hand pose, turn reset") {
+  Viewmodel viewmodel(M16Geometry());
+  ViewmodelInput turn = Inspecting();
+  turn.inspect_turn = glm::vec2(0.01f, 0.005f);
+  Settle(viewmodel, turn, 1.0f);
+  REQUIRE(viewmodel.inspect_state().angles != glm::vec2(0.0f));
+  Settle(viewmodel, Still(false));
+  CHECK(viewmodel.inspect_fraction() == 0.0f);
+  CHECK(viewmodel.inspect_state().angles == glm::vec2(0.0f));
+  Viewmodel fresh(M16Geometry());
+  Settle(fresh, Still(false));
+  CHECK(glm::length(viewmodel.muzzle_position() - fresh.muzzle_position()) <
+        1.0e-5f);
+}
+
+TEST_CASE(
+    "the inspect state carries over to another viewmodel; Reset ends it") {
+  Viewmodel before(M16Geometry());
+  ViewmodelInput turn = Inspecting();
+  turn.inspect_turn = glm::vec2(0.02f, 0.01f);
+  Settle(before, turn, 1.0f);
+  Viewmodel after(M16Geometry());
+  after.set_inspect_state(before.inspect_state());
+  CHECK(after.inspect_state() == before.inspect_state());
+  after.Update(Inspecting());
+  before.Update(Inspecting());
+  CHECK(glm::length(after.muzzle_position() - before.muzzle_position()) <
+        1.0e-5f);
+  after.Reset();
+  CHECK(after.inspect_state() == InspectState{});
+}
+
 }  // namespace
 }  // namespace blue::weapon

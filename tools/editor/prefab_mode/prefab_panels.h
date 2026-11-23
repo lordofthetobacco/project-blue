@@ -79,8 +79,13 @@ class PrefabInspectorPanel final : public Panel {
   void DrawChild(EditorContext& context, PrefabDocument& document, int child);
   void DrawTexture(EditorContext& context, PrefabDocument& document,
                    int texture);
+  // The prefab's tags: edit a value, remove a tag, add one.
+  void DrawTags(EditorContext& context, PrefabDocument& document);
 
   PrefabModeShared& shared_;
+  // The tag being added, typed in the Tags section.
+  std::string new_tag_key_;
+  std::string new_tag_value_;
 };
 
 // "Materials": the material list (add, duplicate, delete) with the editor

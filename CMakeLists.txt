@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
-# Set before project(). Metal 3 with MSL 3.2 (MTLMathMode, MTLLanguageVersion3_2) needs
-# macOS 15; the floating-point std::from_chars the engine parses numbers with needs 26.
+# Set before project(). The Metal 4 core API (MTL4CommandQueue, MTL4Compiler, ...) the
+# renderer is written against needs macOS 26, as does the floating-point std::from_chars
+# the engine parses numbers with.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
 
 project(project-blue
@@ -39,7 +40,10 @@ include(SampleAssets)
 # and every consumer needs both.
 add_library(blue_core STATIC
     src/core/path.cc
+    src/core/text.cc
     src/platform/file_system.cc
+    src/platform/mapped_file.cc
+    src/platform/process_memory.cc
 )
 
 target_include_directories(blue_core PUBLIC src)
@@ -208,7 +212,11 @@ add_library(blue_cook STATIC
     src/cook/clip_tools.cc
     src/cook/collision_cook.cc
     src/cook/cook_error.cc
+    src/cook/generated_file.cc
     src/cook/model_cook.cc
+    src/cook/prefab_edits.cc
+    src/cook/prefab_split.cc
+    src/cook/scene_edits.cc
     src/cook/texture_cook.cc
 )
 
@@ -217,13 +225,14 @@ target_include_directories(blue_cook PUBLIC src)
 blue_target_defaults(blue_cook)
 
 target_link_libraries(blue_cook
-    PUBLIC blue_prefab blue_asset blue_physics blue_animation blue_material blue_core glm::glm
+    PUBLIC blue_prefab blue_scene blue_asset blue_physics blue_animation blue_material blue_core glm::glm
     PRIVATE bc7enc_rdo meshoptimizer
 )
 
 # Headless cooker: imports models into .pbo prefabs and prints their contents.
 add_executable(blue-pack
     tools/blue-pack/main.cc
+    tools/blue-pack/sample_parts.cc
     tools/blue-pack/samples.cc
 )
 
@@ -293,17 +302,33 @@ blue_target_defaults(blue_player)
 target_link_libraries(blue_player PUBLIC blue_physics blue_input blue_camera glm::glm)
 
 # Weapon gameplay: loadout switching, firing mechanism, fire-animation driver, ballistic bullets swept against the physics
-# world, model calibration and the first-person viewmodel pose. No rendering.
+# world, model calibration, the first-person viewmodel pose and its motion history (for the
+# weapon motion blur), throwing weapons and the dropped ones' bodies. No rendering.
 add_library(blue_weapon STATIC
+    src/weapon/dispersion.cc
+    src/weapon/dropped_weapons.cc
     src/weapon/firearm.cc
     src/weapon/loadout.cc
+    src/weapon/motion_history.cc
+    src/weapon/parts/part_catalog.cc
+    src/weapon/parts/part_catalog_file.cc
+    src/weapon/parts/weapon_assembly.cc
+    src/weapon/parts/weapon_build.cc
+    src/weapon/parts/weapon_stats.cc
+    src/weapon/parts/weapon_tuning.cc
     src/weapon/projectile_system.cc
+    src/weapon/scope.cc
+    src/weapon/scope_optics.cc
+    src/weapon/scope_view.cc
     src/weapon/target_log.cc
     src/weapon/viewmodel.cc
     src/weapon/weapon_animator.cc
+    src/weapon/weapon_def.cc
     src/weapon/weapon_geometry.cc
     src/weapon/weapon_prefab.cc
     src/weapon/weapon_specs.cc
+    src/weapon/weapon_throw.cc
+    src/weapon/zeroing.cc
 )
 
 target_include_directories(blue_weapon PUBLIC src)
@@ -311,6 +336,18 @@ target_include_directories(blue_weapon PUBLIC src)
 blue_target_defaults(blue_weapon)
 
 target_link_libraries(blue_weapon PUBLIC blue_physics blue_camera blue_animation blue_prefab glm::glm)
+
+# Interaction focus: which interactable the player is looking at (reach, aim radius,
+# hysteresis). Pure logic; line of sight is the game's job.
+add_library(blue_interact STATIC
+    src/interact/interaction_focus.cc
+)
+
+target_include_directories(blue_interact PUBLIC src)
+
+blue_target_defaults(blue_interact)
+
+target_link_libraries(blue_interact PUBLIC glm::glm)
 
 # Copies the DLLs `target` loads at run time next to it (Windows only; elsewhere they are
 # static or found by the loader).
@@ -381,24 +418,32 @@ add_library(blue_render STATIC
     src/render/mesh.mm
     src/render/metal_check.mm
     src/render/metal_context.mm
+    src/render/motion_blur_math.cc
     src/render/pipeline.mm
+    src/render/recording.mm
     src/render/render_targets.mm
     src/render/renderer.mm
     src/render/samplers.mm
     src/render/shader_programs.mm
+    src/render/staging_upload.mm
+    src/render/temporal_math.cc
     src/render/swapchain.mm
     src/render/texture_cache.mm
     src/render/texture_types.cc
     src/render/passes/bloom_pass.mm
     src/render/passes/depth_prepass.mm
     src/render/passes/mesh_pass.mm
+    src/render/passes/motion_vector_pass.mm
+    src/render/passes/motion_blur_pass.mm
     src/render/passes/overlay_pass.mm
     src/render/passes/present_pass.mm
     src/render/passes/reticle_pass.mm
     src/render/passes/scene_pass.mm
+    src/render/passes/scope_lens_pass.mm
     src/render/passes/shadow_pass.mm
     src/render/passes/skybox_pass.mm
     src/render/passes/ssao_pass.mm
+    src/render/passes/temporal_scaler_pass.mm
     src/render/passes/tonemap_pass.mm
     src/render/passes/ui_pass.mm
 )
@@ -424,6 +469,7 @@ target_link_libraries(blue_render PUBLIC
     glm::glm
     imgui
     "-framework Metal"
+    "-framework MetalFX"
     "-framework QuartzCore"
     "-framework CoreGraphics"
     "-framework Foundation"
@@ -444,6 +490,7 @@ target_link_libraries(blue_ui PUBLIC blue_render imgui)
 # upload per .pbo), scenes resolved into posed prefabs with overrides, lights,
 # draw items, picking, and physics bodies from cooked shapes.
 add_library(blue_world STATIC
+    src/world/draw_history.cc
     src/world/gpu_backend.cc
     src/world/prefab_cache.cc
     src/world/prefab_pose.cc
@@ -460,10 +507,29 @@ target_link_libraries(blue_world
            blue_material blue_mesh blue_core glm::glm
 )
 
+# Game-side glue between the world, the weapons and the interaction focus (scene
+# weapon pick-ups, weapons built from the part catalogue). No rendering of its
+# own; unit tested.
+add_library(blue_game STATIC
+    src/game/inspect_screen_rules.cc
+    src/game/part_stash.cc
+    src/game/scene_pickups.cc
+    src/game/weapon_builds.cc
+    src/game/weapon_modding.cc
+)
+
+target_include_directories(blue_game PUBLIC src)
+
+blue_target_defaults(blue_game)
+
+target_link_libraries(blue_game PUBLIC blue_world blue_weapon blue_interact blue_input
+    glm::glm)
+
 add_executable(project-blue
     src/main.cc
     src/app.cc
     src/ui/perf_overlay.cc
+    src/ui/weapon_inspect_screen.cc
 )
 
 set_target_properties(project-blue PROPERTIES
@@ -486,7 +552,9 @@ target_link_libraries(project-blue PRIVATE
     blue_camera
     blue_input_mapper
     blue_player
+    blue_interact
     blue_weapon
+    blue_game
     blue_world
     blue_prefab
     blue_shader

@@ -1,9 +1,10 @@
 #include "render/passes/ui_pass.h"
 
-#include <imgui_impl_metal.h>
+#include <imgui_impl_metal4.h>
 
 #include "core/log.h"
 #include "render/encoders.h"
+#include "render/frame_config.h"
 
 namespace blue::render {
 
@@ -34,8 +35,8 @@ void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
     return;  // Nothing to draw, nothing to clear.
   }
 
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
   MTLRenderPassColorAttachmentDescriptor* color =
       descriptor.colorAttachments[0];
   color.texture = target;
@@ -43,22 +44,27 @@ void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
   color.storeAction = MTLStoreActionStore;
   color.clearColor = clear_color;
 
-  id<MTLRenderCommandEncoder> encoder = BeginRenderPass(ctx, descriptor, "ui");
+  id<MTL4RenderCommandEncoder> encoder =
+      BeginRenderPass(ctx.rec, descriptor, "ui");
   if (ui != nullptr) {
     // The backend's NewFrame does not take part in building the UI (the UI
     // layer already ran ImGui::NewFrame() and ImGui::Render()): it records
     // the attachment formats of `descriptor`, which select the pipeline of
     // RenderDrawData, and creates the backend's device objects on first use.
-    // RenderDrawData uploads the font atlas (RendererHasTextures).
-    ImGui_ImplMetal_NewFrame(descriptor);
-    ImGui_ImplMetal_RenderDrawData(ui, ctx.cmd, encoder);
+    // RenderDrawData uploads the font atlas (RendererHasTextures) into this
+    // frame in flight's buffers, sets the backend's own argument table on
+    // `encoder` (the renderer's is set again by the next BeginRenderPass())
+    // and keeps what it draws resident in its own set on the queue.
+    ImGui_ImplMetal4_NewFrame(descriptor, static_cast<int>(ctx.frame_index));
+    ImGui_ImplMetal4_RenderDrawData(ui, ctx.rec.cmd, encoder);
   }
   [encoder endEncoding];
 }
 
 void UiRenderer::Init(const MetalContext& context) {
-  if (!ImGui_ImplMetal_Init(context.device())) {
-    core::log::Fatal("ImGui Metal backend initialization failed");
+  if (!ImGui_ImplMetal4_Init(context.device(), context.queue(),
+                             static_cast<int>(kFramesInFlight))) {
+    core::log::Fatal("ImGui Metal 4 backend initialization failed");
   }
   initialized_ = true;
 }
@@ -67,7 +73,7 @@ void UiRenderer::Shutdown() {
   if (!initialized_) {
     return;
   }
-  ImGui_ImplMetal_Shutdown();
+  ImGui_ImplMetal4_Shutdown();
   initialized_ = false;
 }
 

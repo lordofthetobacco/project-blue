@@ -33,11 +33,20 @@ void InputMapper::set_mouse_mode(MouseMode mode) {
   if (mode == mouse_mode_) {
     return;
   }
+  if (mouse_mode_ == MouseMode::kCursor) {
+    buttons_down_.reset();
+  }
   mouse_mode_ = mode;
-  if (mode == MouseMode::kDrag) {
+  if (mode != MouseMode::kCapture) {
     mouse_captured_ = false;
   }
   motion_ = glm::vec2(0.0f);
+}
+
+void InputMapper::RequestCapture() {
+  if (mouse_mode_ == MouseMode::kCapture && focused_ && !minimized_) {
+    CaptureMouse();
+  }
 }
 
 void InputMapper::HandleEvent(const SDL_Event& event) {
@@ -152,7 +161,9 @@ void InputMapper::HandleMouseButton(const SDL_Event& event) {
     return;
   }
   buttons_down_[static_cast<size_t>(button)] = down;
-  ApplyBinding(input::Binding::MouseButton(button));
+  if (mouse_mode_ != MouseMode::kCursor) {
+    ApplyBinding(input::Binding::MouseButton(button));
+  }
 }
 
 void InputMapper::HandleMouseMotion(const SDL_Event& event) {
@@ -191,6 +202,9 @@ bool InputMapper::IsDown(const input::Binding& binding) const {
 }
 
 void InputMapper::Escape() {
+  if (mouse_mode_ == MouseMode::kCursor) {
+    return;
+  }
   if (mouse_mode_ == MouseMode::kCapture && mouse_captured_) {
     mouse_captured_ = false;
   } else {
@@ -227,6 +241,7 @@ bool InputMapper::ButtonDown(int button) const {
 }
 
 bool InputMapper::LookActive() const {
+  // kDrag and kCursor: dragging with the left button.
   return mouse_mode_ == MouseMode::kCapture ? mouse_captured_
                                             : ButtonDown(SDL_BUTTON_LEFT);
 }

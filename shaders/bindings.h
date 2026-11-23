@@ -2,6 +2,8 @@
 #define BLUE_SHADERS_BINDINGS_H_
 
 // The argument-table indices shared by the Metal shaders and the renderer.
+// The renderer binds everything through one MTL4ArgumentTable that both the
+// vertex and the fragment stage see, so an index means the same in both.
 // Included by MSL (`#include "bindings.h"`) and by C++
 // (`#include "shaders/bindings.h"`); keep it to what both languages accept.
 // The enums are unscoped so that MSL attributes can name them:
@@ -19,7 +21,14 @@ enum BufferIndex {
   kBufferDraw = 2,      // Per-draw constants (model matrix), set as bytes.
   kBufferPass = 3,      // Per-pass constants, at most kMaxPassConstantBytes.
   kBufferMaterial = 4,  // MaterialParams, set as bytes per material.
+  // ScopeLensUniforms, one buffer per frame in flight (too big for
+  // kBufferPass).
+  kBufferScopeLens = 5,
 };
+
+// Slots of the renderer's argument table (render::MetalContext): one more
+// than the highest index of each kind below.
+enum { kBufferBindCount = 6, kTextureBindCount = 15, kSamplerBindCount = 5 };
 
 // The size limit of a kBufferPass block.
 enum { kMaxPassConstantBytes = 128 };
@@ -39,6 +48,8 @@ enum TextureIndex {
   kTextureSky = 9,  // texturecube, the skybox.
   // Inputs of a full-screen pass: kTextureInput0 + n, n < kMaxInputTextures.
   kTextureInput0 = 10,
+  // texture2d, a rifle scope's picture (kTextureInput0 + kMaxInputTextures).
+  kTextureScopePicture = 14,
 };
 
 enum { kMaterialTextureCount = 5, kMaxInputTextures = 4 };
@@ -57,6 +68,10 @@ enum FunctionConstantIndex {
   kConstantAlphaMask = 0,         // mesh.frag.metal: alpha-tested material.
   kConstantDoubleSided = 1,       // mesh.frag.metal: flip back-face normals.
   kConstantSelectionVisible = 2,  // selection_mask.frag.metal: depth tested.
+  // line.frag.metal, selection_mask.frag.metal: the depth test is done in
+  // the shader against the scene depth texture (kTextureInput0), for an
+  // overlay whose target is not the size of the scene depth.
+  kConstantSampledDepth = 3,
 };
 
 // Vertex attribute indices of asset::Vertex (and of LineVertex, which has a

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <iterator>
 #include <optional>
@@ -20,6 +21,7 @@
 #include "render/gpu_scope.h"
 #include "render/renderer.h"
 #include "render/scene_view.h"
+#include "render/temporal_math.h"
 #include "ui/imgui_layer.h"
 #include "weapon/target_log.h"
 
@@ -70,6 +72,12 @@ void DrawShadowInfo(const ShadowOverlayInfo& shadows) {
 // Shows the weapon in hand and its ammunition state, e.g.
 // "M16A2: 30+1  SEMI  mags 30/30/30/30".
 void DrawWeaponInfo(const WeaponOverlayInfo& weapon) {
+  if (weapon.hands_empty) {
+    ImGui::TextUnformatted("Empty hands");
+    ImGui::Text("  bullets in flight %d  hits %d", weapon.projectiles,
+                weapon.impacts);
+    return;
+  }
   // Spare magazine counts, formatted into a fixed buffer: no allocation.
   std::array<char, 96> spares{};
   size_t used = 0;
@@ -89,6 +97,21 @@ void DrawWeaponInfo(const WeaponOverlayInfo& weapon) {
               static_cast<int>(weapon.fire_mode.size()),
               weapon.fire_mode.data(), static_cast<int>(spare_text.size()),
               spare_text.data());
+  if (!weapon.not_functional.empty()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "  %.*s",
+                       static_cast<int>(weapon.not_functional.size()),
+                       weapon.not_functional.data());
+  }
+  if (!weapon.stats.empty()) {
+    ImGui::Text("  %.*s", static_cast<int>(weapon.stats.size()),
+                weapon.stats.data());
+  }
+  if (weapon.scope_magnification > 0.0f) {
+    ImGui::Text("  scope %.1fx  zero %.0f m", weapon.scope_magnification,
+                weapon.scope_zero);
+  } else if (weapon.scope_zero > 0.0f) {
+    ImGui::Text("  zero %.0f m", weapon.scope_zero);
+  }
   if (!weapon.switching_to.empty()) {
     ImGui::Text("  switching to %.*s",
                 static_cast<int>(weapon.switching_to.size()),
@@ -150,6 +173,51 @@ void DrawCrosshair() {
   draw_list->AddCircleFilled(center, radius, IM_COL32(255, 255, 255, 230));
 }
 
+// Draws the interaction dot at the center of the screen behind all windows:
+// about 3 px across at 1080p (scaled with the UI), white with a thin dark
+// rim so it reads on any background, at `opacity` in (0, 1].
+void DrawInteractionDot(float opacity) {
+  const ImVec2 size = ImGui::GetIO().DisplaySize;
+  const float scale = ImGui::GetStyle().FontScaleDpi;
+  const float radius = 1.5f * scale;
+  const float rim = std::max(0.75f * scale, 1.0f);
+  const float alpha = std::clamp(opacity, 0.0f, 1.0f);
+  ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+  const ImVec2 center{size.x * 0.5f, size.y * 0.5f};
+  draw_list->AddCircleFilled(
+      center, radius + rim,
+      ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.6f * alpha)));
+  draw_list->AddCircleFilled(
+      center, radius, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, alpha)));
+}
+
+// Emits the temporal upscaling mode and FXAA, which is shown inactive while
+// the temporal scaler does the anti-aliasing.
+void DrawAntiAliasingSettings(render::PostSettings& post) {
+  ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
+  if (ImGui::BeginCombo("Upscaling", render::UpscalingName(post.upscaling))) {
+    for (int32_t i = 0; i < render::kUpscalingModeCount; ++i) {
+      const auto mode = static_cast<render::Upscaling>(i);
+      const bool selected = mode == post.upscaling;
+      if (ImGui::Selectable(render::UpscalingName(mode), selected)) {
+        post.upscaling = mode;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::PopItemWidth();
+  const bool temporal = render::UsesTemporalScaler(post.upscaling);
+  ImGui::BeginDisabled(temporal);
+  // One widget whichever label it shows (the id follows ###).
+  ImGui::Checkbox(temporal ? "FXAA (replaced by temporal AA)###fxaa"
+                           : "FXAA###fxaa",
+                  &post.fxaa_enabled);
+  ImGui::EndDisabled();
+}
+
 // Emits the exposure and post-processing controls (applied live, reset by a
 // scene reload).
 void DrawPostSettings(render::PostSettings& post) {
@@ -158,6 +226,7 @@ void DrawPostSettings(render::PostSettings& post) {
   }
   constexpr float kMaxExposureEv = 8.0f;
   constexpr float kMaxBloomStrength = 0.3f;
+  constexpr float kMaxMotionBlurStrength = 2.0f;
   constexpr const char* kTonemappers[] = {"ACES fitted", "PBR Neutral",
                                           "Clamp"};
   ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
@@ -173,7 +242,12 @@ void DrawPostSettings(render::PostSettings& post) {
                      kMaxBloomStrength, "%.3f");
   ImGui::PopItemWidth();
   ImGui::Checkbox("SSAO", &post.ssao_enabled);
-  ImGui::Checkbox("FXAA", &post.fxaa_enabled);
+  DrawAntiAliasingSettings(post);
+  ImGui::Checkbox("Weapon motion blur", &post.weapon_motion_blur_enabled);
+  ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
+  ImGui::SliderFloat("Blur strength", &post.weapon_motion_blur_strength, 0.0f,
+                     kMaxMotionBlurStrength, "%.2f");
+  ImGui::PopItemWidth();
 }
 
 void DrawSceneInfo(const SceneOverlayInfo& scene_info) {
@@ -251,8 +325,11 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
   if (scene_info.show_crosshair) {
     DrawCrosshair();
   }
+  if (scene_info.interaction_dot_opacity > 0.0f) {
+    DrawInteractionDot(scene_info.interaction_dot_opacity);
+  }
 
-  if (visible_) {
+  if (visible_ && !scene_info.hide_windows) {
     const ImGuiStyle& style = ImGui::GetStyle();
     ImGui::SetNextWindowPos({style.WindowPadding.x, style.WindowPadding.y},
                             ImGuiCond_Always);
@@ -421,9 +498,19 @@ void PerfOverlay::DrawTimings(float cpu_frame_ms) const {
 
 void PerfOverlay::DrawDeviceInfo() const {
   const core::Extent2D output = renderer_.output_extent();
+  const core::Extent2D render = renderer_.render_extent();
+  const char* const vsync = renderer_.vsync() ? "vsync" : "no vsync";
   TextView(renderer_.device_name());
-  ImGui::Text("%u x %u  |  %s", output.width, output.height,
-              renderer_.vsync() ? "vsync" : "no vsync");
+  if (render::UsesTemporalScaler(renderer_.active_upscaling())) {
+    // What the scene is rendered at, and what the scaler turns it into.
+    const core::Extent2D scaled = renderer_.scene_output_extent();
+    ImGui::Text("%u x %u -> %u x %u  |  %s", render.width, render.height,
+                scaled.width, scaled.height, vsync);
+    ImGui::Text("Upscaling: %s",
+                render::UpscalingName(renderer_.active_upscaling()));
+  } else {
+    ImGui::Text("%u x %u  |  %s", output.width, output.height, vsync);
+  }
   const render::TextureStats textures = renderer_.texture_stats();
   ImGui::Text("Materials %zu  textures %zu (%.1f MiB)",
               renderer_.material_count(), textures.count,

@@ -1,6 +1,7 @@
 #ifndef BLUE_COOK_TEXTURE_COOK_H_
 #define BLUE_COOK_TEXTURE_COOK_H_
 
+#include <cstddef>
 #include <vector>
 
 #include "asset/image_decoder.h"
@@ -60,6 +61,29 @@ struct TextureCookOptions {
 [[nodiscard]] core::Result<prefab::Texture, CookError> CookTexture(
     const asset::ImageData& image, const TextureCookOptions& options,
     prefab::BulkStorage& storage);
+
+// A texture encoded by EncodeTexture() but not stored yet: `texture` is
+// complete except that its mips have no data; mip i is the
+// MipByteSize() bytes at mip_offsets[i] of `bytes`.
+struct EncodedTexture {
+  prefab::Texture texture;
+  std::vector<size_t> mip_offsets;
+  std::vector<std::byte> bytes;
+};
+
+// CookTexture() in two steps, for callers that cook several textures on
+// different threads and store them in a fixed order. EncodeTexture() takes
+// `image` over (pass it with std::move to avoid a copy) and filters and
+// encodes one level at a time: besides `image` it holds at most the next
+// level as floats (half the source's size) and the output. Same errors and
+// bytes as CookTexture(). Thread-safe for different images.
+[[nodiscard]] core::Result<EncodedTexture, CookError> EncodeTexture(
+    asset::ImageData image, const TextureCookOptions& options);
+
+// Moves the bytes of `encoded` into one new block of `storage` and returns
+// the texture with its mips pointing into it.
+[[nodiscard]] prefab::Texture StoreTexture(EncodedTexture encoded,
+                                           prefab::BulkStorage& storage);
 
 // Optional inputs of a packed ORM texture (R occlusion, G roughness,
 // B metallic), each read from one channel (0 = R ... 3 = A) of its image.

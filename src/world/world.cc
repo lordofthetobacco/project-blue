@@ -368,6 +368,7 @@ struct World::Builder {
 
 std::vector<WorldIssue> World::Build(const scene::SceneData& scene) {
   const auto start = std::chrono::steady_clock::now();
+  ++draw_layout_;
   placements_.clear();
   states_.clear();
   instances_.clear();
@@ -518,7 +519,7 @@ void World::UpdateLights(size_t first, size_t count) {
       lights_[light_offsets_[i] + l] = {
           .position = glm::vec3(transform * glm::vec4(light.position, 1.0f)),
           .color = light.color,
-          .intensity = light.intensity,
+          .intensity = states_[i].hidden ? 0.0f : light.intensity,
           .range = light.range};
     }
   }
@@ -577,6 +578,41 @@ bool World::SetInstanceTransform(const scene::SceneData& scene,
   return true;
 }
 
+bool World::HideInstance(scene::InstanceId id) {
+  auto found = entry_index_.find(id);
+  if (found == entry_index_.end()) {
+    return false;
+  }
+  // Entries are ordered parents first: one pass from `id` reaches its whole
+  // subtree, each child after its parent.
+  for (size_t i = found->second; i < instances_.size(); ++i) {
+    InstanceEntry& entry = instances_[i];
+    if (entry.hidden) {
+      continue;
+    }
+    const InstanceEntry* parent = FindEntry(entry.parent);
+    if (entry.id != id && (parent == nullptr || !parent->hidden)) {
+      continue;
+    }
+    entry.hidden = true;
+    ++draw_layout_;  // AppendDraws() skips its placements from now on.
+    if (entry.first_placement >= 0) {
+      const auto first = static_cast<size_t>(entry.first_placement);
+      const auto count = static_cast<size_t>(entry.placement_count);
+      for (size_t p = first; p < first + count; ++p) {
+        states_[p].hidden = true;
+      }
+      UpdateLights(first, count);
+    }
+  }
+  return true;
+}
+
+bool World::IsInstanceHidden(scene::InstanceId id) const {
+  const InstanceEntry* entry = FindEntry(id);
+  return entry != nullptr && entry->hidden;
+}
+
 bool World::SetInstanceMatrix(scene::InstanceId id, const glm::mat4& world) {
   auto found = entry_index_.find(id);
   if (found == entry_index_.end()) {
@@ -631,6 +667,9 @@ void World::Update(float dt) {
 
 void World::AppendDraws(std::vector<render::DrawItem>& out) const {
   for (size_t i = 0; i < placements_.size(); ++i) {
+    if (states_[i].hidden) {
+      continue;
+    }
     states_[i].pose.AppendDraws(placements_[i].world, out,
                                 states_[i].submeshes);
   }
@@ -642,19 +681,15 @@ void World::AppendSelectedDraws(std::span<const scene::InstanceId> selection,
   if (selection.empty()) {
     return;
   }
-  // Selected instances and their descendants (entries are parents first).
-  std::vector<scene::InstanceId> selected(selection.begin(), selection.end());
-  for (const InstanceEntry& entry : instances_) {
-    if (std::ranges::find(selected, entry.parent) != selected.end() &&
-        std::ranges::find(selected, entry.id) == selected.end()) {
-      selected.push_back(entry.id);
-    }
-  }
   uint32_t draw = first_draw;
-  for (const Placement& placement : placements_) {
+  for (size_t p = 0; p < placements_.size(); ++p) {
+    if (states_[p].hidden) {
+      continue;  // AppendDraws() appended nothing for it.
+    }
+    const Placement& placement = placements_[p];
     const auto mesh_count =
         static_cast<uint32_t>(cache_.prefab(placement.prefab).meshes.size());
-    if (std::ranges::find(selected, placement.owner) != selected.end()) {
+    if (IsInSubtree(placement.owner, selection)) {
       for (uint32_t m = 0; m < mesh_count; ++m) {
         out.push_back(draw + m);
       }
@@ -663,10 +698,23 @@ void World::AppendSelectedDraws(std::span<const scene::InstanceId> selection,
   }
 }
 
+bool World::IsInSubtree(scene::InstanceId id,
+                        std::span<const scene::InstanceId> roots) const {
+  // Parent chains are acyclic (Build() skips broken ones).
+  for (scene::InstanceId current = id; current != scene::kNoInstance;) {
+    if (std::ranges::find(roots, current) != roots.end()) {
+      return true;
+    }
+    const InstanceEntry* entry = FindEntry(current);
+    current = entry != nullptr ? entry->parent : scene::kNoInstance;
+  }
+  return false;
+}
+
 std::optional<glm::mat4> World::SocketMatrix(scene::InstanceId id,
                                              std::string_view name) const {
   const InstanceEntry* entry = FindEntry(id);
-  if (entry == nullptr || entry->first_placement < 0) {
+  if (entry == nullptr || entry->first_placement < 0 || entry->hidden) {
     return std::nullopt;
   }
   for (int i = 0; i < entry->placement_count; ++i) {
@@ -680,7 +728,7 @@ std::optional<glm::mat4> World::SocketMatrix(scene::InstanceId id,
 
 std::optional<asset::Bounds> World::InstanceBounds(scene::InstanceId id) const {
   const InstanceEntry* entry = FindEntry(id);
-  if (entry == nullptr || entry->first_placement < 0) {
+  if (entry == nullptr || entry->first_placement < 0 || entry->hidden) {
     return std::nullopt;
   }
   std::optional<asset::Bounds> result;
@@ -711,6 +759,9 @@ std::optional<PickHit> World::Pick(glm::vec3 origin, glm::vec3 direction,
   const glm::vec3 unit = direction / length;
   std::optional<PickHit> best;
   for (size_t p = 0; p < placements_.size(); ++p) {
+    if (states_[p].hidden) {
+      continue;
+    }
     const prefab::Prefab& prefab = cache_.prefab(placements_[p].prefab);
     for (const prefab::Mesh& mesh : prefab.meshes) {
       const glm::mat4 transform =

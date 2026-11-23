@@ -152,6 +152,20 @@ std::optional<int64_t> LastWriteTime(const std::string& path) {
   return static_cast<int64_t>(info.modify_time);
 }
 
+std::optional<std::vector<std::string>> ListDirectory(const std::string& path) {
+  SDL_PathInfo info;
+  if (!SDL_GetPathInfo(path.c_str(), &info) ||
+      info.type != SDL_PATHTYPE_DIRECTORY) {
+    return std::nullopt;
+  }
+  std::vector<std::string> names;
+  if (!SDL_EnumerateDirectory(path.c_str(), CollectEntry, &names)) {
+    return std::nullopt;
+  }
+  std::ranges::sort(names);
+  return names;
+}
+
 bool RemovePath(const std::string& path) {
   return SDL_RemovePath(path.c_str());
 }

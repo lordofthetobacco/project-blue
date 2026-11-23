@@ -3,17 +3,23 @@
 #include <meshoptimizer.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -32,8 +38,8 @@
 #include "animation/transform.h"
 #include "asset/animated_model.h"
 #include "asset/image_decoder.h"
-#include "asset/texture_loader.h"
 #include "asset/mesh_data.h"
+#include "asset/texture_loader.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "material/material.h"
@@ -345,106 +351,208 @@ std::string RefKey(const TextureRef& ref) {
                         : ref.path;
 }
 
-// Source images of a model, decoded once each.
-class ImageTable {
+// Upper bound on the estimated working set of the textures cooked at once
+// (decoded sources, ORM packing, the filter's next level and the output):
+// two 4k textures at a time, or one with several sources.
+constexpr size_t kTextureMemoryBudget = size_t{512} * 1024 * 1024;
+
+// Threads cooking textures at once, each encode using every core itself;
+// more only overlap the single-threaded image decoding.
+constexpr int kMaxTextureThreads = 3;
+
+// The encoded source images of a cook, decoded one at a time on demand and
+// freed after their last use. Embedded images come from the import (or one
+// parse per other model file a sidecar material names); image files are read
+// when needed. Once every AddUse() call is made, Probe(), Decode() and Done()
+// may run concurrently.
+class ImageSources {
  public:
-  // Decodes every texture `materials` reference (embedded ones with one
-  // parse of their model file). Fails with kTextureLoadFailed if any cannot
-  // be decoded.
-  core::Result<void, CookError> Load(
-      const std::vector<MaterialDesc>& materials) {
-    std::vector<TextureRef> refs;
-    for (const MaterialDesc& desc : materials) {
-      for (const TextureRef* ref :
-           {&desc.base_color_texture, &desc.metallic_roughness_texture,
-            &desc.roughness_texture, &desc.metallic_texture,
-            &desc.normal_texture, &desc.occlusion_texture,
-            &desc.emissive_texture}) {
-        if (!ref->empty() && !index_.contains(RefKey(*ref))) {
-          index_.emplace(RefKey(*ref), refs.size());
-          refs.push_back(*ref);
-        }
-      }
+  // `embedded` holds the embedded images of the model at `model_path`; an
+  // empty path means there is no model.
+  ImageSources(std::string model_path, asset::EmbeddedImages embedded) {
+    if (!model_path.empty()) {
+      models_.emplace(std::move(model_path),
+                      ModelImages{.images = std::move(embedded)});
     }
-    auto loaded = asset::LoadTextures(refs);
-    for (size_t i = 0; i < loaded.size(); ++i) {
-      if (!loaded[i].ok()) {
-        core::log::Error("CookModel: cannot load texture '{}': {}",
-                         RefKey(refs[i]), asset::ToString(loaded[i].error()));
-        return core::Result<void, CookError>::Error(
-            CookError::kTextureLoadFailed);
-      }
-      images_.push_back(std::move(loaded[i]).value());
-    }
-    return core::Result<void, CookError>::Ok();
   }
 
-  // Returns the image of `ref`, or nullptr for an empty ref.
-  const asset::ImageData* Find(const TextureRef& ref) const {
-    if (ref.empty()) {
-      return nullptr;
+  // Registers one use of `ref` by a texture job, opening model files not
+  // seen yet. Call for every use before the jobs run.
+  void AddUse(const TextureRef& ref) {
+    if (!ref.embedded()) {
+      return;
     }
-    const auto it = index_.find(RefKey(ref));
-    return it == index_.end() ? nullptr : &images_[it->second];
+    auto found = models_.find(ref.path);
+    if (found == models_.end()) {
+      auto loaded = asset::LoadEmbeddedImages(ref.path);
+      const bool opened = loaded.ok();
+      found =
+          models_
+              .emplace(ref.path,
+                       ModelImages{.images = opened ? std::move(loaded).value()
+                                                    : asset::EmbeddedImages(),
+                                   .opened = opened})
+              .first;
+    }
+    ++found->second.uses[ref.embedded_index];
+  }
+
+  // Returns the decoded size of `ref`.
+  core::Result<asset::ImageSize, asset::ImageError> Probe(
+      const TextureRef& ref) const {
+    if (!ref.embedded()) {
+      return asset::ProbeImageFile(ref.path);
+    }
+    const ModelImages& model = models_.at(ref.path);
+    if (!model.opened) {
+      return core::Result<asset::ImageSize, asset::ImageError>::Error(
+          asset::ImageError::kFileNotFound);
+    }
+    return model.images.Probe(ref.embedded_index);
+  }
+
+  core::Result<asset::ImageData, asset::ImageError> Decode(
+      const TextureRef& ref) const {
+    if (!ref.embedded()) {
+      return asset::LoadImageFile(ref.path);
+    }
+    const ModelImages& model = models_.at(ref.path);
+    if (!model.opened) {
+      return core::Result<asset::ImageData, asset::ImageError>::Error(
+          asset::ImageError::kFileNotFound);
+    }
+    return model.images.Decode(ref.embedded_index);
+  }
+
+  // Ends one use of `ref`; frees an embedded image after its last use.
+  void Done(const TextureRef& ref) {
+    if (!ref.embedded()) {
+      return;
+    }
+    ModelImages& model = models_.at(ref.path);
+    const std::lock_guard lock(mutex_);
+    int& uses = model.uses.at(ref.embedded_index);
+    if (--uses == 0) {
+      model.images.Release(ref.embedded_index);
+    }
   }
 
  private:
-  std::map<std::string, size_t> index_;
-  std::vector<asset::ImageData> images_;
+  struct ModelImages {
+    asset::EmbeddedImages images;
+    bool opened = true;
+    std::map<int, int> uses;  // embedded index -> uses not done yet
+  };
+
+  std::map<std::string, ModelImages, std::less<>> models_;
+  std::mutex mutex_;
 };
 
+// Holds texture jobs to the memory budget: Acquire() blocks until the
+// estimate fits next to the jobs already running, or nothing else runs.
+class MemoryBudget {
+ public:
+  explicit MemoryBudget(size_t limit) : limit_(limit) {}
+
+  void Acquire(size_t bytes) {
+    std::unique_lock lock(mutex_);
+    released_.wait(lock,
+                   [&] { return in_use_ == 0 || in_use_ + bytes <= limit_; });
+    in_use_ += bytes;
+    peak_ = std::max(peak_, in_use_);
+  }
+
+  void Release(size_t bytes) {
+    {
+      const std::lock_guard lock(mutex_);
+      in_use_ -= bytes;
+    }
+    released_.notify_all();
+  }
+
+  // Returns the highest total estimate held at once.
+  size_t peak() const {
+    const std::lock_guard lock(mutex_);
+    return peak_;
+  }
+
+ private:
+  const size_t limit_;
+  mutable std::mutex mutex_;
+  std::condition_variable released_;
+  size_t in_use_ = 0;
+  size_t peak_ = 0;
+};
+
+// One texture to cook: a single source image, or up to three packed into an
+// ORM texture (R occlusion, G roughness, B metallic, each from a channel of
+// its source; an empty ref leaves the channel 255).
+struct TextureJob {
+  int index = -1;  // into prefab.textures
+  TextureUsage usage = TextureUsage::kColor;
+  bool orm = false;
+  std::array<TextureRef, 3> refs;  // single: refs[0] only
+  std::array<int, 3> channels{};
+};
+
+// Returns true if job.refs[i] is not empty and not a repeat of an earlier
+// ref of the job (the distinct sources to decode).
+bool IsFirstUse(const TextureJob& job, size_t i) {
+  const auto begin = job.refs.begin();
+  const auto end = begin + static_cast<std::ptrdiff_t>(i);
+  return !job.refs[i].empty() && std::find(begin, end, job.refs[i]) == end;
+}
+
 // Cooks the textures of the materials, sharing each distinct (sources,
-// usage) combination, and records their sources for EditInfo.
+// usage) combination, and records their sources for EditInfo. Single() and
+// Orm() assign texture indices in call order and queue the work; Run()
+// cooks the queue with bounded memory and stores the results in index
+// order, so the output does not depend on thread timing.
 class TextureCooker {
  public:
-  TextureCooker(const ImageTable& images, const ModelCookOptions& options,
+  TextureCooker(ImageSources& sources, const ModelCookOptions& options,
                 std::string model_stem, prefab::Prefab& prefab)
-      : images_(images),
+      : sources_(sources),
         options_(options),
         model_stem_(std::move(model_stem)),
         prefab_(prefab) {}
 
   // Returns the texture index of `ref` cooked for `usage`, or -1 for an
   // empty ref.
-  core::Result<int, CookError> Single(const TextureRef& ref,
-                                      TextureUsage usage) {
+  int Single(const TextureRef& ref, TextureUsage usage) {
     if (ref.empty()) {
-      return core::Result<int, CookError>::Ok(-1);
+      return -1;
     }
     const std::string key =
         std::format("{}:{}", static_cast<int>(usage), RefKey(ref));
     if (const auto it = cooked_.find(key); it != cooked_.end()) {
-      return core::Result<int, CookError>::Ok(it->second);
+      return it->second;
     }
-    const asset::ImageData* image = images_.Find(ref);
-    if (image == nullptr) {
-      return core::Result<int, CookError>::Error(CookError::kTextureLoadFailed);
-    }
-    const std::string name =
+    std::string name =
         ref.embedded() ? std::format("{}_{}", model_stem_, ref.embedded_index)
                        : core::FileStem(ref.path);
-    return Cook(key, *image, usage, name, {RefKey(ref)});
+    return Queue(key, TextureJob{.usage = usage, .refs = {ref}},
+                 std::move(name), {RefKey(ref)});
   }
 
   // Returns the packed ORM texture index of `desc`, or -1 if it has no
   // occlusion, roughness or metallic texture.
-  core::Result<int, CookError> Orm(const MaterialDesc& desc) {
-    OrmSources sources{.occlusion = images_.Find(desc.occlusion_texture)};
+  int Orm(const MaterialDesc& desc) {
+    TextureJob job{.usage = TextureUsage::kLinear, .orm = true};
+    job.refs[0] = desc.occlusion_texture;
     std::vector<std::string> source_keys;
     if (!desc.occlusion_texture.empty()) {
       source_keys.push_back(RefKey(desc.occlusion_texture));
     }
     if (!desc.metallic_roughness_texture.empty()) {
-      const asset::ImageData* packed =
-          images_.Find(desc.metallic_roughness_texture);
-      sources.roughness = packed;
-      sources.roughness_channel = 1;
-      sources.metallic = packed;
-      sources.metallic_channel = 2;
+      job.refs[1] = desc.metallic_roughness_texture;
+      job.refs[2] = desc.metallic_roughness_texture;
+      job.channels[1] = 1;
+      job.channels[2] = 2;
       source_keys.push_back(RefKey(desc.metallic_roughness_texture));
     } else {
-      sources.roughness = images_.Find(desc.roughness_texture);
-      sources.metallic = images_.Find(desc.metallic_texture);
+      job.refs[1] = desc.roughness_texture;
+      job.refs[2] = desc.metallic_texture;
       for (const TextureRef* ref :
            {&desc.roughness_texture, &desc.metallic_texture}) {
         if (!ref->empty()) {
@@ -452,9 +560,8 @@ class TextureCooker {
         }
       }
     }
-    if (sources.occlusion == nullptr && sources.roughness == nullptr &&
-        sources.metallic == nullptr) {
-      return core::Result<int, CookError>::Ok(-1);
+    if (source_keys.empty()) {
+      return -1;
     }
     std::string key = "orm";
     for (const std::string& source : source_keys) {
@@ -463,47 +570,187 @@ class TextureCooker {
     // Separate maps and the glTF texture fill different channels.
     key += desc.metallic_roughness_texture.empty() ? "|separate" : "|gltf";
     if (const auto it = cooked_.find(key); it != cooked_.end()) {
-      return core::Result<int, CookError>::Ok(it->second);
+      return it->second;
     }
-    return Cook(key, PackOrm(sources), TextureUsage::kLinear,
-                desc.name + "_orm", std::move(source_keys));
+    return Queue(key, std::move(job), desc.name + "_orm",
+                 std::move(source_keys));
+  }
+
+  // Cooks every queued texture into its slot of prefab.textures. Fails with
+  // kTextureLoadFailed when a source cannot be decoded, or the error of
+  // EncodeTexture(). Logs timings.
+  core::Result<void, CookError> Run() {
+    using Result = core::Result<void, CookError>;
+    if (jobs_.empty()) {
+      return Result::Ok();
+    }
+    const Clock::time_point start = Clock::now();
+    for (const TextureJob& job : jobs_) {
+      for (size_t i = 0; i < job.refs.size(); ++i) {
+        if (IsFirstUse(job, i)) {
+          sources_.AddUse(job.refs[i]);
+        }
+      }
+    }
+    std::vector<std::optional<EncodedTexture>> results(jobs_.size());
+    MemoryBudget budget(kTextureMemoryBudget);
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::atomic<CookError> error{CookError::kTextureLoadFailed};
+    std::atomic<int64_t> decode_us{0};
+    const auto work = [&] {
+      for (size_t i = next.fetch_add(1); i < jobs_.size() && !failed;
+           i = next.fetch_add(1)) {
+        auto encoded = RunJob(jobs_[i], budget, decode_us);
+        if (!encoded.ok()) {
+          error = encoded.error();
+          failed = true;
+          return;
+        }
+        results[i] = std::move(encoded).value();
+      }
+    };
+    const int thread_count =
+        std::min(kMaxTextureThreads, static_cast<int>(jobs_.size()));
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(thread_count - 1));
+    for (int t = 1; t < thread_count; ++t) {
+      threads.emplace_back(work);
+    }
+    work();
+    for (std::thread& thread : threads) {
+      thread.join();
+    }
+    if (failed) {
+      jobs_.clear();
+      return Result::Error(error.load());
+    }
+    for (size_t i = 0; i < jobs_.size(); ++i) {
+      prefab::Texture& slot =
+          prefab_.textures[static_cast<size_t>(jobs_[i].index)];
+      std::string name = std::move(slot.name);
+      slot = StoreTexture(std::move(*results[i]), prefab_.storage);
+      slot.name = std::move(name);
+    }
+    core::log::Info(
+        "cooked {} textures on {} threads in {:.1f} ms (decoding {:.1f} ms "
+        "summed over threads, peak budget estimate {} MiB)",
+        jobs_.size(), thread_count, MillisecondsSince(start),
+        static_cast<double>(decode_us.load()) / 1000.0,
+        budget.peak() / (size_t{1024} * 1024));
+    jobs_.clear();
+    return Result::Ok();
   }
 
  private:
-  core::Result<int, CookError> Cook(const std::string& key,
-                                    const asset::ImageData& image,
-                                    TextureUsage usage, std::string name,
-                                    std::vector<std::string> sources) {
-    using Result = core::Result<int, CookError>;
-    // Textures already in the prefab (an earlier AddMaterialToPrefab() call,
-    // or a loaded prefab) are reused when made from the same sources in the
-    // same format.
-    const prefab::TextureFormat format = FormatFor(usage);
+  // Reserves the next texture index for `job` unless a texture already in
+  // the prefab (an earlier AddMaterialToPrefab() call, or a loaded prefab)
+  // was made from the same sources in the same format.
+  int Queue(const std::string& key, TextureJob job, std::string name,
+            std::vector<std::string> sources) {
+    const prefab::TextureFormat format = FormatFor(job.usage);
     for (size_t i = 0;
          i < prefab_.textures.size() && i < prefab_.edit.texture_sources.size();
          ++i) {
       if (prefab_.textures[i].format == format &&
           prefab_.edit.texture_sources[i] == sources) {
         cooked_.emplace(key, static_cast<int>(i));
-        return Result::Ok(static_cast<int>(i));
+        return static_cast<int>(i);
       }
     }
-    auto texture = CookTexture(image,
-                               {.usage = usage,
-                                .quality = options_.texture_quality,
-                                .compress = options_.compress_textures,
-                                .max_size = options_.max_texture_size},
-                               prefab_.storage);
-    if (!texture.ok()) {
-      return Result::Error(texture.error());
-    }
-    const auto index = static_cast<int>(prefab_.textures.size());
-    prefab::Texture cooked = std::move(texture).value();
-    cooked.name = std::move(name);
-    prefab_.textures.push_back(std::move(cooked));
+    job.index = static_cast<int>(prefab_.textures.size());
+    prefab_.textures.push_back({.name = std::move(name), .format = format});
     prefab_.edit.texture_sources.push_back(std::move(sources));
-    cooked_.emplace(key, index);
-    return Result::Ok(index);
+    cooked_.emplace(key, job.index);
+    jobs_.push_back(std::move(job));
+    return jobs_.back().index;
+  }
+
+  // Returns the budget estimate of `job`: its decoded sources plus the
+  // decoder's copy of the largest, the packed ORM image, and the encoder's
+  // next level as floats and output (about 1.5 times the RGBA8 target).
+  size_t Estimate(const TextureJob& job) const {
+    size_t sources = 0;
+    size_t largest = 0;
+    for (size_t i = 0; i < job.refs.size(); ++i) {
+      if (!IsFirstUse(job, i)) {
+        continue;
+      }
+      const auto size = sources_.Probe(job.refs[i]);
+      if (!size.ok()) {
+        return 0;  // the decode fails and reports it
+      }
+      const size_t bytes = size_t{4} * static_cast<size_t>(size.value().width) *
+                           static_cast<size_t>(size.value().height);
+      sources += bytes;
+      largest = std::max(largest, bytes);
+    }
+    return sources + largest + (job.orm ? largest : 0) + largest * 3 / 2;
+  }
+
+  // Decodes the sources of `job` within the memory budget, packs them for
+  // ORM and encodes the result.
+  core::Result<EncodedTexture, CookError> RunJob(
+      const TextureJob& job, MemoryBudget& budget,
+      std::atomic<int64_t>& decode_us) {
+    using Result = core::Result<EncodedTexture, CookError>;
+    const size_t estimate = Estimate(job);
+    budget.Acquire(estimate);
+
+    const Clock::time_point decode_start = Clock::now();
+    std::array<asset::ImageData, 3> images;
+    bool decoded = true;
+    for (size_t i = 0; i < job.refs.size(); ++i) {
+      if (!IsFirstUse(job, i)) {
+        continue;
+      }
+      auto image = sources_.Decode(job.refs[i]);
+      sources_.Done(job.refs[i]);
+      if (!image.ok()) {
+        core::log::Error("CookModel: cannot load texture '{}': {}",
+                         RefKey(job.refs[i]), asset::ToString(image.error()));
+        decoded = false;
+        break;
+      }
+      images[i] = std::move(image).value();
+    }
+    decode_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                     Clock::now() - decode_start)
+                     .count();
+    if (!decoded) {
+      budget.Release(estimate);
+      return Result::Error(CookError::kTextureLoadFailed);
+    }
+
+    asset::ImageData image;
+    if (job.orm) {
+      // The image of channel c: its own, or that of the earlier channel with
+      // the same source.
+      const auto source_of = [&](size_t c) -> const asset::ImageData* {
+        if (job.refs[c].empty()) {
+          return nullptr;
+        }
+        const auto first =
+            std::find(job.refs.begin(), job.refs.end(), job.refs[c]);
+        return &images[static_cast<size_t>(first - job.refs.begin())];
+      };
+      image = PackOrm({.occlusion = source_of(0),
+                       .occlusion_channel = job.channels[0],
+                       .roughness = source_of(1),
+                       .roughness_channel = job.channels[1],
+                       .metallic = source_of(2),
+                       .metallic_channel = job.channels[2]});
+      images = {};
+    } else {
+      image = std::move(images[0]);
+    }
+    auto encoded = EncodeTexture(std::move(image),
+                                 {.usage = job.usage,
+                                  .quality = options_.texture_quality,
+                                  .compress = options_.compress_textures,
+                                  .max_size = options_.max_texture_size});
+    budget.Release(estimate);
+    return encoded;
   }
 
   prefab::TextureFormat FormatFor(TextureUsage usage) const {
@@ -522,18 +769,19 @@ class TextureCooker {
     return prefab::TextureFormat::kRgba8Unorm;
   }
 
-  const ImageTable& images_;
+  ImageSources& sources_;
   const ModelCookOptions& options_;
   std::string model_stem_;
   prefab::Prefab& prefab_;
   std::map<std::string, int> cooked_;
+  std::vector<TextureJob> jobs_;
 };
 
-// Converts `desc` into a prefab material, cooking its textures.
-core::Result<prefab::Material, CookError> ConvertMaterial(
-    const MaterialDesc& desc, TextureCooker& textures,
-    const std::string& path) {
-  using Result = core::Result<prefab::Material, CookError>;
+// Converts `desc` into a prefab material, queueing its textures on
+// `textures` (cooked by TextureCooker::Run()).
+prefab::Material ConvertMaterial(const MaterialDesc& desc,
+                                 TextureCooker& textures,
+                                 const std::string& path) {
   prefab::Material material{.name = desc.name,
                             .base_color = desc.base_color,
                             .metallic = desc.metallic,
@@ -549,14 +797,9 @@ core::Result<prefab::Material, CookError> ConvertMaterial(
   const auto uv_of = [&](material::TextureSlot slot) {
     return static_cast<int>(desc.uv_set[static_cast<size_t>(slot)]);
   };
-  const auto assign = [&](prefab::TextureSlot slot,
-                          core::Result<int, CookError> index, int uv_set) {
-    if (!index.ok()) {
-      return false;
-    }
-    material.textures[static_cast<size_t>(slot)] = index.value();
+  const auto assign = [&](prefab::TextureSlot slot, int index, int uv_set) {
+    material.textures[static_cast<size_t>(slot)] = index;
     material.uv_sets[static_cast<size_t>(slot)] = uv_set;
-    return true;
   };
 
   using material::TextureSlot;
@@ -572,21 +815,19 @@ core::Result<prefab::Material, CookError> ConvertMaterial(
         "with roughness/metallic on UV set {}",
         path, desc.name, uv_of(TextureSlot::kOcclusion), orm_uv);
   }
-  const bool ok =
-      assign(prefab::TextureSlot::kBaseColor,
-             textures.Single(desc.base_color_texture, TextureUsage::kColor),
-             uv_of(TextureSlot::kBaseColor)) &&
-      assign(prefab::TextureSlot::kOrm, textures.Orm(desc), orm_uv) &&
-      assign(prefab::TextureSlot::kNormal,
-             textures.Single(desc.normal_texture, TextureUsage::kNormal),
-             uv_of(TextureSlot::kNormal)) &&
-      assign(prefab::TextureSlot::kEmissive,
-             textures.Single(desc.emissive_texture, TextureUsage::kColor),
-             uv_of(TextureSlot::kEmissive));
-  if (!ok) {
-    return Result::Error(CookError::kTextureLoadFailed);
-  }
-  return Result::Ok(std::move(material));
+  // The call order (base colour, ORM, normal, emissive) decides the texture
+  // indices.
+  assign(prefab::TextureSlot::kBaseColor,
+         textures.Single(desc.base_color_texture, TextureUsage::kColor),
+         uv_of(TextureSlot::kBaseColor));
+  assign(prefab::TextureSlot::kOrm, textures.Orm(desc), orm_uv);
+  assign(prefab::TextureSlot::kNormal,
+         textures.Single(desc.normal_texture, TextureUsage::kNormal),
+         uv_of(TextureSlot::kNormal));
+  assign(prefab::TextureSlot::kEmissive,
+         textures.Single(desc.emissive_texture, TextureUsage::kColor),
+         uv_of(TextureSlot::kEmissive));
+  return material;
 }
 
 }  // namespace
@@ -634,20 +875,22 @@ core::Result<int, CookError> AddMaterialToPrefab(
     prefab::Prefab& prefab, const material::MaterialDesc& desc,
     const ModelCookOptions& options) {
   using Result = core::Result<int, CookError>;
-  ImageTable images;
-  if (auto loaded = images.Load({desc}); !loaded.ok()) {
-    return Result::Error(loaded.error());
-  }
   const std::string stem = desc.base_color_texture.empty()
                                ? desc.name
                                : core::FileStem(desc.base_color_texture.path);
-  TextureCooker textures(images, options, stem, prefab);
-  auto material =
+  ImageSources sources("", asset::EmbeddedImages());
+  TextureCooker textures(sources, options, stem, prefab);
+  const size_t texture_count = prefab.textures.size();
+  const size_t source_count = prefab.edit.texture_sources.size();
+  prefab::Material material =
       ConvertMaterial(material::Sanitize(desc), textures, desc.name);
-  if (!material.ok()) {
-    return Result::Error(material.error());
+  if (auto cooked = textures.Run(); !cooked.ok()) {
+    // Drop the slots reserved for this material's textures.
+    prefab.textures.resize(texture_count);
+    prefab.edit.texture_sources.resize(source_count);
+    return Result::Error(cooked.error());
   }
-  prefab.materials.push_back(std::move(material).value());
+  prefab.materials.push_back(std::move(material));
   return Result::Ok(static_cast<int>(prefab.materials.size()) - 1);
 }
 
@@ -707,8 +950,12 @@ core::Result<prefab::Prefab, CookError> CookModel(
   }
   const Clock::time_point start = Clock::now();
 
+  // The import hands over the embedded images still encoded: they are
+  // decoded one texture at a time below, without parsing the file again.
+  asset::EmbeddedImages embedded;
   auto imported = asset::ImportAnimatedModel(
-      path, {.use_material_overrides = options.use_material_overrides});
+      path, {.use_material_overrides = options.use_material_overrides},
+      &embedded);
   if (!imported.ok()) {
     return Result::Error(FromImportError(imported.error()));
   }
@@ -748,21 +995,19 @@ core::Result<prefab::Prefab, CookError> CookModel(
     }
   }
   prefab.bounds = ComputePrefabBounds(prefab);
+  model.parts = {};  // the meshes now live in prefab.storage
   const double mesh_ms = MillisecondsSince(mesh_start);
 
   const Clock::time_point texture_start = Clock::now();
-  ImageTable images;
-  if (auto loaded = images.Load(model.materials); !loaded.ok()) {
-    return Result::Error(loaded.error());
-  }
-  TextureCooker textures(images, options, stem, prefab);
+  const size_t embedded_bytes = embedded.byte_size();
+  ImageSources sources(path, std::move(embedded));
+  TextureCooker textures(sources, options, stem, prefab);
   prefab.materials.reserve(model.materials.size());
   for (const MaterialDesc& desc : model.materials) {
-    auto material = ConvertMaterial(desc, textures, path);
-    if (!material.ok()) {
-      return Result::Error(material.error());
-    }
-    prefab.materials.push_back(std::move(material).value());
+    prefab.materials.push_back(ConvertMaterial(desc, textures, path));
+  }
+  if (auto cooked = textures.Run(); !cooked.ok()) {
+    return Result::Error(cooked.error());
   }
   const double texture_ms = MillisecondsSince(texture_start);
 
@@ -784,11 +1029,11 @@ core::Result<prefab::Prefab, CookError> CookModel(
   core::log::Info(
       "cooked {}: {} nodes, {} meshes, {} vertices, {} triangles, {} "
       "materials, {} textures, {} clips in {:.1f} ms (import {:.1f}, meshes "
-      "{:.1f}, textures {:.1f})",
+      "{:.1f}, textures {:.1f}; {} MiB of encoded images held after import)",
       core::FileName(path), prefab.hierarchy.nodes.size(), prefab.meshes.size(),
       vertex_count, triangle_count, prefab.materials.size(),
       prefab.textures.size(), prefab.clips.size(), MillisecondsSince(start),
-      import_ms, mesh_ms, texture_ms);
+      import_ms, mesh_ms, texture_ms, embedded_bytes / (size_t{1024} * 1024));
   return Result::Ok(std::move(prefab));
 }
 

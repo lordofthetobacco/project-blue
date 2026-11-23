@@ -1,9 +1,8 @@
 #include "render/buffer.h"
 
-#include <cstring>
-
 #include "core/log.h"
 #include "render/metal_check.h"
+#include "render/staging_upload.h"
 
 namespace blue::render {
 
@@ -34,26 +33,15 @@ Buffer::Buffer(const MetalContext& context, size_t size, Access access,
                                           options:ResourceOptions(access)];
   FatalIfNil(buffer_, nil, "newBufferWithLength");
   buffer_.label = label != nullptr ? @(label) : @"Buffer";
+  resident_ = Resident(context, buffer_);
 }
 
 Buffer CreateGpuBuffer(const MetalContext& context,
                        std::span<const std::byte> data, const char* label) {
-  const size_t size = data.size_bytes();
-  Buffer staging(context, size, Buffer::Access::kCpuSequentialWrite,
-                 "Staging");
-  std::memcpy(staging.mapped(), data.data(), size);
-
-  Buffer buffer(context, size, Buffer::Access::kGpuOnly, label);
-  context.SubmitImmediate([&](id<MTLCommandBuffer> command_buffer) {
-    const id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
-    blit.label = @"Upload buffer";
-    [blit copyFromBuffer:staging.handle()
-             sourceOffset:0
-                 toBuffer:buffer.handle()
-        destinationOffset:0
-                     size:size];
-    [blit endEncoding];
-  });
+  Buffer buffer(context, data.size_bytes(), Buffer::Access::kGpuOnly, label);
+  StagingUploader uploader(context, data.size_bytes());
+  uploader.CopyToBuffer(data, buffer.handle(), 0);
+  uploader.Finish();
   return buffer;
 }
 

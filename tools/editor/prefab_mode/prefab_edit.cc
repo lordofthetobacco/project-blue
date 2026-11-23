@@ -29,6 +29,7 @@
 #include "asset/mesh_data.h"
 #include "cook/cook_error.h"
 #include "cook/model_cook.h"
+#include "cook/prefab_edits.h"
 #include "cook/texture_cook.h"
 #include "core/log.h"
 #include "core/path.h"
@@ -599,6 +600,26 @@ std::optional<std::vector<std::string>> ReadChildPathsFromFile(
   return paths;
 }
 
+std::optional<std::string> SetPrefabTag(Prefab& prefab, std::string_view key,
+                                        std::string_view value) {
+  core::Result<void, std::string> applied =
+      cook::ApplyPrefabEdit(prefab, {.kind = cook::PrefabEdit::Kind::kSetTag,
+                                     .target = std::string(key),
+                                     .text = std::string(value)});
+  if (!applied.ok()) {
+    return applied.error();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> RemovePrefabTag(Prefab& prefab,
+                                           std::string_view key) {
+  if (!prefab::RemoveTag(prefab, key)) {
+    return std::format("no tag '{}'", key);
+  }
+  return std::nullopt;
+}
+
 Prefab ReimportPrefab(const Prefab& edited, Prefab fresh) {
   for (prefab::Material& material : fresh.materials) {
     const int old = prefab::FindMaterial(edited, material.name);
@@ -624,6 +645,7 @@ Prefab ReimportPrefab(const Prefab& edited, Prefab fresh) {
       animation::AddEvent(clip, std::move(event));
     }
   }
+  fresh.tags = edited.tags;
   fresh.sockets.clear();
   for (const prefab::Socket& socket : edited.sockets) {
     const int node = MatchNode(edited, socket.node, fresh);

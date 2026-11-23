@@ -28,6 +28,11 @@ class InputMapper {
     // Orbit camera: the cursor is never captured; dragging with the left
     // button looks, with the right or middle button pans.
     kDrag,
+    // A screen used with the cursor (the weapon inspect screen): the cursor
+    // is never captured, dragging with the left button reports look motion,
+    // mouse buttons feed no bindings and Escape neither releases nor quits
+    // (the app handles kEscape itself).
+    kCursor,
   };
 
   InputMapper() = default;
@@ -43,7 +48,8 @@ class InputMapper {
     return bindings_;
   }
 
-  // Switching to kDrag releases the capture; both drop pending motion.
+  // Switching to kDrag or kCursor releases the capture; every switch drops
+  // pending motion, and leaving kCursor forgets the buttons held in it.
   void set_mouse_mode(MouseMode mode);
   [[nodiscard]] MouseMode mouse_mode() const { return mouse_mode_; }
 
@@ -54,6 +60,10 @@ class InputMapper {
   // Returns the input accumulated since the previous call, then resets the
   // per-frame sums and action edges.
   [[nodiscard]] input::InputFrame EndFrame();
+
+  // Captures the cursor in kCapture mode while the window has the focus
+  // (closing a cursor screen gives the player the mouse back).
+  void RequestCapture();
 
   [[nodiscard]] bool wants_mouse_captured() const { return mouse_captured_; }
   [[nodiscard]] bool quit_requested() const { return quit_requested_; }

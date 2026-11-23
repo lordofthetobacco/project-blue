@@ -8,6 +8,8 @@
 #include <glm/vec4.hpp>
 
 #include "core/log.h"
+#include "render/encoders.h"
+#include "shaders/bindings.h"
 
 namespace blue::render {
 
@@ -122,22 +124,18 @@ void MaterialSystem::Release(MaterialId id) {
   Material& released = materials_[index];
   released.released = true;
   released.textures.reset();
-  // Frames in flight that sampled them keep them alive through their
-  // command buffers; see the class comment.
+  // Frames in flight that sampled them rely on the renderer's retire list;
+  // see the class comment.
   released.gpu.textures = {};
 }
 
-void MaterialSystem::Bind(id<MTLRenderCommandEncoder> encoder,
-                          MaterialId id) const {
+void MaterialSystem::Bind(const Recording& rec, MaterialId id) const {
   const GpuState& gpu = materials_[static_cast<size_t>(Resolve(id))].gpu;
-  [encoder setFragmentBytes:&gpu.params
-                     length:sizeof(MaterialParams)
-                    atIndex:kBufferMaterial];
-  [encoder setFragmentTextures:gpu.textures.data()
-                     withRange:NSMakeRange(kTextureBaseColor,
-                                           kMaterialTextureCount)];
-  [encoder setFragmentSamplerState:samplers_.material()
-                           atIndex:kSamplerMaterial];
+  BindConstants(rec, kBufferMaterial, gpu.params);
+  for (NSUInteger slot = 0; slot < kMaterialTextureCount; ++slot) {
+    BindTexture(rec, kTextureBaseColor + slot, gpu.textures[slot]);
+  }
+  BindSampler(rec, kSamplerMaterial, samplers_.material(lod_bias_));
 }
 
 std::array<id<MTLTexture>, kMaterialTextureCount> MaterialSystem::SlotTextures(

@@ -37,8 +37,14 @@ namespace blue::render {
 //              (shaders/selection_mask.frag.metal,
 //              shaders/selection_outline.frag.metal).
 //
-// Records nothing at all when the view has no lines and no selection (the
-// game's case). Line vertices go through a per-frame-in-flight shared buffer
+// The overlay is drawn at the output extent without jitter. While the
+// temporal scaler is on (FrameContext::temporal) the scene depth is jittered
+// and may be smaller than the overlay's targets, so it cannot be their depth
+// attachment: the depth-tested parts then compare against the depth texture
+// in the fragment shader (kConstantSampledDepth), which makes their hidden /
+// visible edges follow the jittered depth by up to a pixel.
+//
+// Records nothing at all when the view has no lines and no selection. Line vertices go through a per-frame-in-flight shared buffer
 // that only grows, so steady use allocates nothing.
 //
 // Borrows everything it is given, which must outlive it. Neither copyable
@@ -46,7 +52,8 @@ namespace blue::render {
 class OverlayPass {
  public:
   OverlayPass(const MetalContext& context, ShaderPrograms& programs,
-              const std::string& shader_dir, const std::vector<Mesh>& meshes);
+              const std::string& shader_dir, const Samplers& samplers,
+              const std::vector<Mesh>& meshes);
 
   OverlayPass(const OverlayPass&) = delete;
   OverlayPass& operator=(const OverlayPass&) = delete;
@@ -71,15 +78,19 @@ class OverlayPass {
 
   const MetalContext& context_;
   const std::vector<Mesh>& meshes_;
+  const Samplers& samplers_;
   // Per frame in flight: CPU-written line vertices.
   std::array<Buffer, kFramesInFlight> line_buffers_;
   // Replaced when the shaders are reloaded; never null after construction.
-  std::unique_ptr<Pipeline> tested_lines_;
-  std::unique_ptr<Pipeline> top_lines_;
+  // Each pair: [0] for the encoder without a depth attachment (temporal
+  // scaler on, depth tested in the shader), [1] for the one with the scene
+  // depth attached.
+  std::array<std::unique_ptr<Pipeline>, 2> tested_lines_;
+  std::array<std::unique_ptr<Pipeline>, 2> top_lines_;
   // Selection mask: hidden parts (no depth test) then visible parts (depth
   // test against the scene).
-  std::unique_ptr<Pipeline> mask_hidden_;
-  std::unique_ptr<Pipeline> mask_visible_;
+  std::array<std::unique_ptr<Pipeline>, 2> mask_hidden_;
+  std::array<std::unique_ptr<Pipeline>, 2> mask_visible_;
   FullscreenPass outline_;
 };
 

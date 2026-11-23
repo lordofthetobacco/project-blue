@@ -35,6 +35,10 @@ Swapchain::Swapchain(const MetalContext& context,
   layer_.colorspace = srgb;
   CGColorSpaceRelease(srgb);
 
+  // Metal 4 only renders to memory a residency set of the queue lists; the
+  // layer keeps its drawables in this one (valid while the device is set).
+  [context.queue() addResidencySet:layer_.residencySet];
+
   if (!Recreate(extent, vsync)) {
     core::log::Fatal("Cannot create a swapchain for a zero-sized surface");
   }

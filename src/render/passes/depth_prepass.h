@@ -36,7 +36,7 @@ class DepthPrepass {
   DepthPrepass(const DepthPrepass&) = delete;
   DepthPrepass& operator=(const DepthPrepass&) = delete;
 
-  // Opens its own encoder on ctx.cmd, clears the depth target (reversed Z:
+  // Opens its own encoder on ctx.rec.cmd, clears the depth target (reversed Z:
   // to 0) and draws ctx.draw_list into it.
   void Record(const FrameContext& ctx) const;
 
@@ -48,7 +48,7 @@ class DepthPrepass {
       bool masked, const shader::ShaderLibrary& vertex,
       const shader::ShaderLibrary* fragment);
 
-  id<MTLDevice> device_ = nil;
+  const MetalContext& context_;
   const MaterialSystem& materials_;
   const std::vector<Mesh>& meshes_;
   // Indexed by MaterialVariant; replaced when the shaders are reloaded,

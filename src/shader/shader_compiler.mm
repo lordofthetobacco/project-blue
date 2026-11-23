@@ -60,12 +60,18 @@ bool ShaderLibrary::HasFunction(std::string_view name) const {
   }
 }
 
-// Holds the device and the options shared by every compilation.
+// Holds the compiler and the options shared by every compilation.
 class ShaderCompiler::Impl {
  public:
   explicit Impl(CompileMode mode)
-      : device_(MTLCreateSystemDefaultDevice()),
-        options_([[MTLCompileOptions alloc] init]) {
+      : options_([[MTLCompileOptions alloc] init]) {
+    const id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device != nil && [device supportsFamily:MTLGPUFamilyMetal4]) {
+      MTL4CompilerDescriptor* descriptor =
+          [[MTL4CompilerDescriptor alloc] init];
+      descriptor.label = @"Shader compiler";
+      compiler_ = [device newCompilerWithDescriptor:descriptor error:nil];
+    }
     options_.languageVersion = MTLLanguageVersion3_2;
     // Safe math keeps isnan() / isinf() meaningful (shaders/sanitize.h).
     options_.mathMode = MTLMathModeSafe;
@@ -88,9 +94,9 @@ class ShaderCompiler::Impl {
     }
     PreprocessedShader shader = std::move(preprocessed).value();
     const std::string root = core::NormalizePath(path);
-    if (device_ == nil) {
+    if (compiler_ == nil) {
       return CompileResult::Error(
-          {"'" + root + "': cannot compile: no Metal device"});
+          {"'" + root + "': cannot compile: no Metal 4 device"});
     }
 
     @autoreleasepool {
@@ -102,10 +108,13 @@ class ShaderCompiler::Impl {
         return CompileResult::Error(
             {"'" + root + "': the source is not valid UTF-8"});
       }
+      MTL4LibraryDescriptor* descriptor = [[MTL4LibraryDescriptor alloc] init];
+      descriptor.source = source;
+      descriptor.options = options_;
+      descriptor.name = @(core::FileName(root).c_str());
       NSError* error = nil;
-      const id<MTLLibrary> library = [device_ newLibraryWithSource:source
-                                                           options:options_
-                                                             error:&error];
+      const id<MTLLibrary> library =
+          [compiler_ newLibraryWithDescriptor:descriptor error:&error];
       if (library == nil) {
         return CompileResult::Error(
             {ErrorText(error, "'" + root + "': compilation failed")});
@@ -132,7 +141,8 @@ class ShaderCompiler::Impl {
   }
 
  private:
-  id<MTLDevice> device_;
+  // nil without a Metal 4 device.
+  id<MTL4Compiler> compiler_ = nil;
   MTLCompileOptions* options_;
 };
 

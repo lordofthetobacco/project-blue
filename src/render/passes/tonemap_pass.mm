@@ -34,7 +34,7 @@ void TonemapPass::BindTargets(const RenderTargets& targets,
                               const Samplers& samplers) {
   // The HDR image is fetched texel by texel; the half-resolution bloom is
   // upsampled bilinearly.
-  const std::array<id<MTLTexture>, 2> inputs{targets.hdr().texture(),
+  const std::array<id<MTLTexture>, 2> inputs{targets.post_hdr().texture(),
                                              targets.bloom_mip_view(0)};
   pass_.SetInputs(0, inputs, samplers.linear_clamp());
 }
@@ -47,9 +47,9 @@ void TonemapPass::Record(const FrameContext& ctx) const {
           ctx.view.post.bloom_enabled ? ctx.view.post.bloom_strength : 0.0f,
       .bloom_scale = 1.0f / static_cast<float>(ctx.targets.bloom_levels()),
   };
-  pass_.Record(ctx,
+  pass_.Record(ctx.rec,
                {.texture = ctx.targets.ldr().texture(),
-                .extent = ctx.targets.extent()},
+                .extent = ctx.targets.output_extent()},
                0, ConstantBytes(constants));
 }
 

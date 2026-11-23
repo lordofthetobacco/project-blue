@@ -4,6 +4,8 @@
 
 #include <cmath>
 
+#include <glm/trigonometric.hpp>
+
 #include "input/input_settings.h"
 
 namespace blue::player {
@@ -85,6 +87,27 @@ TEST_CASE("Reset makes the next update snap again") {
   (void)fov.Update(Input(false, 70.0f));
   fov.Reset();
   CHECK(fov.Update(Input(false, 90.0f)) == 90.0f);
+}
+
+TEST_CASE("Magnification M narrows the FOV to 2 atan(tan(base / 2) / M)") {
+  CHECK(MagnifiedFovDegrees(70.0f, 1.0f) == doctest::Approx(70.0f));
+  CHECK(MagnifiedFovDegrees(70.0f, 0.5f) == doctest::Approx(70.0f));
+  for (const float m : {2.0f, 3.5f, 10.0f}) {
+    const float fov = MagnifiedFovDegrees(70.0f, m);
+    // The picture's linear size grows by exactly M.
+    CHECK(std::tan(glm::radians(fov) * 0.5f) ==
+          doctest::Approx(std::tan(glm::radians(35.0f)) / m));
+  }
+  // Not the linear fraction of the angle: 10x of 70 degrees is 7.99.
+  CHECK(MagnifiedFovDegrees(70.0f, 10.0f) ==
+        doctest::Approx(7.99f).epsilon(0.01));
+}
+
+TEST_CASE("The zoom sensitivity scale is the half-angle tangent ratio") {
+  CHECK(ZoomSensitivityScale(70.0f, 70.0f) == doctest::Approx(1.0f));
+  CHECK(ZoomSensitivityScale(MagnifiedFovDegrees(70.0f, 6.0f), 70.0f) ==
+        doctest::Approx(1.0f / 6.0f));
+  CHECK(ZoomSensitivityScale(50.0f, 0.0f) == 1.0f);  // No base yet.
 }
 
 }  // namespace blue::player

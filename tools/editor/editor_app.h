@@ -15,6 +15,7 @@
 #include "editor/editor_options.h"
 #include "editor/editor_settings.h"
 #include "editor/mcp/mcp_host.h"
+#include "editor/memory_report.h"
 #include "editor/panel.h"
 #include "physics/physics_runtime.h"
 #include "platform/window.h"
@@ -73,6 +74,10 @@ class EditorApp {
   // Edit > Settings...: the editor settings (the MCP server section).
   void DrawSettingsWindow();
   void DrawMcpSettings();
+  // The memory readout (Settings window section and status bar item).
+  void DrawMemorySettings();
+  // Applies and, with `persist`, saves the undo history budget in MiB.
+  void SetHistoryBudget(int megabytes, bool persist);
   // Applies MCP server settings now and, with `persist`, saves them.
   void SetMcpSettings(const McpSettings& settings, bool persist);
   // Moves the selection of the active document to the next (+1) or
@@ -115,6 +120,12 @@ class EditorApp {
   EditorSettings settings_;
   McpSettings mcp_draft_;
   bool settings_open_ = false;
+  // Opens the Memory section of the Settings window on the next draw.
+  bool show_memory_ = false;
+  // The memory readout, refreshed every kMemoryRefreshFrames frames.
+  MemoryReport memory_;
+  uint64_t memory_frame_ = 0;
+  int history_budget_draft_ = kDefaultHistoryBudgetMb;
   // Set by the "mcp" command, applied at the start of the next frame.
   std::optional<McpSettings> pending_mcp_;
   // The MCP server; declared after context_, destroyed (and stopped) first.

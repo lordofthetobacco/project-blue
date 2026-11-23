@@ -9,8 +9,8 @@
 #include "core/result.h"
 #include "shader/shader_preprocessor.h"
 
-// Compiles Metal Shading Language files at run time with the system's Metal
-// compiler (-[MTLDevice newLibraryWithSource:options:error:]). The header is
+// Compiles Metal Shading Language files at run time with a Metal 4 compiler
+// (-[MTL4Compiler newLibraryWithDescriptor:error:]). The header is
 // pure C++; Objective-C++ code gets at the Metal objects through
 // shader/shader_library_metal.h.
 
@@ -72,8 +72,9 @@ struct CompiledShader {
 // copyable nor movable.
 class ShaderCompiler {
  public:
-  // Uses the system default Metal device. Without one, every Compile() call
-  // returns an error naming "no Metal device".
+  // Uses an MTL4Compiler of the system default Metal device. Without a
+  // device that supports Metal 4, every Compile() call returns an error
+  // naming "no Metal 4 device".
   explicit ShaderCompiler(CompileMode mode);
   ~ShaderCompiler();
 

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <span>
 
+#include "render/encoders.h"
 #include "shaders/bindings.h"
 
 namespace blue::render {
@@ -39,32 +40,32 @@ MTLVertexDescriptor* MeshVertexDescriptor() {
   return descriptor;
 }
 
-Mesh::Mesh(const MetalContext& context, const asset::MeshData& data)
-    : vertex_buffer_(CreateGpuBuffer(context,
-                                     std::as_bytes(std::span(data.vertices)),
-                                     "Mesh vertices")),
-      index_buffer_(CreateGpuBuffer(context,
-                                    std::as_bytes(std::span(data.indices)),
-                                    "Mesh indices")),
-      index_count_(static_cast<uint32_t>(data.indices.size())) {}
+Mesh::Mesh(const MetalContext& context,
+           std::span<const asset::Vertex> vertices,
+           std::span<const asset::Index> indices)
+    : vertex_buffer_(
+          CreateGpuBuffer(context, std::as_bytes(vertices), "Mesh vertices")),
+      index_buffer_(
+          CreateGpuBuffer(context, std::as_bytes(indices), "Mesh indices")),
+      index_count_(static_cast<uint32_t>(indices.size())) {}
 
-void Mesh::Bind(id<MTLRenderCommandEncoder> encoder) const {
-  [encoder setVertexBuffer:vertex_buffer_.handle()
-                    offset:0
-                   atIndex:kBufferVertices];
+void Mesh::Bind(const Recording& rec) const {
+  BindBuffer(rec, kBufferVertices, vertex_buffer_.handle());
 }
 
-void Mesh::DrawRange(id<MTLRenderCommandEncoder> encoder, uint32_t first_index,
+void Mesh::DrawRange(id<MTL4RenderCommandEncoder> encoder, uint32_t first_index,
                      uint32_t index_count) const {
+  const size_t offset = first_index * sizeof(asset::Index);
   [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                       indexCount:index_count
                        indexType:kIndexType
-                     indexBuffer:index_buffer_.handle()
-               indexBufferOffset:first_index * sizeof(asset::Index)];
+                     indexBuffer:index_buffer_.handle().gpuAddress + offset
+               indexBufferLength:index_buffer_.size() - offset];
 }
 
-void Mesh::Draw(id<MTLRenderCommandEncoder> encoder) const {
-  Bind(encoder);
+void Mesh::Draw(const Recording& rec,
+                id<MTL4RenderCommandEncoder> encoder) const {
+  Bind(rec);
   DrawRange(encoder, 0, index_count_);
 }
 

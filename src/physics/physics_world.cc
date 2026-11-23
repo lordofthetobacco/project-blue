@@ -212,11 +212,13 @@ core::Result<BodyId, PhysicsError> PhysicsWorld::Impl::AddBody(
     const JPH::Shape* shape, const ShapeBodyDesc& desc) {
   using Result = core::Result<BodyId, PhysicsError>;
   const bool dynamic = desc.motion == scene::MotionType::kDynamic;
+  const JPH::ObjectLayer moving_layer =
+      desc.blocks_characters ? layers::kMoving : layers::kMovingNoCharacter;
   JPH::BodyCreationSettings settings(
       shape, ToJolt(desc.pose.position),
       ToJolt(glm::normalize(desc.pose.rotation)),
       dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
-      dynamic ? layers::kMoving : layers::kNonMoving);
+      dynamic ? moving_layer : layers::kNonMoving);
   settings.mFriction = desc.friction;
   settings.mRestitution = desc.restitution;
   settings.mLinearDamping = kLinearDamping;
@@ -224,6 +226,11 @@ core::Result<BodyId, PhysicsError> PhysicsWorld::Impl::AddBody(
     settings.mOverrideMassProperties =
         JPH::EOverrideMassProperties::CalculateInertia;
     settings.mMassPropertiesOverride.mMass = desc.mass;
+    if (IsFiniteVec(desc.linear_velocity) &&
+        IsFiniteVec(desc.angular_velocity)) {
+      settings.mLinearVelocity = ToJolt(desc.linear_velocity);
+      settings.mAngularVelocity = ToJolt(desc.angular_velocity);
+    }
   }
 
   JPH::BodyInterface& bodies = system_.GetBodyInterface();

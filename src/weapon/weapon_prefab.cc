@@ -1,5 +1,7 @@
 #include "weapon/weapon_prefab.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <format>
 #include <optional>
@@ -21,7 +23,18 @@
 namespace blue::weapon {
 namespace {
 
-// Returns the rest-pose model-space matrix of every node of `prefab`.
+// Returns the prefab-space matrix of the socket `name`, or nullopt if the
+// prefab has none.
+std::optional<glm::mat4> SocketMatrix(const prefab::Prefab& prefab,
+                                      std::span<const glm::mat4> rest,
+                                      std::string_view name) {
+  return SocketRestMatrix(prefab, rest, name);
+}
+
+glm::vec3 Origin(const glm::mat4& matrix) { return glm::vec3(matrix[3]); }
+
+}  // namespace
+
 std::vector<glm::mat4> RestMatrices(const prefab::Prefab& prefab) {
   const animation::Hierarchy& hierarchy = prefab.hierarchy;
   std::vector<animation::Transform> pose(hierarchy.nodes.size());
@@ -31,26 +44,59 @@ std::vector<glm::mat4> RestMatrices(const prefab::Prefab& prefab) {
   return world;
 }
 
-// Returns the prefab-space matrix of the socket `name`, or nullopt if the
-// prefab has none.
-std::optional<glm::mat4> SocketMatrix(const prefab::Prefab& prefab,
-                                      std::span<const glm::mat4> rest,
-                                      std::string_view name) {
-  const int index = prefab::FindSocket(prefab, name);
+glm::mat4 RestNodeMatrix(std::span<const glm::mat4> rest, int node) {
+  if (node < 0 || static_cast<size_t>(node) >= rest.size()) {
+    return glm::mat4(1.0f);
+  }
+  return rest[static_cast<size_t>(node)];
+}
+
+std::optional<glm::mat4> SocketRestMatrix(const prefab::Prefab& prefab,
+                                          std::span<const glm::mat4> rest,
+                                          std::string_view name) {
+  const int index = FindSocketIgnoringCase(prefab, name);
   if (index < 0) {
     return std::nullopt;
   }
   const prefab::Socket& socket = prefab.sockets[static_cast<size_t>(index)];
-  const glm::mat4 local = animation::ToMatrix(socket.local);
-  if (socket.node < 0 || static_cast<size_t>(socket.node) >= rest.size()) {
-    return local;
-  }
-  return rest[static_cast<size_t>(socket.node)] * local;
+  return RestNodeMatrix(rest, socket.node) * animation::ToMatrix(socket.local);
 }
 
-glm::vec3 Origin(const glm::mat4& matrix) { return glm::vec3(matrix[3]); }
+bool NamesMatch(std::string_view a, std::string_view b) {
+  return std::ranges::equal(a, b, [](char x, char y) {
+    return std::tolower(static_cast<unsigned char>(x)) ==
+           std::tolower(static_cast<unsigned char>(y));
+  });
+}
 
-}  // namespace
+int FindSocketIgnoringCase(const prefab::Prefab& prefab,
+                           std::string_view name) {
+  for (size_t i = 0; i < prefab.sockets.size(); ++i) {
+    if (NamesMatch(prefab.sockets[i].name, name)) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+int FindClipIgnoringCase(const prefab::Prefab& prefab, std::string_view name) {
+  for (size_t i = 0; i < prefab.clips.size(); ++i) {
+    if (NamesMatch(prefab.clips[i].name, name)) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+const animation::ClipEvent* FindEventIgnoringCase(const animation::Clip& clip,
+                                                  std::string_view name) {
+  for (const animation::ClipEvent& event : clip.events) {
+    if (NamesMatch(event.name, name)) {
+      return &event;
+    }
+  }
+  return nullptr;
+}
 
 core::Result<WeaponGeometry, std::string> GeometryFromSockets(
     const prefab::Prefab& prefab) {
@@ -88,15 +134,20 @@ core::Result<WeaponGeometry, std::string> GeometryFromSockets(
     geometry.optic_lens = Origin(*lens);
     geometry.optic_lens_radius = glm::length(glm::vec3((*lens)[0]));
   }
+  geometry.eyepiece = geometry.sight_eye_point;
+  if (const std::optional<glm::mat4> eyepiece =
+          SocketMatrix(prefab, rest, kEyepieceSocket)) {
+    geometry.eyepiece = Origin(*eyepiece);
+  }
   return GeometryResult::Ok(geometry);
 }
 
 core::Result<WeaponAnimatorTuning, std::string> AnimatorTuningFromClip(
     const animation::Clip& clip) {
   using TuningResult = core::Result<WeaponAnimatorTuning, std::string>;
-  const animation::ClipEvent* shot = animation::FindEvent(clip, kShotEvent);
+  const animation::ClipEvent* shot = FindEventIgnoringCase(clip, kShotEvent);
   const animation::ClipEvent* lock =
-      animation::FindEvent(clip, kSlideLockEvent);
+      FindEventIgnoringCase(clip, kSlideLockEvent);
   for (const auto& [event, name] :
        {std::pair{shot, kShotEvent}, std::pair{lock, kSlideLockEvent}}) {
     if (event == nullptr) {

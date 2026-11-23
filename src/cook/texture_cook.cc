@@ -103,34 +103,104 @@ uint8_t EncodeValue(float value, size_t channel, TextureUsage usage) {
 // raw row pointers: this code is compiled without optimisation in Debug,
 // where checked iterators would dominate the cook time.
 
-FloatImage ToFloat(const ImageData& image, TextureUsage usage) {
-  FloatImage result{.width = image.width, .height = image.height};
-  result.rgba.resize(image.pixels.size());
-  const float* srgb = SrgbDecodeTable().data();
-  const size_t row_values = static_cast<size_t>(image.width) * 4;
-  internal::ParallelFor(image.height, [&](int y) {
-    const uint8_t* src = image.pixels.data() + y * row_values;
-    float* dst = result.rgba.data() + y * row_values;
-    for (size_t i = 0; i < row_values; ++i) {
-      dst[i] = DecodeValue(src[i], i % 4, usage, srgb);
+// Normalises the xyz of the `count` RGBA texels at `texels`; zero vectors
+// become +Z.
+void NormalizeVectors(float* texels, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    float* v = texels + i * 4;
+    const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (length > 1.0e-6f) {
+      v[0] /= length;
+      v[1] /= length;
+      v[2] /= length;
+    } else {
+      v[0] = 0.0f;
+      v[1] = 0.0f;
+      v[2] = 1.0f;
     }
-  });
-  return result;
+  }
+}
+
+// Converts the `width` RGBA texels at `src` to filtering space; normal
+// vectors are renormalised.
+void DecodeRow(const uint8_t* src, size_t width, TextureUsage usage,
+               float* dst) {
+  const float* srgb = SrgbDecodeTable().data();
+  const size_t values = width * 4;
+  for (size_t i = 0; i < values; ++i) {
+    dst[i] = DecodeValue(src[i], i % 4, usage, srgb);
+  }
+  if (usage == TextureUsage::kNormal) {
+    NormalizeVectors(dst, width);
+  }
+}
+
+void EncodeRow(const float* src, size_t width, TextureUsage usage,
+               uint8_t* dst) {
+  const size_t values = width * 4;
+  for (size_t i = 0; i < values; ++i) {
+    dst[i] = EncodeValue(src[i], i % 4, usage);
+  }
 }
 
 ImageData ToBytes(const FloatImage& image, TextureUsage usage) {
   ImageData result{.width = image.width, .height = image.height};
   result.pixels.resize(image.rgba.size());
-  const size_t row_values = static_cast<size_t>(image.width) * 4;
+  const size_t width = static_cast<size_t>(image.width);
   internal::ParallelFor(image.height, [&](int y) {
-    const float* src = image.rgba.data() + y * row_values;
-    uint8_t* dst = result.pixels.data() + y * row_values;
-    for (size_t i = 0; i < row_values; ++i) {
-      dst[i] = EncodeValue(src[i], i % 4, usage);
-    }
+    EncodeRow(image.rgba.data() + y * width * 4, width, usage,
+              result.pixels.data() + y * width * 4);
   });
   return result;
 }
+
+// Replaces the RGBA8 source `image` by its level-0 bytes: each texel goes
+// to filtering space and back (renormalising normal vectors), exactly as a
+// float level is written by ToBytes(), without a float copy of the image.
+void ToLevelBytesInPlace(ImageData& image, TextureUsage usage) {
+  const size_t width = static_cast<size_t>(image.width);
+  internal::ParallelFor(image.height, [&](int y) {
+    std::vector<float> row(width * 4);
+    uint8_t* texels = image.pixels.data() + y * width * 4;
+    DecodeRow(texels, width, usage, row.data());
+    EncodeRow(row.data(), width, usage, texels);
+  });
+}
+
+// The rows of one mip level in filtering space: either the RGBA8 source
+// image, converted row by row on demand, or a float level as is.
+class LevelRows {
+ public:
+  LevelRows(const ImageData& source, TextureUsage usage)
+      : bytes_(&source),
+        usage_(usage),
+        width_(source.width),
+        height_(source.height) {}
+  explicit LevelRows(const FloatImage& level)
+      : floats_(&level), width_(level.width), height_(level.height) {}
+
+  int width() const { return width_; }
+  int height() const { return height_; }
+
+  // Returns row `y` (width() * 4 values); converted rows are written to
+  // `scratch`, which must hold width() * 4 floats.
+  const float* Row(int y, float* scratch) const {
+    const size_t values = static_cast<size_t>(width_) * 4;
+    if (floats_ != nullptr) {
+      return floats_->rgba.data() + y * values;
+    }
+    DecodeRow(bytes_->pixels.data() + y * values, static_cast<size_t>(width_),
+              usage_, scratch);
+    return scratch;
+  }
+
+ private:
+  const ImageData* bytes_ = nullptr;
+  const FloatImage* floats_ = nullptr;
+  TextureUsage usage_ = TextureUsage::kLinear;
+  int width_ = 0;
+  int height_ = 0;
+};
 
 // Source texels and weights of one destination texel along one axis.
 struct Taps {
@@ -165,75 +235,56 @@ std::vector<Taps> BoxTaps(int source, int target) {
   return taps;
 }
 
-// Normalises the xyz of the `count` RGBA texels at `texels`; zero vectors
-// become +Z.
-void NormalizeVectors(float* texels, size_t count) {
-  for (size_t i = 0; i < count; ++i) {
-    float* v = texels + i * 4;
-    const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (length > 1.0e-6f) {
-      v[0] /= length;
-      v[1] /= length;
-      v[2] /= length;
-    } else {
-      v[0] = 0.0f;
-      v[1] = 0.0f;
-      v[2] = 1.0f;
-    }
-  }
-}
-
-void NormalizeVectors(FloatImage& image) {
-  const size_t width = static_cast<size_t>(image.width);
-  internal::ParallelFor(image.height, [&](int y) {
-    NormalizeVectors(image.rgba.data() + y * width * 4, width);
-  });
-}
-
 // Returns `source` halved in both directions (each side to max(1, side / 2))
-// with an exact box filter, run separably.
-FloatImage Downsample(const FloatImage& source, TextureUsage usage) {
-  const int width = std::max(1, source.width / 2);
-  const int height = std::max(1, source.height / 2);
-  const std::vector<Taps> taps_x = BoxTaps(source.width, width);
-  const std::vector<Taps> taps_y = BoxTaps(source.height, height);
-  const size_t source_row = static_cast<size_t>(source.width) * 4;
+// with an exact box filter, run separably. Works in bands of destination
+// rows, filtering the source rows they cover horizontally on the fly, so no
+// intermediate image of the whole level is made (a converted RGBA8 source is
+// never held as floats either). Same arithmetic, in the same order, as a
+// full horizontal pass followed by a vertical one.
+FloatImage Downsample(const LevelRows& source, TextureUsage usage) {
+  constexpr int kBandRows = 8;
+  const int width = std::max(1, source.width() / 2);
+  const int height = std::max(1, source.height() / 2);
+  const std::vector<Taps> taps_x = BoxTaps(source.width(), width);
+  const std::vector<Taps> taps_y = BoxTaps(source.height(), height);
+  const size_t source_row = static_cast<size_t>(source.width()) * 4;
   const size_t row = static_cast<size_t>(width) * 4;
 
-  // Horizontal pass: width x source.height.
-  std::vector<float> rows(row * source.height);
-  internal::ParallelFor(source.height, [&](int y) {
-    const float* src = source.rgba.data() + y * source_row;
-    float* dst = rows.data() + y * row;
-    for (int x = 0; x < width; ++x) {
-      const Taps& tap = taps_x[static_cast<size_t>(x)];
-      float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-      for (int k = 0; k < tap.count; ++k) {
-        const float* texel = src + static_cast<size_t>(tap.first + k) * 4;
-        const float weight = tap.weights[static_cast<size_t>(k)];
-        for (size_t c = 0; c < 4; ++c) {
-          sum[c] += texel[c] * weight;
-        }
-      }
-      std::memcpy(dst + static_cast<size_t>(x) * 4, sum, sizeof(sum));
-    }
-  });
-
-  // Vertical pass: width x height.
   FloatImage result{.width = width, .height = height};
   result.rgba.assign(row * height, 0.0f);
-  internal::ParallelFor(height, [&](int y) {
-    const Taps& tap = taps_y[static_cast<size_t>(y)];
-    float* dst = result.rgba.data() + y * row;
-    for (int k = 0; k < tap.count; ++k) {
-      const float* src = rows.data() + static_cast<size_t>(tap.first + k) * row;
-      const float weight = tap.weights[static_cast<size_t>(k)];
-      for (size_t i = 0; i < row; ++i) {
-        dst[i] += src[i] * weight;
+  const int bands = (height + kBandRows - 1) / kBandRows;
+  internal::ParallelFor(bands, [&](int band) {
+    std::vector<float> scratch(source_row);
+    std::vector<float> filtered(row);
+    const int last = std::min(height, (band + 1) * kBandRows);
+    for (int y = band * kBandRows; y < last; ++y) {
+      const Taps& tap_y = taps_y[static_cast<size_t>(y)];
+      float* dst = result.rgba.data() + y * row;
+      for (int ky = 0; ky < tap_y.count; ++ky) {
+        // Horizontal pass of source row tap_y.first + ky.
+        const float* src = source.Row(tap_y.first + ky, scratch.data());
+        for (int x = 0; x < width; ++x) {
+          const Taps& tap = taps_x[static_cast<size_t>(x)];
+          float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+          for (int k = 0; k < tap.count; ++k) {
+            const float* texel = src + static_cast<size_t>(tap.first + k) * 4;
+            const float weight = tap.weights[static_cast<size_t>(k)];
+            for (size_t c = 0; c < 4; ++c) {
+              sum[c] += texel[c] * weight;
+            }
+          }
+          std::memcpy(filtered.data() + static_cast<size_t>(x) * 4, sum,
+                      sizeof(sum));
+        }
+        // Vertical accumulation.
+        const float weight = tap_y.weights[static_cast<size_t>(ky)];
+        for (size_t i = 0; i < row; ++i) {
+          dst[i] += filtered[i] * weight;
+        }
       }
-    }
-    if (usage == TextureUsage::kNormal) {
-      NormalizeVectors(dst, static_cast<size_t>(width));
+      if (usage == TextureUsage::kNormal) {
+        NormalizeVectors(dst, static_cast<size_t>(width));
+      }
     }
   });
   return result;
@@ -362,32 +413,73 @@ float SampleChannel(const ImageData& image, int channel, float u, float v) {
   return top + (bottom - top) * fy;
 }
 
+// Calls `visit(level)` (an ImageData&, which it may move from) for every
+// mip level of `image`, level 0 first: `image` halved while it exceeds
+// `max_size` (> 0), then each level filtered from the previous one in
+// filtering space, down to 1 x 1; only level 0 unless `all_levels`. Takes
+// `image` over and reuses its pixels for level 0. Alive at any time: the
+// current level, the next one as floats (half the source's byte size for
+// level 1) and the level being visited.
+template <typename Visit>
+void ForEachMip(ImageData image, TextureUsage usage, int max_size,
+                bool all_levels, const Visit& visit) {
+  bool at_source = true;  // the current level is `image`, else `level`
+  FloatImage level;
+  const auto downsample = [&] {
+    return at_source ? Downsample(LevelRows(image, usage), usage)
+                     : Downsample(LevelRows(level), usage);
+  };
+  const auto width = [&] { return at_source ? image.width : level.width; };
+  const auto height = [&] { return at_source ? image.height : level.height; };
+  while (max_size > 0 && (width() > max_size || height() > max_size)) {
+    level = downsample();
+    if (at_source) {
+      image = {};
+      at_source = false;
+    }
+  }
+  for (;;) {
+    const bool last = !all_levels || (width() == 1 && height() == 1);
+    FloatImage next;
+    if (!last) {
+      next = downsample();
+    }
+    if (at_source) {
+      ToLevelBytesInPlace(image, usage);
+      visit(image);
+      image = {};
+      at_source = false;
+    } else {
+      ImageData bytes = ToBytes(level, usage);
+      level = {};
+      visit(bytes);
+    }
+    if (last) {
+      return;
+    }
+    level = std::move(next);
+  }
+}
+
+double MillisecondsSince(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - start)
+      .count();
+}
+
 }  // namespace
 
 std::vector<ImageData> GenerateMipChain(const ImageData& image,
                                         TextureUsage usage, int max_size) {
-  FloatImage level = ToFloat(image, usage);
-  if (usage == TextureUsage::kNormal) {
-    NormalizeVectors(level);
-  }
-  while (max_size > 0 && (level.width > max_size || level.height > max_size)) {
-    level = Downsample(level, usage);
-  }
   std::vector<ImageData> chain;
-  chain.reserve(
-      static_cast<size_t>(prefab::FullMipCount(level.width, level.height)));
-  chain.push_back(ToBytes(level, usage));
-  while (level.width > 1 || level.height > 1) {
-    level = Downsample(level, usage);
-    chain.push_back(ToBytes(level, usage));
-  }
+  ForEachMip(image, usage, max_size, true,
+             [&](ImageData& level) { chain.push_back(std::move(level)); });
   return chain;
 }
 
-core::Result<prefab::Texture, CookError> CookTexture(
-    const ImageData& image, const TextureCookOptions& options,
-    prefab::BulkStorage& storage) {
-  using Result = core::Result<prefab::Texture, CookError>;
+core::Result<EncodedTexture, CookError> EncodeTexture(
+    ImageData image, const TextureCookOptions& options) {
+  using Result = core::Result<EncodedTexture, CookError>;
   if (image.width <= 0 || image.height <= 0 ||
       image.pixels.size() !=
           static_cast<size_t>(image.width) * image.height * 4) {
@@ -400,61 +492,85 @@ core::Result<prefab::Texture, CookError> CookTexture(
   const auto start = std::chrono::steady_clock::now();
   InitEncoders();
 
-  std::vector<ImageData> levels =
-      GenerateMipChain(image, options.usage, options.max_size);
-  if (!options.generate_mips) {
-    levels.resize(1);
+  // The level sizes are known up front, so the output is laid out first and
+  // every level is encoded into it as soon as it is filtered.
+  int width = image.width;
+  int height = image.height;
+  while (options.max_size > 0 &&
+         (width > options.max_size || height > options.max_size)) {
+    width = std::max(1, width / 2);
+    height = std::max(1, height / 2);
   }
-  const auto filtered = std::chrono::steady_clock::now();
-
   const TextureFormat format = FormatFor(options);
-  std::vector<size_t> offsets;
-  offsets.reserve(levels.size());
+  const int level_count =
+      options.generate_mips ? prefab::FullMipCount(width, height) : 1;
+  EncodedTexture result{
+      .texture = {.format = format, .width = width, .height = height}};
+  result.texture.mips.reserve(static_cast<size_t>(level_count));
+  result.mip_offsets.reserve(static_cast<size_t>(level_count));
   size_t total = 0;
-  for (const ImageData& level : levels) {
-    offsets.push_back(total);
-    const size_t size = prefab::MipByteSize(format, level.width, level.height);
+  for (int i = 0; i < level_count; ++i) {
+    const int level_width = std::max(1, width >> i);
+    const int level_height = std::max(1, height >> i);
+    result.texture.mips.push_back(
+        {.width = level_width, .height = level_height});
+    result.mip_offsets.push_back(total);
+    const size_t size = prefab::MipByteSize(format, level_width, level_height);
     total += (size + prefab::kBulkAlignment - 1) / prefab::kBulkAlignment *
              prefab::kBulkAlignment;
   }
-  std::vector<std::byte> bytes(total);
+  result.bytes.resize(total);
+
   const bc7enc_compress_block_params bc7 = Bc7Params(options);
-  for (size_t i = 0; i < levels.size(); ++i) {
-    const ImageData& level = levels[i];
-    EncodeLevel(level, format, options, bc7,
-                std::span(bytes).subspan(
-                    offsets[i],
-                    prefab::MipByteSize(format, level.width, level.height)));
-  }
+  size_t index = 0;
+  double encode_ms = 0.0;
+  ForEachMip(std::move(image), options.usage, options.max_size,
+             options.generate_mips, [&](const ImageData& level) {
+               const auto encode_start = std::chrono::steady_clock::now();
+               EncodeLevel(level, format, options, bc7,
+                           std::span(result.bytes)
+                               .subspan(result.mip_offsets[index],
+                                        prefab::MipByteSize(format, level.width,
+                                                            level.height)));
+               encode_ms += MillisecondsSince(encode_start);
+               ++index;
+             });
 
-  const std::span<const std::byte> block = storage.Adopt(std::move(bytes));
-  prefab::Texture texture{
-      .format = format, .width = levels[0].width, .height = levels[0].height};
-  texture.mips.reserve(levels.size());
-  for (size_t i = 0; i < levels.size(); ++i) {
-    const ImageData& level = levels[i];
-    texture.mips.push_back(
-        {.width = level.width,
-         .height = level.height,
-         .data = block.subspan(
-             offsets[i],
-             prefab::MipByteSize(format, level.width, level.height))});
-  }
-
-  const auto end = std::chrono::steady_clock::now();
-  const auto ms = [](auto from, auto to) {
-    return std::chrono::duration<double, std::milli>(to - from).count();
-  };
+  const double total_ms = MillisecondsSince(start);
   core::log::Info(
       "cooked {} texture {} x {}: {} mips, {} KiB, {} in {:.1f} ms (mips "
       "{:.1f} ms)",
-      UsageName(options.usage), texture.width, texture.height,
-      texture.mips.size(), block.size() / 1024,
+      UsageName(options.usage), width, height, level_count, total / 1024,
       options.compress
           ? (options.quality == CookQuality::kHigh ? "high" : "fast")
           : "uncompressed",
-      ms(start, end), ms(start, filtered));
-  return Result::Ok(std::move(texture));
+      total_ms, total_ms - encode_ms);
+  return Result::Ok(std::move(result));
+}
+
+prefab::Texture StoreTexture(EncodedTexture encoded,
+                             prefab::BulkStorage& storage) {
+  const std::span<const std::byte> block =
+      storage.Adopt(std::move(encoded.bytes));
+  prefab::Texture texture = std::move(encoded.texture);
+  for (size_t i = 0; i < texture.mips.size(); ++i) {
+    prefab::TextureMip& mip = texture.mips[i];
+    mip.data = block.subspan(
+        encoded.mip_offsets[i],
+        prefab::MipByteSize(texture.format, mip.width, mip.height));
+  }
+  return texture;
+}
+
+core::Result<prefab::Texture, CookError> CookTexture(
+    const ImageData& image, const TextureCookOptions& options,
+    prefab::BulkStorage& storage) {
+  using Result = core::Result<prefab::Texture, CookError>;
+  auto encoded = EncodeTexture(image, options);
+  if (!encoded.ok()) {
+    return Result::Error(encoded.error());
+  }
+  return Result::Ok(StoreTexture(std::move(encoded).value(), storage));
 }
 
 ImageData PackOrm(const OrmSources& sources) {

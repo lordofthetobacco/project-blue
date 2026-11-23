@@ -98,12 +98,19 @@ void PrefabCache::Replace(PrefabId id, prefab::Prefab prefab) {
   Entry& entry = entries_[Index(id)];
   if (entry.alive) {
     ReleaseGpu(id, entry);
+    entry.prefab = prefab::Prefab();
+    gpu_.FlushReleases();
   } else {
     entry.alive = true;
     by_key_.emplace(entry.key, id);
   }
   entry.prefab = std::move(prefab);
   entry.gpu = UploadGpu(entry.prefab);
+}
+
+bool PrefabCache::RebaseCpu(PrefabId id, const prefab::Prefab& source) {
+  Entry& entry = entries_[Index(id)];
+  return entry.alive && prefab::RebaseBulk(entry.prefab, source);
 }
 
 void PrefabCache::Release(PrefabId id) {

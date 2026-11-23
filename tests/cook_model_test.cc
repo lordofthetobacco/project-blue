@@ -18,6 +18,7 @@
 #include "asset/model_importer.h"
 #include "cook/model_cook.h"
 #include "core/path.h"
+#include "material/material.h"
 #include "prefab/prefab.h"
 #include "prefab/prefab_file.h"
 #include "tests/scratch_directory.h"
@@ -238,6 +239,32 @@ TEST_CASE("CookModel reports missing files and bad options") {
   CHECK(CookModel(Sample("missing.glb")).error() == CookError::kFileNotFound);
   CHECK(CookModel(Sample("teapot.obj"), {.scale = 0.0f}).error() ==
         CookError::kInvalidArgument);
+}
+
+TEST_CASE("AddMaterialToPrefab cooks embedded textures, or changes nothing") {
+  prefab::Prefab prefab;
+  const ModelCookOptions options = QuickOptions();
+  material::MaterialDesc desc{.name = "glock"};
+  desc.base_color_texture = {.path = Sample("glock/glock17.glb"),
+                             .embedded_index = 0};
+  desc.metallic_roughness_texture = desc.base_color_texture;
+  auto added = AddMaterialToPrefab(prefab, desc, options);
+  REQUIRE(added.ok());
+  CHECK(added.value() == 0);
+  REQUIRE(prefab.textures.size() == 2);  // base colour + ORM from one image
+  CHECK(prefab.textures[0].format == prefab::TextureFormat::kBc7Srgb);
+  CHECK(prefab.textures[1].format == prefab::TextureFormat::kBc7Unorm);
+  CHECK(prefab.textures[0].name == "glock17_0");
+  CHECK(prefab.textures[1].name == "glock_orm");
+  CHECK(!prefab.textures[1].mips.front().data.empty());
+
+  // A missing image fails without leaving reserved texture slots behind.
+  desc.normal_texture = {.path = Sample("missing.png")};
+  CHECK(AddMaterialToPrefab(prefab, desc, options).error() ==
+        CookError::kTextureLoadFailed);
+  CHECK(prefab.materials.size() == 1);
+  CHECK(prefab.textures.size() == 2);
+  CHECK(prefab.edit.texture_sources.size() == 2);
 }
 
 TEST_CASE("Cook options round-trip through their text form") {

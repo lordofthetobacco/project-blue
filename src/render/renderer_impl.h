@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -25,20 +26,26 @@
 #include "render/gpu_timer.h"
 #include "render/image.h"
 #include "render/material_system.h"
+#include "render/memory_stats.h"
 #include "render/mesh.h"
 #include "render/metal_context.h"
 #include "render/passes/bloom_pass.h"
 #include "render/passes/depth_prepass.h"
 #include "render/passes/frame_context.h"
 #include "render/passes/mesh_pass.h"
+#include "render/passes/motion_blur_pass.h"
+#include "render/passes/motion_vector_pass.h"
 #include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/reticle_pass.h"
+#include "render/passes/scope_lens_pass.h"
 #include "render/passes/shadow_pass.h"
 #include "render/passes/skybox_pass.h"
 #include "render/passes/ssao_pass.h"
+#include "render/passes/temporal_scaler_pass.h"
 #include "render/passes/tonemap_pass.h"
 #include "render/passes/ui_pass.h"
+#include "render/recording.h"
 #include "render/render_targets.h"
 #include "render/renderer.h"
 #include "render/samplers.h"
@@ -52,21 +59,45 @@
 //
 // How a frame is built
 // --------------------
-// RendererImpl::DrawFrameTo() waits for the frame slot's previous command
-// buffer, collects its GPU times, writes the frame's uniforms and calls
-// RecordCommands(), the wiring: it records the passes in order into the
-// frame's one command buffer, each between GpuTimer::BeginScope() and
-// EndScope() of its GpuScope. Every pass opens its own render encoders
-// (blit encoders for copies) through render/encoders.h:
+// RendererImpl::DrawFrameTo() waits for the frame slot's previous work
+// (its Submission), collects its GPU times, resets the slot's command
+// allocator and transient constants, begins the slot's command buffer on
+// the allocator, writes the frame's uniforms and calls RecordCommands(), the
+// wiring: it records the passes in order into the frame's one command
+// buffer, each between GpuTimer::BeginScope() and EndScope() of its
+// GpuScope. Every pass opens its own render encoders (copy encoders for
+// copies) through render/encoders.h:
 //
 //   shadow cascades      ShadowPass        sun depth, one encoder per
 //                                          cascade layer (4)
 //   depth pre-pass       DepthPrepass      draw list -> depth
+//   motion vectors       MotionVectorPass  temporal scaler only: depth and
+//                                          the moving items -> where each
+//                                          pixel was last frame
 //   ssao                 SsaoPass          depth -> ssao, half res:
 //                                          occlusion + two blur encoders
+//   scope picture        RecordScopeView() SceneView::scope only: the same
+//                                          DepthPrepass, MeshPass and
+//                                          SkyboxPass from the scope's
+//                                          camera into the scope picture
+//                                          (shadow map and IBL shared, no
+//                                          SSAO, the held weapon left out)
 //   scene (HDR)          BeginScenePass()  one encoder shared by MeshPass
-//                                          (depth Equal), SkyboxPass and
-//                                          ReticlePass -> EndScenePass()
+//                                          (depth Equal), SkyboxPass,
+//                                          ReticlePass and ScopeLensPass ->
+//                                          EndScenePass()
+//   motion blur          MotionBlurPass    weapon items -> velocity -> tile
+//                                          max; hdr blurred in place (via a
+//                                          copy); then ResumeScenePass() ->
+//                                          ReticlePass, ScopeLensPass ->
+//                                          EndScenePass(). Only in frames
+//                                          with weapon motion blur, where
+//                                          the sights move here from the
+//                                          scene pass.
+//   upscale              TemporalScalerPass  temporal scaler only: the
+//                                          sights' reactive mask, then
+//                                          MetalFX: hdr + depth + motion
+//                                          vectors -> upscaled hdr
 //   bloom                BloomPass         hdr -> bloom mips, an encoder per
 //                                          down- and up-sample step
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
@@ -74,8 +105,18 @@
 //                                          -> ldr (editor; skipped if empty)
 //   present              PresentPass       ldr -> drawable (FXAA), or ->
 //                                          the editor viewport image (plus
-//                                          a blit per viewport readback)
+//                                          a copy per viewport readback)
 //   ui                   RecordUiPass()    ImGui on the drawable
+//
+// Two sizes: everything up to the weapon motion blur renders at the render
+// extent, everything from bloom on at the output extent (RenderTargets).
+// They differ only while an upscaling mode is on (SceneView::post.upscaling,
+// render/temporal_math.h); then the scene is rasterized with a sub-pixel
+// jitter that changes every frame, and the scaler turns the jittered frames
+// into the anti-aliased image the post chain reads
+// (RenderTargets::post_hdr()). With Upscaling::kOff nothing of this exists
+// and the frame is recorded exactly as before. A mode or size change
+// recreates the targets and the scaler with the GPU idle (ConfigureTargets()).
 //
 // The visible submeshes are culled and sorted once per frame (DrawList) and
 // shared by the depth pre-pass and the mesh pass. Disabled effects
@@ -94,29 +135,42 @@
 //      shaders/fullscreen.vert.metal. Every index comes from
 //      shaders/bindings.h; per-pass constants are a struct mirrored in C++
 //      with a static_assert on its size.
-//   2. Open encoders only through render/encoders.h (BeginRenderPass(),
-//      BeginBlit()), so that they are labelled and timed.
+//   2. Open encoders and bind only through render/encoders.h, whose header
+//      comment is the rule book (BeginRenderPass(), BeginCopy(), Bind*()):
+//      it takes care of barriers, the argument table and residency.
 //   3. Add a GpuScope (render/gpu_scope.h) and a timed(...) line in
 //      RecordCommands().
 //   4. Add the .mm to the blue_render list in CMakeLists.txt. Window-sized
 //      images belong in RenderTargets (re-bound in BindTargets()).
-// There are no image layouts, barriers or descriptor sets: Metal orders the
-// encoders of the single queue and tracks the hazards between them, and
-// passes bind their inputs on their encoders. The window's drawable is
-// acquired as late as possible, just before the first pass that renders to
-// it; when none is available the passes that need it are skipped and the
-// frame is still committed. The editor viewport image is RGBA8Unorm_sRGB,
-// the same encoding as the drawable.
+// This is the Metal 4 core API: nothing is tracked or retained for us. The
+// single queue runs the encoders in order, each behind a barrier on the
+// output of the earlier ones; resources are resident through the context's
+// residency set; and what a frame uses stays alive until the frame has
+// completed (the retire lists below). When the frame is committed the
+// window's drawable is presented through the queue (MetalContext::Commit()).
+// The drawable is acquired as late as possible, just before the first pass
+// that renders to it; when none is available the passes that need it are
+// skipped and the frame is still committed. The editor viewport image is
+// RGBA8Unorm_sRGB, the same encoding as the drawable.
 
 namespace blue::render {
 
 // Everything behind Renderer; see Renderer for the meaning of the methods it
 // forwards to. Neither copyable nor movable. Not thread-safe.
 struct RendererImpl {
-  // Per-frame-in-flight state: the frame slot's last command buffer, waited
-  // on (waitUntilCompleted) before the slot records again.
+  // Per-frame-in-flight state. The slot's command buffer records into the
+  // slot's allocator, which is reset (with the constants) once the slot's
+  // last work has completed, right before it records again.
   struct Frame {
-    id<MTLCommandBuffer> command_buffer = nil;
+    id<MTL4CommandAllocator> allocator = nil;
+    id<MTL4CommandBuffer> command_buffer = nil;
+    // Never null after construction.
+    std::unique_ptr<TransientArena> constants;
+    // The completion of the last commit; null before the first.
+    std::shared_ptr<const Submission> submission;
+    // The drawable that commit presented, which nothing else keeps alive
+    // until the GPU has rendered to it.
+    id<CAMetalDrawable> drawable = nil;
   };
 
   // Where a frame's tonemapped scene goes.
@@ -148,9 +202,12 @@ struct RendererImpl {
   RendererImpl(const RendererImpl&) = delete;
   RendererImpl& operator=(const RendererImpl&) = delete;
 
-  MeshId UploadMesh(const asset::MeshData& data);
+  MeshId UploadMesh(std::span<const asset::Vertex> vertices,
+                    std::span<const asset::Index> indices);
   void ReleaseMesh(MeshId id);
   void ReleaseTextures(std::span<const TextureId> ids);
+  void FlushReleases();
+  [[nodiscard]] MemoryStats memory_stats() const;
   void SetVsync(bool enabled);
   ViewportImage PrepareViewport(core::Extent2D size);
   uint64_t RequestViewportReadback();
@@ -159,17 +216,29 @@ struct RendererImpl {
   void ShutdownImGuiRenderer();
 
   // Destroys the retired meshes and images no frame in flight can use any
-  // more. Call after the current frame slot's command buffer was waited on.
+  // more. Call after the current frame slot's last work was waited for.
   void DestroyRetired();
+  // Destroys every retired mesh and image if no frame is in flight any more
+  // (every slot's last work completed; does not wait). Keeps releases
+  // moving while frames are skipped (minimized window, no swapchain).
+  void DestroyRetiredIfIdle();
   [[nodiscard]] bool RebuildSwapchain();
-  // Blocks until `frame`'s last command buffer, if any, has completed; a GPU
-  // error in it is fatal.
+  // Blocks until `frame`'s last committed work, if any, has completed; a
+  // GPU error in it is fatal.
   static void WaitForFrame(const Frame& frame);
   // Blocks until no frame in flight runs on the GPU any more, so that render
   // targets can be replaced.
   void WaitForFramesInFlight() const;
   // Recreates the viewport image and the render targets at `size`.
   void ResizeViewport(core::Extent2D size);
+  // Gives every frame slot a new command buffer. No slot may be recording
+  // or in flight.
+  void CreateFrameCommandBuffers();
+  // Recreates the render targets for an output of `output` pixels in
+  // upscaling mode `mode` (kOff when unsupported), with the scaler, the
+  // texture LOD bias and every pass's bindings to match, and starts a new
+  // temporal history. The GPU must be idle.
+  void ConfigureTargets(core::Extent2D output, Upscaling mode);
   // Points every pass at the current render targets; call after they were
   // created or resized.
   void BindTargets();
@@ -180,8 +249,23 @@ struct RendererImpl {
   // the swapchain dirty, when none was available.
   [[nodiscard]] bool AcquireDrawable(FrameContext& ctx);
   // Records every pass of the frame described by `ctx` (see the top of this
-  // file); acquires the drawable on the way.
-  void RecordCommands(FrameContext& ctx, ImDrawData* ui, Output output);
+  // file); `scope_ctx` is the scope picture's, or null. Acquires the
+  // drawable on the way.
+  void RecordCommands(FrameContext& ctx, const FrameContext* scope_ctx,
+                      bool reset_history, ImDrawData* ui, Output output);
+  // Creates the scope picture and its depth (kMaxScopeResolution square) the
+  // first time a frame has a scope; they live as long as the renderer.
+  void EnsureScopeTargets();
+  // Records the scope picture: depth pre-pass, meshes and sky of
+  // `scope_ctx`.
+  void RecordScopeView(const FrameContext& scope_ctx);
+  // Records the reactive mask of the sights of `ctx` for the temporal
+  // scaler.
+  void RecordReactiveMask(const FrameContext& ctx) const;
+  // Draws the sights (reflex dot, scope eyepiece) of `ctx` on `encoder`, the
+  // scene pass's.
+  void DrawSights(const FrameContext& ctx,
+                  id<MTL4RenderCommandEncoder> encoder) const;
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
   // Records the copy of the viewport image, after it was rendered, for every
@@ -207,12 +291,20 @@ struct RendererImpl {
   Environment environment_;
   // Declared before the passes that borrow it.
   std::vector<Mesh> meshes_;
+  // GPU memory of the resident meshes in meshes_ and their count.
+  uint64_t mesh_bytes_ = 0;
+  uint32_t mesh_count_ = 0;
   // Released GPU objects waiting until no frame in flight uses them
   // (ReleaseMesh(), ReleaseTextures(), replaced viewport images); declared
   // after the context so they are destroyed before it.
   std::vector<Retired<Mesh>> retired_meshes_;
   std::vector<Retired<Image>> retired_images_;
   DrawList draw_list_;
+  // The scope view's culled draw list and its picture and depth
+  // (EnsureScopeTargets(); empty until a frame has a scope).
+  DrawList scope_draw_list_;
+  Image scope_picture_;
+  Image scope_depth_;
 
   ShadowPass shadow_pass_;
   DepthPrepass depth_prepass_;
@@ -220,6 +312,10 @@ struct RendererImpl {
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
   ReticlePass reticle_pass_;
+  ScopeLensPass scope_lens_pass_;
+  MotionBlurPass motion_blur_pass_;
+  MotionVectorPass motion_vector_pass_;
+  TemporalScalerPass temporal_scaler_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   OverlayPass overlay_pass_;
@@ -237,6 +333,14 @@ struct RendererImpl {
   uint64_t viewport_resized_at_ = 0;
   std::vector<Readback> readbacks_;
   uint64_t next_readback_ticket_ = 1;
+
+  // The upscaling mode the targets are configured for.
+  Upscaling upscaling_ = Upscaling::kOff;
+  // Counts the frames recorded with the scaler: the jitter phase.
+  uint64_t temporal_frame_ = 0;
+  // False until a frame was recorded with the current targets, and after a
+  // frame was skipped: the scaler's history is not the next frame's past.
+  bool temporal_history_valid_ = false;
 
   std::array<Frame, kFramesInFlight> frames_;
   size_t frame_index_ = 0;

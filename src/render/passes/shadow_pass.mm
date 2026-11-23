@@ -47,7 +47,7 @@ ImageDesc MapDesc() {
 ShadowPass::ShadowPass(const MetalContext& context, ShaderPrograms& programs,
                        const std::string& shader_dir,
                        const std::vector<Mesh>& meshes)
-    : device_(context.device()), meshes_(meshes), map_(context, MapDesc()) {
+    : context_(context), meshes_(meshes), map_(context, MapDesc()) {
   programs.Add(
       core::JoinPath(shader_dir, "shadow.vert.metal"), "",
       [this](const shader::ShaderLibrary& vertex,
@@ -67,7 +67,7 @@ ShadowPass::ShadowPass(const MetalContext& context, ShaderPrograms& programs,
             .depth_bias = true,
             .label = "shadow",
         };
-        auto pipeline = Pipeline::Create(device_, desc);
+        auto pipeline = Pipeline::Create(context_, desc);
         if (!pipeline.ok()) {
           return pipeline.error();
         }
@@ -83,8 +83,8 @@ void ShadowPass::Record(const FrameContext& ctx) const {
   constexpr auto kMapSize = static_cast<double>(lighting::kShadowMapSize);
 
   for (uint32_t layer = 0; layer < ctx.cascades.size(); ++layer) {
-    MTLRenderPassDescriptor* descriptor =
-        [MTLRenderPassDescriptor renderPassDescriptor];
+    MTL4RenderPassDescriptor* descriptor =
+        [[MTL4RenderPassDescriptor alloc] init];
     MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
     depth.texture = map_.texture();
     depth.slice = layer;
@@ -92,8 +92,8 @@ void ShadowPass::Record(const FrameContext& ctx) const {
     depth.storeAction = MTLStoreActionStore;
     depth.clearDepth = kDepthClearValue;
 
-    const id<MTLRenderCommandEncoder> encoder =
-        BeginRenderPass(ctx, descriptor, "shadow cascade");
+    const id<MTL4RenderCommandEncoder> encoder =
+        BeginRenderPass(ctx.rec, descriptor, "shadow cascade");
     [encoder setViewport:MTLViewport{
                              .originX = 0.0,
                              .originY = 0.0,
@@ -125,10 +125,8 @@ void ShadowPass::Record(const FrameContext& ctx) const {
       const ShadowConstants constants{
           .light_model_view_proj = cascade.view_projection * item.transform,
       };
-      [encoder setVertexBytes:&constants
-                       length:sizeof(constants)
-                      atIndex:kBufferDraw];
-      meshes_[mesh_index].Draw(encoder);
+      BindConstants(ctx.rec, kBufferDraw, constants);
+      meshes_[mesh_index].Draw(ctx.rec, encoder);
     }
     [encoder endEncoding];
   }

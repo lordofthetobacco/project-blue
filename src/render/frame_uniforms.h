@@ -6,6 +6,7 @@
 
 #include <glm/ext/vector_uint4.hpp>
 #include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
 #include <glm/vec4.hpp>
 
 #include "core/extent.h"
@@ -52,17 +53,41 @@ struct FrameUniforms {
   // x: number of valid point_lights, [0, kMaxPointLights].
   glm::uvec4 point_light_count;
   std::array<GpuPointLight, kMaxPointLights> point_lights;
+  // Camera::previous_view_projection (never jittered), for the motion
+  // vectors of the weapon motion blur (render/motion_blur_math.h) and of the
+  // scene (MotionVectorPass).
+  glm::mat4 previous_view_proj;
+  // x: blur scale (MotionBlurScale(); 0 when the blur is off), y: longest
+  // blur vector in pixels (twice z), z: largest blur radius in pixels
+  // (MotionBlurMaxRadius(), the tile size of RenderTargets::motion_tiles()),
+  // w: unused.
+  glm::vec4 motion_blur;
+  // The camera's projection * view without the jitter: where a point is on
+  // screen as far as motion goes. Equal to view_proj without jitter.
+  glm::mat4 unjittered_view_proj;
+  // xy: the jitter in pixels of the render target (x right, y down), the
+  // `jitter_pixels` of MakeFrameUniforms(); zw: unused.
+  glm::vec4 jitter;
 };
 
 // Returns the uniforms of `view` for a render target of `extent`.
 // `cascades` are only read when `shadows` is true. The environment fields
-// stay zero (no environment yet). Point lights whose range sphere lies
-// outside the camera frustum are dropped; when more than kMaxPointLights
+// stay zero (no environment yet). The motion blur scale is 0 when
+// view.post disables the weapon motion blur. Point lights whose range sphere
+// lies outside the camera frustum are dropped; when more than kMaxPointLights
 // remain, the ones that light the camera position the least are dropped.
+//
+// `jitter_pixels` (JitterOffset() of render/temporal_math.h; zero without
+// the temporal scaler) moves what is rasterized by that many pixels of the
+// target: projection, view_proj and their inverses carry it
+// (JitterProjection()), so every pass that draws or reconstructs positions
+// from the depth buffer agrees. unjittered_view_proj and previous_view_proj
+// never carry it. With zero jitter every field is exactly what it was
+// before jitter existed, and unjittered_view_proj equals view_proj.
 // Allocates nothing.
 [[nodiscard]] FrameUniforms MakeFrameUniforms(
     const SceneView& view, std::span<const lighting::Cascade> cascades,
-    bool shadows, core::Extent2D extent);
+    bool shadows, core::Extent2D extent, glm::vec2 jitter_pixels = {});
 
 }  // namespace blue::render
 

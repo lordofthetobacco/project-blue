@@ -92,6 +92,14 @@ class PlayerController {
   // PhysicsWorld::Update.
   void UpdateView(const input::InputSettings& settings, float dt);
 
+  // Multiplies the mouse look of the following Updates by `factor`, on top
+  // of the aim zoom's scaling (e.g. 1 / M while looking through a scope of
+  // magnification M, so its picture moves at a controllable speed). Stays
+  // until changed; 1 (the start value) is the plain look. Non-positive or
+  // non-finite values count as 1.
+  void SetLookScale(float factor);
+  [[nodiscard]] float look_scale() const { return look_scale_; }
+
   // Turns the look by a recoil kick: `pitch_radians` up, `yaw_radians` left
   // (the LookAngles convention). The pitch stays within the look clamp. Shows
   // in the view from the next UpdateView on and is not part of look_delta().
@@ -132,6 +140,7 @@ class PlayerController {
   bool sprinting_ = false;
   bool aiming_ = false;
   float aim_fraction_ = 0.0f;  // Smoothed aiming_, drives the FOV zoom.
+  float look_scale_ = 1.0f;    // SetLookScale()
   float eye_height_ = 1.65f;
   HeadBob head_bob_;
   FovController fov_;

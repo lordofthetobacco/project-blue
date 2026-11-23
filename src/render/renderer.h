@@ -19,6 +19,7 @@
 #include "platform/window.h"
 #include "render/frame_config.h"
 #include "render/gpu_scope.h"
+#include "render/memory_stats.h"
 #include "render/scene_view.h"
 #include "render/texture_types.h"
 #include "shader/shader_compiler.h"
@@ -118,7 +119,13 @@ class Renderer {
 
   // Uploads `data` and returns its handle. Meshes stay resident until
   // ReleaseMesh().
-  [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data);
+  [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data) {
+    return UploadMesh(data.vertices, data.indices);
+  }
+  // Same, from borrowed vertex and index arrays (e.g. the bulk data of a
+  // loaded prefab), without an intermediate copy.
+  [[nodiscard]] MeshId UploadMesh(std::span<const asset::Vertex> vertices,
+                                  std::span<const asset::Index> indices);
 
   // Releasing GPU resources. Each call takes effect at once for new frames
   // and destroys the GPU objects only once no frame in flight can use them.
@@ -132,9 +139,16 @@ class Renderer {
   void ReleaseMesh(MeshId id);
   void ReleaseTextures(std::span<const TextureId> ids);
   void ReleaseMaterial(MaterialId id);
+  // Destroys every released mesh and texture now instead of after the
+  // frames in flight: waits for those frames' command buffers (not for the
+  // whole device). For loads that replace large resources, between releasing
+  // the old ones and uploading the new ones, so both never coexist in GPU
+  // memory; not meant for every frame.
+  void FlushReleases();
   // Returns uploaded texture `id` as an ImGui texture (the white default when
   // `id` is unknown or released). Valid until ReleaseTextures() of that id has
-  // taken effect (kFramesInFlight frames after the call).
+  // taken effect (kFramesInFlight frames after the call, or the next
+  // FlushReleases()).
   [[nodiscard]] ImTextureID ui_texture(TextureId id) const;
 
   // Creates an untextured material (every slot its default; TextureRefs
@@ -160,6 +174,9 @@ class Renderer {
   [[nodiscard]] const material::MaterialDesc& material(MaterialId id) const;
   [[nodiscard]] size_t material_count() const;
   [[nodiscard]] TextureStats texture_stats() const;
+  // Returns what the renderer holds in GPU memory, for the device and per
+  // owner; cheap enough to call every frame (see MemoryStats).
+  [[nodiscard]] MemoryStats memory_stats() const;
 
   // Replaces the environment (sky and image-based lighting) by the
   // equirectangular HDR image `equirect`, scaled by `intensity` and turned
@@ -193,6 +210,15 @@ class Renderer {
   [[nodiscard]] std::string_view device_name() const;
   // The size in pixels of the window output (the swapchain extent).
   [[nodiscard]] core::Extent2D output_extent() const;
+  // The size the scene is rendered at, and the size it is shown at after
+  // the temporal scaler (the window's or the editor viewport's): equal
+  // unless an upscaling mode is active.
+  [[nodiscard]] core::Extent2D render_extent() const;
+  [[nodiscard]] core::Extent2D scene_output_extent() const;
+  // The upscaling mode of the most recently drawn frame:
+  // SceneView::post.upscaling, or kOff when the device has no temporal
+  // scaler.
+  [[nodiscard]] Upscaling active_upscaling() const;
   // Blocks until the GPU has finished all submitted work.
   void WaitIdle() const;
 
