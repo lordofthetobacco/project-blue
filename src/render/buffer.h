@@ -10,7 +10,8 @@
 
 namespace blue::render {
 
-// A Metal buffer. Move-only; a moved-from buffer is empty (nil handle, size
+// A Metal buffer, resident on the context's queue for its lifetime (see
+// MetalContext). Move-only; a moved-from buffer is empty (nil handle, size
 // 0, no mapping). Not thread-safe.
 class Buffer {
  public:
@@ -23,8 +24,9 @@ class Buffer {
   };
 
   Buffer() = default;
-  // Creates a buffer of `size` bytes, which must not be 0. `label` names it
-  // in GPU captures; nullptr gives a generic name.
+  // Creates a buffer of `size` bytes, which must not be 0, on `context`,
+  // which must outlive it. `label` names it in GPU captures; nullptr gives a
+  // generic name.
   Buffer(const MetalContext& context, size_t size, Access access,
          const char* label = nullptr);
 
@@ -43,6 +45,7 @@ class Buffer {
   // Size and mapping are read from the buffer itself, so that the defaulted
   // moves leave the moved-from buffer empty.
   id<MTLBuffer> buffer_ = nil;
+  Resident resident_;
 };
 
 // Creates a private (kGpuOnly) buffer and fills it with `data`, which must not

@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "core/path.h"
+#include "render/encoders.h"
 #include "render/render_targets.h"
 #include "shaders/bindings.h"
 
@@ -21,11 +22,10 @@ SkyboxPass::SkyboxPass(const MetalContext& context, ShaderPrograms& programs,
                        const std::string& shader_dir,
                        const Environment& environment)
     : environment_(environment) {
-  id<MTLDevice> device = context.device();
   programs.Add(
       core::JoinPath(shader_dir, "skybox.vert.metal"),
       core::JoinPath(shader_dir, "skybox.frag.metal"),
-      [this, device](const shader::ShaderLibrary& vertex,
+      [this, &context](const shader::ShaderLibrary& vertex,
                      const shader::ShaderLibrary* fragment)
           -> std::optional<std::string> {
         // Only where nothing was drawn: the depth there is still the clear
@@ -40,7 +40,7 @@ SkyboxPass::SkyboxPass(const MetalContext& context, ShaderPrograms& programs,
             .depth_write = false,
             .label = "skybox",
         };
-        auto pipeline = Pipeline::Create(device, desc);
+        auto pipeline = Pipeline::Create(context, desc);
         if (!pipeline.ok()) {
           return pipeline.error();
         }
@@ -50,11 +50,10 @@ SkyboxPass::SkyboxPass(const MetalContext& context, ShaderPrograms& programs,
 }
 
 void SkyboxPass::Draw(const FrameContext& ctx,
-                      id<MTLRenderCommandEncoder> encoder) const {
+                      id<MTL4RenderCommandEncoder> encoder) const {
   pipeline_->Bind(encoder);
-  [encoder setFragmentTexture:environment_.sky_texture() atIndex:kTextureSky];
-  [encoder setFragmentSamplerState:environment_.sky_sampler()
-                           atIndex:kSamplerLinearClamp];
+  BindTexture(ctx.rec, kTextureSky, environment_.sky_texture());
+  BindSampler(ctx.rec, kSamplerLinearClamp, environment_.sky_sampler());
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle
               vertexStart:0
               vertexCount:kVertexCount];

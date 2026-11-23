@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "render/encoders.h"
 #include "render/motion_blur_math.h"
 #include "render/texture_types.h"
 
@@ -77,17 +78,13 @@ void RenderTargets::Resize(core::Extent2D extent) {
 }
 
 void RenderTargets::ClearSsaoToWhite() {
-  MTLRenderPassDescriptor* pass =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* pass = [[MTL4RenderPassDescriptor alloc] init];
   pass.colorAttachments[0].texture = ssao_.texture();
   pass.colorAttachments[0].loadAction = MTLLoadActionClear;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   pass.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
-  context_.SubmitImmediate([pass](id<MTLCommandBuffer> cmd) {
-    id<MTLRenderCommandEncoder> encoder =
-        [cmd renderCommandEncoderWithDescriptor:pass];
-    encoder.label = @"Clear SSAO target";
-    [encoder endEncoding];
+  context_.SubmitImmediate([pass](const Recording& rec) {
+    [BeginRenderPass(rec, pass, "Clear SSAO target") endEncoding];
   });
 }
 

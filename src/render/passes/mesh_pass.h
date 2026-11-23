@@ -38,7 +38,8 @@ class MeshPass {
 
   // Records ctx.draw_list on `encoder`, the scene encoder (BeginScenePass());
   // leaves an arbitrary pipeline bound.
-  void Draw(const FrameContext& ctx, id<MTLRenderCommandEncoder> encoder) const;
+  void Draw(const FrameContext& ctx,
+            id<MTL4RenderCommandEncoder> encoder) const;
 
  private:
   const MaterialSystem& materials_;

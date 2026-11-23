@@ -13,6 +13,7 @@
 #include <glm/vec4.hpp>
 
 #include "core/path.h"
+#include "render/encoders.h"
 #include "render/render_targets.h"
 #include "render/scene_view.h"
 #include "shaders/bindings.h"
@@ -93,12 +94,11 @@ ScopeLensPass::ScopeLensPass(const MetalContext& context,
                     Buffer::Access::kCpuSequentialWrite, "scope lens uniforms");
   }
 
-  id<MTLDevice> device = context.device();
   programs.Add(
       core::JoinPath(shader_dir, "scope_lens.vert.metal"),
       core::JoinPath(shader_dir, "scope_lens.frag.metal"),
-      [this, device](const shader::ShaderLibrary& vertex,
-                     const shader::ShaderLibrary* fragment)
+      [this, &context](const shader::ShaderLibrary& vertex,
+                       const shader::ShaderLibrary* fragment)
           -> std::optional<std::string> {
         // Blended by the rim's coverage, depth tested against the scene
         // (equal passes too, for a disc on the model's own glass) without
@@ -114,7 +114,7 @@ ScopeLensPass::ScopeLensPass(const MetalContext& context,
             .blend = BlendMode::kAlpha,
             .label = "scope lens",
         };
-        auto pipeline = Pipeline::Create(device, desc);
+        auto pipeline = Pipeline::Create(context, desc);
         if (!pipeline.ok()) {
           return pipeline.error();
         }
@@ -126,7 +126,7 @@ ScopeLensPass::ScopeLensPass(const MetalContext& context,
 void ScopeLensPass::BindPicture(id<MTLTexture> picture) { picture_ = picture; }
 
 void ScopeLensPass::Draw(const FrameContext& ctx,
-                         id<MTLRenderCommandEncoder> encoder) const {
+                         id<MTL4RenderCommandEncoder> encoder) const {
   if (!ctx.view.scope || picture_ == nil) {
     return;
   }
@@ -135,9 +135,8 @@ void ScopeLensPass::Draw(const FrameContext& ctx,
   std::memcpy(buffer.mapped(), &uniforms, sizeof(uniforms));
 
   pipeline_->Bind(encoder);
-  [encoder setVertexBuffer:buffer.handle() offset:0 atIndex:kBufferScopeLens];
-  [encoder setFragmentBuffer:buffer.handle() offset:0 atIndex:kBufferScopeLens];
-  [encoder setFragmentTexture:picture_ atIndex:kTextureScopePicture];
+  BindBuffer(ctx.rec, kBufferScopeLens, buffer.handle());
+  BindTexture(ctx.rec, kTextureScopePicture, picture_);
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle
               vertexStart:0
               vertexCount:kVertexCount];

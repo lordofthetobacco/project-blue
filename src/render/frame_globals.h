@@ -12,6 +12,7 @@
 #include "render/frame_uniforms.h"
 #include "render/image.h"
 #include "render/metal_context.h"
+#include "render/recording.h"
 #include "render/samplers.h"
 
 namespace blue::render {
@@ -25,7 +26,7 @@ enum class FrameView : uint32_t {
 inline constexpr size_t kFrameViewCount = 2;
 
 // The resources every scene shader sees (FrameResources in shaders/common.h),
-// set on an encoder by Bind() (indices in shaders/bindings.h):
+// bound in the argument table by Bind() (indices in shaders/bindings.h):
 //   kBufferFrame (both stages):  FrameUniforms, one shared buffer per frame
 //                                in flight and view
 //   kTextureShadowMap:           cascaded shadow map (depth2d_array)
@@ -53,20 +54,21 @@ class FrameGlobals {
   void Write(size_t frame, const FrameUniforms& uniforms,
              FrameView view = FrameView::kMain) const;
 
-  // The Bind* calls choose what later Bind(encoder, ...) calls set; encoders
-  // recorded before keep (and retain) what they were given, so these may be
-  // called at any time between frames.
+  // The Bind* calls choose what later Bind(rec, ...) calls bind; draws
+  // recorded before keep what they were given, so these may be called at
+  // any time between frames. The textures must stay alive (and resident)
+  // while a frame in flight uses them.
   // `shadow_map`: Depth*, 2D array with one layer per cascade.
   void BindShadowMap(id<MTLTexture> shadow_map);
   void BindEnvironment(id<MTLTexture> prefiltered_cube,
                        id<MTLTexture> brdf_lut);
   void BindAmbientOcclusion(id<MTLTexture> ambient_occlusion);
 
-  // Sets the uniform buffer of `frame` and `view`, the textures and the
-  // samplers on `encoder`. Call once per encoder: the bindings persist
-  // across pipeline changes. A pass passes FrameContext::frame_index and
-  // FrameContext::frame_view.
-  void Bind(id<MTLRenderCommandEncoder> encoder, size_t frame,
+  // Binds the uniform buffer of `frame` and `view`, the textures and the
+  // samplers in the argument table of `rec`. Call once per encoder, after
+  // opening it: other passes rebind the same slots. A pass passes
+  // FrameContext::frame_index and FrameContext::frame_view.
+  void Bind(const Recording& rec, size_t frame,
             FrameView view = FrameView::kMain) const;
 
  private:

@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
-# Set before project(). Metal 3 with MSL 3.2 (MTLMathMode, MTLLanguageVersion3_2) needs
-# macOS 15; the floating-point std::from_chars the engine parses numbers with needs 26.
+# Set before project(). The Metal 4 core API (MTL4CommandQueue, MTL4Compiler, ...) the
+# renderer is written against needs macOS 26, as does the floating-point std::from_chars
+# the engine parses numbers with.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
 
 project(project-blue
@@ -419,6 +420,7 @@ add_library(blue_render STATIC
     src/render/metal_context.mm
     src/render/motion_blur_math.cc
     src/render/pipeline.mm
+    src/render/recording.mm
     src/render/render_targets.mm
     src/render/renderer.mm
     src/render/samplers.mm

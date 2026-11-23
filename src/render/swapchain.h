@@ -11,7 +11,9 @@ namespace blue::render {
 
 // The window's CAMetalLayer, configured for the renderer: sRGB BGRA8
 // drawables that are only ever rendered to, at most 3 in flight, display sync
-// per vsync. The layer belongs to the window, which must outlive this object.
+// per vsync. The drawables' memory is made resident through the layer's own
+// residency set, which is attached to the context's queue. The layer belongs
+// to the window, which must outlive this object.
 // Move-only. Not thread-safe.
 class Swapchain {
  public:
@@ -37,7 +39,7 @@ class Swapchain {
   [[nodiscard]] bool vsync() const { return vsync_; }
 
   // Returns the next drawable, or nil when none became available within the
-  // layer's timeout (one second).
+  // layer's timeout (one second). Present it with MetalContext::Commit().
   [[nodiscard]] id<CAMetalDrawable> NextDrawable() const;
 
  private:

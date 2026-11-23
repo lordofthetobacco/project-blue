@@ -80,12 +80,11 @@ MotionBlurPass::MotionBlurPass(const MetalContext& context,
              .pass_constant_size = sizeof(BlurConstants),
              .output_format = RenderTargets::kHdrFormat,
              .label = "motion blur"}) {
-  id<MTLDevice> device = context.device();
   programs.Add(
       core::JoinPath(shader_dir, "motion_velocity.vert.metal"),
       core::JoinPath(shader_dir, "motion_velocity.frag.metal"),
-      [this, device](const shader::ShaderLibrary& vertex,
-                     const shader::ShaderLibrary* fragment)
+      [this, &context](const shader::ShaderLibrary& vertex,
+                       const shader::ShaderLibrary* fragment)
           -> std::optional<std::string> {
         // Both are created before either is replaced, so a failure leaves
         // the previous pair intact.
@@ -107,7 +106,7 @@ MotionBlurPass::MotionBlurPass(const MetalContext& context,
               .depth_write = false,
               .label = "motion blur velocity",
           };
-          auto pipeline = Pipeline::Create(device, desc);
+          auto pipeline = Pipeline::Create(context, desc);
           if (!pipeline.ok()) {
             return pipeline.error();
           }
@@ -202,7 +201,7 @@ void MotionBlurPass::Record(const FrameContext& ctx,
   };
   // The scissor keeps the HDR image outside `area` as the scene pass left
   // it.
-  blur_.Record(ctx,
+  blur_.Record(ctx.rec,
                {.texture = targets.hdr().texture(),
                 .extent = targets.extent(),
                 .load_action = MTLLoadActionLoad,
@@ -211,8 +210,8 @@ void MotionBlurPass::Record(const FrameContext& ctx,
 }
 
 void MotionBlurPass::RecordVelocity(const FrameContext& ctx) const {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
   MTLRenderPassColorAttachmentDescriptor* color =
       descriptor.colorAttachments[0];
   color.texture = ctx.targets.velocity().texture();
@@ -226,11 +225,11 @@ void MotionBlurPass::RecordVelocity(const FrameContext& ctx) const {
   // drawn after the blur still test against it.
   depth.storeAction = MTLStoreActionStore;
 
-  const id<MTLRenderCommandEncoder> encoder =
-      BeginRenderPass(ctx, descriptor, "motion blur velocity");
+  const id<MTL4RenderCommandEncoder> encoder =
+      BeginRenderPass(ctx.rec, descriptor, "motion blur velocity");
   // Same viewport as the scene pass.
   SetSceneViewport(encoder, ctx.targets.extent());
-  ctx.globals.Bind(encoder, ctx.frame_index, ctx.frame_view);
+  ctx.globals.Bind(ctx.rec, ctx.frame_index, ctx.frame_view);
 
   const Pipeline* bound_pipeline = nullptr;
   const Mesh* bound_mesh = nullptr;
@@ -240,8 +239,8 @@ void MotionBlurPass::RecordVelocity(const FrameContext& ctx) const {
     if (!item.previous_transform) {
       continue;
     }
-    // Encoder bindings survive pipeline changes, so the model matrices stay
-    // set across them.
+    // Bindings survive pipeline changes, so the model matrices stay bound
+    // across them.
     const Pipeline* pipeline =
         velocity_pipelines_[IsDoubleSided(entry.variant) ? 1 : 0].get();
     if (pipeline != bound_pipeline) {
@@ -251,7 +250,7 @@ void MotionBlurPass::RecordVelocity(const FrameContext& ctx) const {
     // DrawList::Build() only keeps entries of resident meshes.
     const Mesh& mesh = meshes_[static_cast<size_t>(item.mesh)];
     if (&mesh != bound_mesh) {
-      mesh.Bind(encoder);
+      mesh.Bind(ctx.rec);
       bound_mesh = &mesh;
     }
     if (entry.item != set_item) {
@@ -259,9 +258,7 @@ void MotionBlurPass::RecordVelocity(const FrameContext& ctx) const {
           .model = item.transform,
           .previous_model = *item.previous_transform,
       };
-      [encoder setVertexBytes:&constants
-                       length:sizeof(constants)
-                      atIndex:kBufferDraw];
+      BindConstants(ctx.rec, kBufferDraw, constants);
       set_item = entry.item;
     }
     mesh.DrawRange(encoder, entry.first_index, entry.index_count);
@@ -282,17 +279,18 @@ void MotionBlurPass::RecordTileMax(const FrameContext& ctx,
       .tile_size = ctx.targets.motion_tile_size(),
       .max_length = 2.0f * static_cast<float>(ctx.targets.motion_tile_size()),
   };
-  tile_max_.Record(ctx, {.texture = tiles.texture(), .extent = tiles.extent()},
-                   0, ConstantBytes(constants));
+  tile_max_.Record(ctx.rec,
+                   {.texture = tiles.texture(), .extent = tiles.extent()}, 0,
+                   ConstantBytes(constants));
 }
 
 void MotionBlurPass::RecordSourceCopy(const FrameContext& ctx,
                                       const MTLScissorRect& area) {
   // What is outside `area` of motion_source is never read.
-  const id<MTLBlitCommandEncoder> blit =
-      BeginBlit(ctx, "motion blur source copy");
+  const id<MTL4ComputeCommandEncoder> copy =
+      BeginCopy(ctx.rec, "motion blur source copy");
   const MTLOrigin origin = MTLOriginMake(area.x, area.y, 0);
-  [blit copyFromTexture:ctx.targets.hdr().texture()
+  [copy copyFromTexture:ctx.targets.hdr().texture()
             sourceSlice:0
             sourceLevel:0
            sourceOrigin:origin
@@ -301,7 +299,7 @@ void MotionBlurPass::RecordSourceCopy(const FrameContext& ctx,
        destinationSlice:0
        destinationLevel:0
       destinationOrigin:origin];
-  [blit endEncoding];
+  [copy endEncoding];
 }
 
 }  // namespace blue::render

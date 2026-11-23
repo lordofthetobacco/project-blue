@@ -9,11 +9,12 @@
 
 namespace blue::render {
 
-// Anisotropy of the material sampler (Metal's maxAnisotropy; every Metal 3
+// Anisotropy of the material sampler (Metal's maxAnisotropy; every Metal 4
 // device supports up to 16).
 inline constexpr uint32_t kMaterialAnisotropy = 8;
 
-// The samplers shared by the whole renderer. Neither copyable nor movable.
+// The samplers shared by the whole renderer, all usable in an argument table
+// (BindSampler()). Neither copyable nor movable.
 // Thread-safe to read.
 class Samplers {
  public:

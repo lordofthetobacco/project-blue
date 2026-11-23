@@ -5,7 +5,6 @@
 
 #include <array>
 #include <cstddef>
-#include <cstdint>
 #include <optional>
 
 #include "render/frame_config.h"
@@ -16,28 +15,25 @@ namespace blue::render {
 
 // Measures the GPU time of a frame and of named scopes in it.
 //
-// The frame total (GpuScope::kTotal) comes from the GPUStartTime /
-// GPUEndTime of the frame's command buffer. A scope's time comes from
-// timestamp counter samples that every encoder opened while the scope is
-// open (render/encoders.h) takes at its start and end (a render encoder at
-// the start and end of its fragment stage): the scope spans from its
-// encoders' earliest start to their latest end. Every result is read once
-// the frame's command buffer has completed.
+// The frame total (GpuScope::kTotal) is the GPU time the commit feedback of
+// the frame's command buffer reports (Submission::gpu_seconds()). A scope's
+// time is the difference of two timestamps the command buffer writes into
+// an MTL4CounterHeap, one where the scope begins and one where it ends
+// (-[MTL4CommandBuffer writeTimestampIntoHeap:atIndex:]): each is taken when
+// all work recorded before it has completed. Every result is read once the
+// frame's work has completed.
 //
-// On a tile-based GPU (every Apple GPU) consecutive encoders overlap in
-// time, e.g. the vertex stage of one encoder runs during the fragment stage
-// of the previous one, and independent passes may run side by side, so the
-// per-scope numbers are approximate and need not add up to the total.
+// Every encoder waits for the output of the ones before it (the barrier of
+// render/encoders.h), so a scope's time is close to the time its own
+// encoders ran; work the GPU starts early for a later scope (the vertex
+// stage of its encoders) is counted in the scope during which it runs, so
+// the numbers are approximate and need not add up to the total.
 //
-// Per-scope times need stage-boundary counter sampling with the common
-// timestamp counter set; without it every scope but kTotal reads nullopt.
+// Without a timestamp counter heap every scope but kTotal reads nullopt.
 // Not thread-safe.
 class GpuTimer {
  public:
   static constexpr size_t kScopeCount = kGpuScopeCount;
-  // Encoders per frame that get timestamps; the ones a frame opens beyond
-  // this go unmeasured.
-  static constexpr size_t kMaxEncodersPerFrame = 64;
 
   explicit GpuTimer(const MetalContext& context);
 
@@ -45,21 +41,18 @@ class GpuTimer {
   GpuTimer& operator=(const GpuTimer&) = delete;
 
   // Reads the times of the frame last recorded into frame slot `frame`
-  // ([0, kFramesInFlight)) from its `command_buffer`, which must have
-  // completed (nil when the slot has not recorded yet), and makes `frame`
-  // the slot the next encoders record into. Call after waiting for the
-  // slot's previous command buffer, before recording into it again.
-  void Collect(size_t frame, id<MTLCommandBuffer> command_buffer);
+  // ([0, kFramesInFlight)) from `submission`, its completed commit (null
+  // when the slot has not recorded yet), and makes `frame` the slot the
+  // next scopes record into. Call after waiting for the slot's previous
+  // work, before recording into it again.
+  void Collect(size_t frame, const Submission* submission);
 
-  // Starts / ends `scope` in the frame being recorded: the encoders opened in
-  // between count towards it. Scopes do not nest. Every BeginScope() needs a
-  // matching EndScope() in the same frame.
-  void BeginScope(GpuScope scope);
-  void EndScope(GpuScope scope);
-  // Called by render/encoders.h for every encoder of a frame before it is
-  // created: attaches the sample buffer when a scope is open.
-  void AttachSamples(MTLRenderPassDescriptor* descriptor);
-  void AttachSamples(MTLBlitPassDescriptor* descriptor);
+  // Starts / ends `scope` in the frame being recorded on `cmd`, between
+  // encoders (none may be open): the encoders opened in between count
+  // towards it. Scopes do not nest. Every BeginScope() needs a matching
+  // EndScope() in the same frame.
+  void BeginScope(id<MTL4CommandBuffer> cmd, GpuScope scope);
+  void EndScope(id<MTL4CommandBuffer> cmd, GpuScope scope);
 
   // Returns the most recent GPU time of `scope`, or nullopt before the first
   // result, when the scope did not run in the last collected frame, or when
@@ -73,27 +66,21 @@ class GpuTimer {
   }
 
  private:
-  // The encoders a frame slot has recorded with samples, in order: encoder
-  // i owns samples 2 i (start) and 2 i + 1 (end) of the slot's range.
-  struct FrameSamples {
-    std::array<GpuScope, kMaxEncodersPerFrame> scopes{};
-    size_t encoder_count = 0;
-  };
-
-  // Reserves the next sample pair of the frame being recorded for an
-  // encoder of the open scope; returns its first sample index, or nullopt
-  // when nothing is to be sampled (no scope open, no counter support, or
-  // every pair of the frame is taken).
-  [[nodiscard]] std::optional<NSUInteger> ReserveSamples();
-  // Fills last_ms_ for every scope but kTotal from the samples of `frame`.
+  // Returns the heap index of the begin timestamp of `scope` in frame slot
+  // `frame`; its end timestamp is the next entry.
+  [[nodiscard]] static NSUInteger EntryIndex(size_t frame, GpuScope scope);
+  // Fills last_ms_ for every scope but kTotal from the timestamps of
+  // `frame`.
   void ResolveScopes(size_t frame);
 
   // nil when per-scope timing is unsupported.
-  id<MTLCounterSampleBuffer> samples_ = nil;
-  std::array<FrameSamples, kFramesInFlight> frames_{};
+  id<MTL4CounterHeap> heap_ = nil;
+  // Ticks of a heap timestamp per second.
+  double ticks_per_second_ = 0.0;
+  // The scopes each frame slot recorded.
+  std::array<std::array<bool, kScopeCount>, kFramesInFlight> recorded_{};
   size_t frame_ = 0;
   std::optional<GpuScope> open_scope_;
-  bool overflow_logged_ = false;
   std::array<std::optional<double>, kScopeCount> last_ms_;
 };
 

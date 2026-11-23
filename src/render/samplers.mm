@@ -21,6 +21,8 @@ MTLSamplerDescriptor* SamplerDescriptor(MTLSamplerMinMagFilter filter,
   descriptor.tAddressMode = address;
   descriptor.rAddressMode = address;
   descriptor.label = label;
+  // Samplers are bound through the argument table (BindSampler()).
+  descriptor.supportArgumentBuffers = YES;
   return descriptor;
 }
 

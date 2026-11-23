@@ -88,9 +88,9 @@ class Environment {
  private:
   // Records the GGX prefilter of the specular source cube (with its mips)
   // into the specular cube.
-  void RecordFiltering(id<MTLCommandBuffer> cmd) const;
+  void RecordFiltering(const Recording& rec) const;
   // Fills the specular source cube's mips from mip 0.
-  void RecordSourceMips(id<MTLCommandBuffer> cmd) const;
+  void RecordSourceMips(const Recording& rec) const;
   void GenerateBrdfLut();
 
   const MetalContext& context_;

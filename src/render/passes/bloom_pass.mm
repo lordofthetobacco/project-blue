@@ -75,7 +75,7 @@ void BloomPass::Record(const FrameContext& ctx) const {
         .karis_average = level == 0 ? 1 : 0,
         .padding = 0,
     };
-    downsample_.Record(ctx,
+    downsample_.Record(ctx.rec,
                        {.texture = bloom,
                         .level = level,
                         .extent = targets.bloom_mip_extent(level)},
@@ -90,7 +90,7 @@ void BloomPass::Record(const FrameContext& ctx) const {
         .source_texel_y = 1.0f / static_cast<float>(source.height),
     };
     // Loads the downsampled image: the upsample adds onto it.
-    upsample_.Record(ctx,
+    upsample_.Record(ctx.rec,
                      {.texture = bloom,
                       .level = target,
                       .extent = targets.bloom_mip_extent(target),

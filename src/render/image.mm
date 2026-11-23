@@ -81,6 +81,7 @@ Image::Image(const MetalContext& context, const ImageDesc& desc) {
   texture_ = [context.device() newTextureWithDescriptor:descriptor];
   FatalIfNil(texture_, nil, "newTextureWithDescriptor");
   texture_.label = LabelOr(desc.label, @"Image");
+  resident_ = Resident(context, texture_);
 }
 
 ImageView Image::CreateView(const ImageViewDesc& desc) const {
@@ -153,7 +154,7 @@ Image CreateSampledImage(const MetalContext& context, ImageDesc desc,
                          image.texture(), 0, layer);
   }
   if (image.mip_levels() > 1) {
-    [uploader.blit() generateMipmapsForTexture:image.texture()];
+    [uploader.encoder() generateMipmapsForTexture:image.texture()];
   }
   uploader.Finish();
   return image;

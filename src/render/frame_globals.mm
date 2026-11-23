@@ -6,6 +6,7 @@
 #include <cstring>
 #include <span>
 
+#include "render/encoders.h"
 #include "shaders/bindings.h"
 
 namespace blue::render {
@@ -76,24 +77,19 @@ void FrameGlobals::BindAmbientOcclusion(id<MTLTexture> ambient_occlusion) {
   ambient_occlusion_ = ambient_occlusion;
 }
 
-void FrameGlobals::Bind(id<MTLRenderCommandEncoder> encoder, size_t frame,
+void FrameGlobals::Bind(const Recording& rec, size_t frame,
                         FrameView view) const {
-  const id<MTLBuffer> buffer = uniforms_[Index(frame, view)].handle();
-  [encoder setVertexBuffer:buffer offset:0 atIndex:kBufferFrame];
-  [encoder setFragmentBuffer:buffer offset:0 atIndex:kBufferFrame];
-  [encoder setFragmentTexture:shadow_map_ atIndex:kTextureShadowMap];
-  [encoder setFragmentTexture:environment_ atIndex:kTextureEnvironment];
-  [encoder setFragmentTexture:brdf_lut_ atIndex:kTextureBrdfLut];
+  BindBuffer(rec, kBufferFrame, uniforms_[Index(frame, view)].handle());
+  BindTexture(rec, kTextureShadowMap, shadow_map_);
+  BindTexture(rec, kTextureEnvironment, environment_);
+  BindTexture(rec, kTextureBrdfLut, brdf_lut_);
   // The scope picture has no SSAO of its own.
-  [encoder setFragmentTexture:view == FrameView::kMain
-                                  ? ambient_occlusion_
-                                  : default_ambient_occlusion_.texture()
-                      atIndex:kTextureAmbientOcclusion];
-  [encoder setFragmentSamplerState:samplers_.shadow() atIndex:kSamplerShadow];
-  [encoder setFragmentSamplerState:samplers_.linear_clamp()
-                           atIndex:kSamplerLinearClamp];
-  [encoder setFragmentSamplerState:samplers_.nearest_clamp()
-                           atIndex:kSamplerNearestClamp];
+  BindTexture(rec, kTextureAmbientOcclusion,
+              view == FrameView::kMain ? ambient_occlusion_
+                                       : default_ambient_occlusion_.texture());
+  BindSampler(rec, kSamplerShadow, samplers_.shadow());
+  BindSampler(rec, kSamplerLinearClamp, samplers_.linear_clamp());
+  BindSampler(rec, kSamplerNearestClamp, samplers_.nearest_clamp());
 }
 
 }  // namespace blue::render

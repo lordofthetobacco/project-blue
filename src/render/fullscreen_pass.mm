@@ -7,7 +7,6 @@
 #include "core/log.h"
 #include "core/path.h"
 #include "render/encoders.h"
-#include "render/metal_check.h"
 #include "shaders/bindings.h"
 
 namespace blue::render {
@@ -29,10 +28,9 @@ FullscreenPass::FullscreenPass(const MetalContext& context,
       desc.label == nullptr) {
     core::log::Fatal("Invalid full-screen pass '{}'", desc.fragment_path);
   }
-  id<MTLDevice> device = context.device();
   programs.Add(
       core::JoinPath(shader_dir, "fullscreen.vert.metal"), desc.fragment_path,
-      [this, device](const shader::ShaderLibrary& vertex,
+      [this, &context](const shader::ShaderLibrary& vertex,
                      const shader::ShaderLibrary* fragment)
           -> std::optional<std::string> {
         const GraphicsPipelineDesc pipeline_desc{
@@ -44,7 +42,7 @@ FullscreenPass::FullscreenPass(const MetalContext& context,
             .blend = desc_.blend,
             .label = desc_.label,
         };
-        auto pipeline = Pipeline::Create(device, pipeline_desc);
+        auto pipeline = Pipeline::Create(context, pipeline_desc);
         if (!pipeline.ok()) {
           return pipeline.error();
         }
@@ -65,10 +63,10 @@ void FullscreenPass::SetInputs(
   set.sampler = sampler;
 }
 
-MTLRenderPassDescriptor* FullscreenPass::DescribeTarget(
+MTL4RenderPassDescriptor* FullscreenPass::DescribeTarget(
     const FullscreenTarget& target) {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
   MTLRenderPassColorAttachmentDescriptor* attachment =
       descriptor.colorAttachments[0];
   attachment.texture = target.texture;
@@ -79,33 +77,17 @@ MTLRenderPassDescriptor* FullscreenPass::DescribeTarget(
   return descriptor;
 }
 
-void FullscreenPass::Record(const FrameContext& ctx,
+void FullscreenPass::Record(const Recording& rec,
                             const FullscreenTarget& target, uint32_t set_index,
                             std::span<const std::byte> constants) const {
-  Draw(BeginRenderPass(ctx, DescribeTarget(target), desc_.label), target,
-       set_index, constants);
-}
-
-void FullscreenPass::RecordTo(id<MTLCommandBuffer> cmd,
-                              const FullscreenTarget& target,
-                              uint32_t set_index,
-                              std::span<const std::byte> constants) const {
-  id<MTLRenderCommandEncoder> encoder =
-      [cmd renderCommandEncoderWithDescriptor:DescribeTarget(target)];
-  FatalIfNil(encoder, nil, std::string("render encoder ") + desc_.label);
-  encoder.label = @(desc_.label);
-  Draw(encoder, target, set_index, constants);
-}
-
-void FullscreenPass::Draw(id<MTLRenderCommandEncoder> encoder,
-                          const FullscreenTarget& target, uint32_t set_index,
-                          std::span<const std::byte> constants) const {
   if (set_index >= sets_.size() ||
       sets_[set_index].textures.size() != desc_.input_count ||
       (!constants.empty() && constants.size() != desc_.pass_constant_size)) {
     core::log::Fatal("Bad record of full-screen pass '{}'",
                      desc_.fragment_path);
   }
+  const id<MTL4RenderCommandEncoder> encoder =
+      BeginRenderPass(rec, DescribeTarget(target), desc_.label);
   // y = 0 is the top row, matching varyings.uv.
   [encoder setViewport:MTLViewport{
                            .originX = 0.0,
@@ -122,18 +104,13 @@ void FullscreenPass::Draw(id<MTLRenderCommandEncoder> encoder,
 
   const InputSet& set = sets_[set_index];
   for (NSUInteger i = 0; i < set.textures.size(); ++i) {
-    [encoder setFragmentTexture:set.textures[i] atIndex:kTextureInput0 + i];
+    BindTexture(rec, kTextureInput0 + i, set.textures[i]);
   }
   if (!set.textures.empty()) {
-    [encoder setFragmentSamplerState:set.sampler atIndex:kSamplerInput];
+    BindSampler(rec, kSamplerInput, set.sampler);
   }
   if (!constants.empty()) {
-    [encoder setVertexBytes:constants.data()
-                     length:constants.size()
-                    atIndex:kBufferPass];
-    [encoder setFragmentBytes:constants.data()
-                       length:constants.size()
-                      atIndex:kBufferPass];
+    BindBytes(rec, kBufferPass, constants);
   }
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle
               vertexStart:0

@@ -64,11 +64,11 @@ StagingUploader::StagingUploader(const MetalContext& context,
 
 StagingUploader::~StagingUploader() { Finish(); }
 
-id<MTLBlitCommandEncoder> StagingUploader::blit() {
+id<MTL4ComputeCommandEncoder> StagingUploader::encoder() {
   if (!recording_) {
     Begin(chunks_[current_]);
   }
-  return chunks_[current_].blit;
+  return chunks_[current_].encoder;
 }
 
 size_t StagingUploader::FreeBytes() const {
@@ -89,7 +89,7 @@ void StagingUploader::CopyToBuffer(std::span<const std::byte> bytes,
     const Chunk& chunk = chunks_[current_];
     std::memcpy(static_cast<std::byte*>(chunk.staging.mapped()) + staged,
                 bytes.data() + done, piece);
-    [chunk.blit copyFromBuffer:chunk.staging.handle()
+    [chunk.encoder copyFromBuffer:chunk.staging.handle()
                   sourceOffset:staged
                       toBuffer:buffer
              destinationOffset:offset + done
@@ -134,7 +134,7 @@ void StagingUploader::CopyToImage(std::span<const std::byte> bytes,
     // source size is in texels of the level, not in whole blocks.
     const uint32_t top = row * block.extent;
     const uint32_t strip = std::min(count * block.extent, height - top);
-    [chunk.blit copyFromBuffer:chunk.staging.handle()
+    [chunk.encoder copyFromBuffer:chunk.staging.handle()
                   sourceOffset:staged
              sourceBytesPerRow:row_bytes
            sourceBytesPerImage:row_bytes * count
@@ -171,38 +171,46 @@ void StagingUploader::Begin(Chunk& chunk) {
                            Buffer::Access::kCpuSequentialWrite, "Staging");
     staging_bytes_ += chunk_bytes_;
     context_.AddStagingBytes(chunk_bytes_);
+    chunk.allocator = [context_.device() newCommandAllocator];
+    FatalIfNil(chunk.allocator, nil, "newCommandAllocator");
+    chunk.cmd = [context_.device() newCommandBuffer];
+    FatalIfNil(chunk.cmd, nil, "newCommandBuffer");
+    chunk.cmd.label = @"Staging upload";
   }
   Wait(chunk);
-  // The members keep the command buffer and the encoder; the pool drains
-  // what else their creation autoreleased.
+  // The chunk's previous commands have completed: their memory is free.
+  [chunk.allocator reset];
+  [chunk.cmd beginCommandBufferWithAllocator:chunk.allocator];
+  // The member keeps the encoder; the pool drains what else its creation
+  // autoreleased.
   @autoreleasepool {
-    chunk.cmd = [context_.queue() commandBuffer];
-    FatalIfNil(chunk.cmd, nil, "commandBuffer");
-    chunk.cmd.label = @"Staging upload";
-    chunk.blit = [chunk.cmd blitCommandEncoder];
-    FatalIfNil(chunk.blit, nil, "blitCommandEncoder");
-    chunk.blit.label = @"Staging upload";
+    chunk.encoder = [chunk.cmd computeCommandEncoder];
+    FatalIfNil(chunk.encoder, nil, "computeCommandEncoder");
+    chunk.encoder.label = @"Staging upload";
+    // The copies and mip generation of the chunk committed before must be
+    // visible to this one's (an image may span both).
+    [chunk.encoder barrierAfterQueueStages:MTLStageBlit
+                              beforeStages:MTLStageBlit
+                         visibilityOptions:MTL4VisibilityOptionDevice];
   }
   recording_ = true;
   used_ = 0;
 }
 
 void StagingUploader::Submit(Chunk& chunk) {
-  [chunk.blit endEncoding];
-  chunk.blit = nil;
-  [chunk.cmd commit];
-  chunk.submitted = true;
+  [chunk.encoder endEncoding];
+  chunk.encoder = nil;
+  [chunk.cmd endCommandBuffer];
+  chunk.submitted = context_.Commit(chunk.cmd, "staging upload");
   recording_ = false;
 }
 
 void StagingUploader::Wait(Chunk& chunk) {
-  if (!chunk.submitted) {
+  if (chunk.submitted == nullptr) {
     return;
   }
-  [chunk.cmd waitUntilCompleted];
-  CheckCommandBuffer(chunk.cmd);
-  chunk.cmd = nil;
-  chunk.submitted = false;
+  chunk.submitted->Wait();
+  chunk.submitted.reset();
 }
 
 void StagingUploader::Finish() {

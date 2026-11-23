@@ -52,7 +52,7 @@ void PresentPass::Record(const FrameContext& ctx,
       .texel_width = 1.0f / static_cast<float>(extent.width),
       .texel_height = 1.0f / static_cast<float>(extent.height),
   };
-  pass_.Record(ctx, {.texture = target.texture, .extent = target.extent}, 0,
+  pass_.Record(ctx.rec, {.texture = target.texture, .extent = target.extent}, 0,
                ConstantBytes(constants));
 }
 

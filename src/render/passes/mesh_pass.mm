@@ -19,12 +19,11 @@ MeshPass::MeshPass(const MetalContext& context, ShaderPrograms& programs,
                    const MaterialSystem& materials,
                    const std::vector<Mesh>& meshes)
     : materials_(materials), meshes_(meshes) {
-  id<MTLDevice> device = context.device();
   programs.Add(
       core::JoinPath(shader_dir, "mesh.vert.metal"),
       core::JoinPath(shader_dir, "mesh.frag.metal"),
-      [this, device](const shader::ShaderLibrary& vertex,
-                     const shader::ShaderLibrary* fragment)
+      [this, &context](const shader::ShaderLibrary& vertex,
+                       const shader::ShaderLibrary* fragment)
           -> std::optional<std::string> {
         // All of them are created before any is replaced, so a failure
         // leaves the previous set intact.
@@ -50,7 +49,7 @@ MeshPass::MeshPass(const MetalContext& context, ShaderPrograms& programs,
               .depth_write = false,
               .label = "mesh",
           };
-          auto pipeline = Pipeline::Create(device, desc);
+          auto pipeline = Pipeline::Create(context, desc);
           if (!pipeline.ok()) {
             return pipeline.error();
           }
@@ -62,14 +61,14 @@ MeshPass::MeshPass(const MetalContext& context, ShaderPrograms& programs,
 }
 
 void MeshPass::Draw(const FrameContext& ctx,
-                    id<MTLRenderCommandEncoder> encoder) const {
+                    id<MTL4RenderCommandEncoder> encoder) const {
   DrawListPipelines pipelines;
   for (size_t i = 0; i < kMaterialVariantCount; ++i) {
     pipelines.pipelines[i] = pipelines_[i].get();
     pipelines.bind_material[i] = true;
   }
-  RecordDrawList(encoder, ctx.draw_list, pipelines, ctx.view, materials_,
-                 meshes_, &ctx.stats);
+  RecordDrawList(ctx.rec, encoder, ctx.draw_list, pipelines, ctx.view,
+                 materials_, meshes_, &ctx.stats);
 }
 
 }  // namespace blue::render

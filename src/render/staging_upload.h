@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 
 #include "core/extent.h"
@@ -34,11 +35,12 @@ struct CopyBlock {
 // amount of staging memory: two shared staging chunks of at most kChunkBytes
 // each, used in turn, so the CPU fills one while the GPU copies from the
 // other. Data larger than a chunk is split (buffers by range, image levels
-// by rows of blocks). Copies are recorded into the current chunk's blit
-// encoder, which blit() exposes for other blit commands that must run after
-// them (mip generation); each chunk is its own command buffer, and the
-// chunks are committed in order on the context's queue, so what one chunk
-// records runs before the copies of the next. Finish() (or the destructor)
+// by rows of blocks). Copies are recorded into the current chunk's copy
+// encoder (an MTL4ComputeCommandEncoder; Metal 4 has no blit encoder), which
+// encoder() exposes for other copy commands that must run after them (mip
+// generation); each chunk has its own command allocator and command buffer,
+// and the chunks are committed in order on the context's queue, with a
+// barrier that makes the copies of one visible to the next. Finish() (or the destructor)
 // commits the rest, blocks until the GPU is done and frees the staging
 // memory. A GPU error is fatal. Neither copyable nor movable. Not
 // thread-safe.
@@ -54,9 +56,9 @@ class StagingUploader {
   StagingUploader(const StagingUploader&) = delete;
   StagingUploader& operator=(const StagingUploader&) = delete;
 
-  // Returns the blit encoder the next copy will be recorded into. Do not
-  // keep it across a Copy* call, which may move on to the next chunk.
-  [[nodiscard]] id<MTLBlitCommandEncoder> blit();
+  // Returns the encoder the next copy will be recorded into. Do not keep it
+  // across a Copy* call, which may move on to the next chunk.
+  [[nodiscard]] id<MTL4ComputeCommandEncoder> encoder();
 
   // Records a copy of `bytes` to `buffer` at `offset`.
   void CopyToBuffer(std::span<const std::byte> bytes, id<MTLBuffer> buffer,
@@ -75,11 +77,14 @@ class StagingUploader {
  private:
   struct Chunk {
     Buffer staging;
-    // The command buffer being recorded (with `blit` open on it) or, once
-    // committed, the one whose completion frees the chunk for reuse.
-    id<MTLCommandBuffer> cmd = nil;
-    id<MTLBlitCommandEncoder> blit = nil;
-    bool submitted = false;  // `cmd` is committed and not waited on yet.
+    // Created with the staging buffer and reused each time the chunk is.
+    id<MTL4CommandAllocator> allocator = nil;
+    id<MTL4CommandBuffer> cmd = nil;
+    // Open on `cmd` while the chunk is being recorded.
+    id<MTL4ComputeCommandEncoder> encoder = nil;
+    // The completion of the chunk's last commit; null when it was waited
+    // for (or never committed).
+    std::shared_ptr<const Submission> submitted;
   };
 
   // Returns the bytes still free in the current chunk after aligning; the
@@ -92,7 +97,7 @@ class StagingUploader {
   // Waits until `chunk` is free and starts recording into it.
   void Begin(Chunk& chunk);
   void Submit(Chunk& chunk);
-  // Blocks until the committed command buffer of `chunk` has completed.
+  // Blocks until the committed work of `chunk` has completed.
   static void Wait(Chunk& chunk);
 
   const MetalContext& context_;

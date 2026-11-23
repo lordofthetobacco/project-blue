@@ -14,8 +14,8 @@ namespace blue::render {
 
 // The window-sized images a frame renders through, recreated with the
 // swapchain. One set is shared by all frames in flight: the single queue
-// executes the frames in order, and Metal's default hazard tracking orders
-// the passes that write and read these textures (no barriers). Every image
+// executes the frames in order, and the barrier every encoder starts with
+// (render/encoders.h) orders the passes that write and read these textures. Every image
 // is a render target that is also sampled.
 //
 //   depth:     reversed-Z scene depth (Depth32Float) from the depth

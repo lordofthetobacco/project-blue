@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -42,6 +43,7 @@
 #include "render/passes/ssao_pass.h"
 #include "render/passes/tonemap_pass.h"
 #include "render/passes/ui_pass.h"
+#include "render/recording.h"
 #include "render/render_targets.h"
 #include "render/renderer.h"
 #include "render/samplers.h"
@@ -55,12 +57,14 @@
 //
 // How a frame is built
 // --------------------
-// RendererImpl::DrawFrameTo() waits for the frame slot's previous command
-// buffer, collects its GPU times, writes the frame's uniforms and calls
-// RecordCommands(), the wiring: it records the passes in order into the
-// frame's one command buffer, each between GpuTimer::BeginScope() and
-// EndScope() of its GpuScope. Every pass opens its own render encoders
-// (blit encoders for copies) through render/encoders.h:
+// RendererImpl::DrawFrameTo() waits for the frame slot's previous work
+// (its Submission), collects its GPU times, resets the slot's command
+// allocator and transient constants, begins the slot's command buffer on
+// the allocator, writes the frame's uniforms and calls RecordCommands(), the
+// wiring: it records the passes in order into the frame's one command
+// buffer, each between GpuTimer::BeginScope() and EndScope() of its
+// GpuScope. Every pass opens its own render encoders (copy encoders for
+// copies) through render/encoders.h:
 //
 //   shadow cascades      ShadowPass        sun depth, one encoder per
 //                                          cascade layer (4)
@@ -92,7 +96,7 @@
 //                                          -> ldr (editor; skipped if empty)
 //   present              PresentPass       ldr -> drawable (FXAA), or ->
 //                                          the editor viewport image (plus
-//                                          a blit per viewport readback)
+//                                          a copy per viewport readback)
 //   ui                   RecordUiPass()    ImGui on the drawable
 //
 // The visible submeshes are culled and sorted once per frame (DrawList) and
@@ -112,29 +116,42 @@
 //      shaders/fullscreen.vert.metal. Every index comes from
 //      shaders/bindings.h; per-pass constants are a struct mirrored in C++
 //      with a static_assert on its size.
-//   2. Open encoders only through render/encoders.h (BeginRenderPass(),
-//      BeginBlit()), so that they are labelled and timed.
+//   2. Open encoders and bind only through render/encoders.h, whose header
+//      comment is the rule book (BeginRenderPass(), BeginCopy(), Bind*()):
+//      it takes care of barriers, the argument table and residency.
 //   3. Add a GpuScope (render/gpu_scope.h) and a timed(...) line in
 //      RecordCommands().
 //   4. Add the .mm to the blue_render list in CMakeLists.txt. Window-sized
 //      images belong in RenderTargets (re-bound in BindTargets()).
-// There are no image layouts, barriers or descriptor sets: Metal orders the
-// encoders of the single queue and tracks the hazards between them, and
-// passes bind their inputs on their encoders. The window's drawable is
-// acquired as late as possible, just before the first pass that renders to
-// it; when none is available the passes that need it are skipped and the
-// frame is still committed. The editor viewport image is RGBA8Unorm_sRGB,
-// the same encoding as the drawable.
+// This is the Metal 4 core API: nothing is tracked or retained for us. The
+// single queue runs the encoders in order, each behind a barrier on the
+// output of the earlier ones; resources are resident through the context's
+// residency set; and what a frame uses stays alive until the frame has
+// completed (the retire lists below). When the frame is committed the
+// window's drawable is presented through the queue (MetalContext::Commit()).
+// The drawable is acquired as late as possible, just before the first pass
+// that renders to it; when none is available the passes that need it are
+// skipped and the frame is still committed. The editor viewport image is
+// RGBA8Unorm_sRGB, the same encoding as the drawable.
 
 namespace blue::render {
 
 // Everything behind Renderer; see Renderer for the meaning of the methods it
 // forwards to. Neither copyable nor movable. Not thread-safe.
 struct RendererImpl {
-  // Per-frame-in-flight state: the frame slot's last command buffer, waited
-  // on (waitUntilCompleted) before the slot records again.
+  // Per-frame-in-flight state. The slot's command buffer records into the
+  // slot's allocator, which is reset (with the constants) once the slot's
+  // last work has completed, right before it records again.
   struct Frame {
-    id<MTLCommandBuffer> command_buffer = nil;
+    id<MTL4CommandAllocator> allocator = nil;
+    id<MTL4CommandBuffer> command_buffer = nil;
+    // Never null after construction.
+    std::unique_ptr<TransientArena> constants;
+    // The completion of the last commit; null before the first.
+    std::shared_ptr<const Submission> submission;
+    // The drawable that commit presented, which nothing else keeps alive
+    // until the GPU has rendered to it.
+    id<CAMetalDrawable> drawable = nil;
   };
 
   // Where a frame's tonemapped scene goes.
@@ -180,15 +197,15 @@ struct RendererImpl {
   void ShutdownImGuiRenderer();
 
   // Destroys the retired meshes and images no frame in flight can use any
-  // more. Call after the current frame slot's command buffer was waited on.
+  // more. Call after the current frame slot's last work was waited for.
   void DestroyRetired();
   // Destroys every retired mesh and image if no frame is in flight any more
-  // (every slot's command buffer completed; does not wait). Keeps releases
+  // (every slot's last work completed; does not wait). Keeps releases
   // moving while frames are skipped (minimized window, no swapchain).
   void DestroyRetiredIfIdle();
   [[nodiscard]] bool RebuildSwapchain();
-  // Blocks until `frame`'s last command buffer, if any, has completed; a GPU
-  // error in it is fatal.
+  // Blocks until `frame`'s last committed work, if any, has completed; a
+  // GPU error in it is fatal.
   static void WaitForFrame(const Frame& frame);
   // Blocks until no frame in flight runs on the GPU any more, so that render
   // targets can be replaced.
@@ -218,7 +235,7 @@ struct RendererImpl {
   // Draws the sights (reflex dot, scope eyepiece) of `ctx` on `encoder`, the
   // scene pass's.
   void DrawSights(const FrameContext& ctx,
-                  id<MTLRenderCommandEncoder> encoder) const;
+                  id<MTL4RenderCommandEncoder> encoder) const;
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
   // Records the copy of the viewport image, after it was rendered, for every

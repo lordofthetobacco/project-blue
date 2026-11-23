@@ -47,7 +47,7 @@ void TonemapPass::Record(const FrameContext& ctx) const {
           ctx.view.post.bloom_enabled ? ctx.view.post.bloom_strength : 0.0f,
       .bloom_scale = 1.0f / static_cast<float>(ctx.targets.bloom_levels()),
   };
-  pass_.Record(ctx,
+  pass_.Record(ctx.rec,
                {.texture = ctx.targets.ldr().texture(),
                 .extent = ctx.targets.extent()},
                0, ConstantBytes(constants));

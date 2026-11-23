@@ -13,10 +13,6 @@ namespace blue::render {
 // every device-object creation that cannot be recovered from.
 void FatalIfNil(id object, NSError* error, std::string_view what);
 
-// Returns normally unless `command_buffer`, which must have completed, ended
-// with an error; then logs its label and error and terminates the process.
-void CheckCommandBuffer(id<MTLCommandBuffer> command_buffer);
-
 }  // namespace blue::render
 
 #endif  // BLUE_RENDER_METAL_CHECK_H_

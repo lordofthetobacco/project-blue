@@ -9,6 +9,7 @@
 #include <glm/vec4.hpp>
 
 #include "core/path.h"
+#include "render/encoders.h"
 #include "render/render_targets.h"
 #include "shaders/bindings.h"
 
@@ -36,12 +37,11 @@ constexpr NSUInteger kVertexCount = 6;
 
 ReticlePass::ReticlePass(const MetalContext& context, ShaderPrograms& programs,
                          const std::string& shader_dir) {
-  id<MTLDevice> device = context.device();
   programs.Add(
       core::JoinPath(shader_dir, "reticle.vert.metal"),
       core::JoinPath(shader_dir, "reticle.frag.metal"),
-      [this, device](const shader::ShaderLibrary& vertex,
-                     const shader::ShaderLibrary* fragment)
+      [this, &context](const shader::ShaderLibrary& vertex,
+                       const shader::ShaderLibrary* fragment)
           -> std::optional<std::string> {
         // Additive, depth tested against the scene (equal passes too, for a
         // window lying on the model's own glass) without writing depth, and
@@ -57,7 +57,7 @@ ReticlePass::ReticlePass(const MetalContext& context, ShaderPrograms& programs,
             .blend = BlendMode::kAdditive,
             .label = "reticle",
         };
-        auto pipeline = Pipeline::Create(device, desc);
+        auto pipeline = Pipeline::Create(context, desc);
         if (!pipeline.ok()) {
           return pipeline.error();
         }
@@ -67,7 +67,7 @@ ReticlePass::ReticlePass(const MetalContext& context, ShaderPrograms& programs,
 }
 
 void ReticlePass::Draw(const FrameContext& ctx,
-                       id<MTLRenderCommandEncoder> encoder) const {
+                       id<MTL4RenderCommandEncoder> encoder) const {
   if (!ctx.view.sight) {
     return;
   }
@@ -79,12 +79,7 @@ void ReticlePass::Draw(const FrameContext& ctx,
       .tint = glm::vec4(sight.tint, 0.0f),
   };
   pipeline_->Bind(encoder);
-  [encoder setVertexBytes:&constants
-                   length:sizeof(constants)
-                  atIndex:kBufferPass];
-  [encoder setFragmentBytes:&constants
-                     length:sizeof(constants)
-                    atIndex:kBufferPass];
+  BindConstants(ctx.rec, kBufferPass, constants);
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle
               vertexStart:0
               vertexCount:kVertexCount];

@@ -14,6 +14,7 @@
 
 #include "material/material.h"
 #include "render/metal_context.h"
+#include "render/recording.h"
 #include "render/samplers.h"
 #include "render/scene_view.h"
 #include "render/texture_cache.h"
@@ -64,19 +65,18 @@ inline constexpr uint32_t kMaterialFlagOcclusionInMetallicRoughness = 2;
     const material::MaterialDesc& desc);
 
 // The renderer's materials. Per material it keeps what Bind() hands the
-// fragment stage: its MaterialParams (bytes at kBufferMaterial) and the
+// fragment stage: its MaterialParams (constants at kBufferMaterial) and the
 // textures of its five slots (kTextureBaseColor onwards, in
 // material::TextureSlot order). Empty texture slots use TextureCache
 // defaults.
 //
-// Nothing here is a per-frame GPU allocation: setFragmentBytes copies the
-// parameters into the command buffer when Bind() is encoded, so Update()
-// and Release() take effect for frames recorded afterwards without
-// disturbing frames in flight. Textures a material drops (Release()) stay
-// alive while a frame in flight uses them because a command buffer retains
-// the textures its encoders reference until it completes (the renderer
-// creates retained-reference command buffers), and the renderer's retire
-// list keeps the released Images for kFramesInFlight frames besides.
+// Nothing here is a GPU allocation: Bind() copies the parameters into the
+// recording's transient constants, so Update() and Release() take effect
+// for frames recorded afterwards without disturbing frames in flight.
+// Textures a material drops (Release()) are owned by the TextureCache; the
+// renderer's retire list keeps released Images alive and resident for
+// kFramesInFlight frames, which is what frames in flight rely on (a Metal 4
+// command buffer retains nothing).
 //
 // Borrows `textures` and `samplers`, which must outlive it. Neither
 // copyable nor movable. Not thread-safe.
@@ -123,10 +123,10 @@ class MaterialSystem {
   // nothing; it stays so that the renderer's frame protocol is unchanged.
   void BeginFrame(uint64_t /*frame_serial*/) {}
 
-  // Sets the parameters, the five slot textures and the material sampler
-  // (kSamplerMaterial) of material Resolve(`id`) on the fragment stage of
-  // `encoder`. kDefaultMaterial must have been created.
-  void Bind(id<MTLRenderCommandEncoder> encoder, MaterialId id) const;
+  // Binds the parameters, the five slot textures and the material sampler
+  // (kSamplerMaterial) of material Resolve(`id`) in the argument table of
+  // `rec`. kDefaultMaterial must have been created.
+  void Bind(const Recording& rec, MaterialId id) const;
 
   // The accessors below take a valid id (< count()); not checked. A
   // released id still answers (its last state) but must not be drawn:

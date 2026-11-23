@@ -11,8 +11,8 @@
 #include "lighting/cascades.h"
 #include "render/draw_list.h"
 #include "render/frame_globals.h"
-#include "render/gpu_timer.h"
 #include "render/image.h"
+#include "render/recording.h"
 #include "render/render_targets.h"
 #include "render/scene_view.h"
 
@@ -22,12 +22,13 @@ namespace blue::render {
 // RendererImpl::DrawFrameTo() and only valid during that frame's recording;
 // everything is borrowed from the renderer.
 struct FrameContext {
-  // The frame's command buffer; passes open their encoders on it through
+  // The frame's command buffer, the argument table and the frame's transient
+  // constants; passes open their encoders on it and bind through
   // render/encoders.h.
-  id<MTLCommandBuffer> cmd = nil;
+  Recording rec;
   size_t frame_index = 0;  // Frame in flight, [0, kFramesInFlight).
   // FrameUniforms and the shared textures; a scene pass sets them on each
-  // of its encoders with globals.Bind(encoder, frame_index, frame_view).
+  // of its encoders with globals.Bind(rec, frame_index, frame_view).
   const FrameGlobals& globals;
   // Whose uniforms this context renders with: the camera's, or a scope's
   // for the scope picture (RendererImpl::RecordScopeView()).
@@ -60,8 +61,6 @@ struct FrameContext {
   std::span<const DrawEntry> draw_list;
 
   RenderStats& stats;
-  // Encoders opened through render/encoders.h report here.
-  GpuTimer& timer;
 };
 
 }  // namespace blue::render

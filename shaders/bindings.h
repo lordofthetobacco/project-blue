@@ -2,6 +2,8 @@
 #define BLUE_SHADERS_BINDINGS_H_
 
 // The argument-table indices shared by the Metal shaders and the renderer.
+// The renderer binds everything through one MTL4ArgumentTable that both the
+// vertex and the fragment stage see, so an index means the same in both.
 // Included by MSL (`#include "bindings.h"`) and by C++
 // (`#include "shaders/bindings.h"`); keep it to what both languages accept.
 // The enums are unscoped so that MSL attributes can name them:
@@ -23,6 +25,10 @@ enum BufferIndex {
   // kBufferPass).
   kBufferScopeLens = 5,
 };
+
+// Slots of the renderer's argument table (render::MetalContext): one more
+// than the highest index of each kind below.
+enum { kBufferBindCount = 6, kTextureBindCount = 15, kSamplerBindCount = 5 };
 
 // The size limit of a kBufferPass block.
 enum { kMaxPassConstantBytes = 128 };

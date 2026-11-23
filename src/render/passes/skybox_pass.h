@@ -29,9 +29,10 @@ class SkyboxPass {
   SkyboxPass& operator=(const SkyboxPass&) = delete;
 
   // Records the sky on `encoder`, a scene encoder (HDR colour, scene depth
-  // attachment) owned by the caller, which has set the frame's globals on
-  // it (FrameGlobals::Bind()). Call after the opaque meshes.
-  void Draw(const FrameContext& ctx, id<MTLRenderCommandEncoder> encoder) const;
+  // attachment) owned by the caller, which has bound the frame's globals
+  // (FrameGlobals::Bind()). Call after the opaque meshes.
+  void Draw(const FrameContext& ctx,
+            id<MTL4RenderCommandEncoder> encoder) const;
 
  private:
   const Environment& environment_;

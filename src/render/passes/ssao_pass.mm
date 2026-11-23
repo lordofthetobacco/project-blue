@@ -92,32 +92,32 @@ void SsaoPass::RecordOcclusion(const FrameContext& ctx) const {
       .full_size = glm::vec4(full_width, full_height, 1.0f / full_width,
                              1.0f / full_height),
   };
-  occlusion_.Record(ctx,
+  occlusion_.Record(ctx.rec,
                     {.texture = targets.ssao_raw().texture(), .extent = half},
                     0, ConstantBytes(constants));
 
   const BlurConstants horizontal{.axis_x = 1, .axis_y = 0};
   blur_horizontal_.Record(
-      ctx, {.texture = targets.ssao_blur().texture(), .extent = half}, 0,
+      ctx.rec, {.texture = targets.ssao_blur().texture(), .extent = half}, 0,
       ConstantBytes(horizontal));
 
   const BlurConstants vertical{.axis_x = 0, .axis_y = 1};
-  blur_vertical_.Record(ctx,
+  blur_vertical_.Record(ctx.rec,
                         {.texture = targets.ssao().texture(), .extent = half},
                         0, ConstantBytes(vertical));
 }
 
 void SsaoPass::RecordClearToWhite(const FrameContext& ctx) {
   // A render pass that only clears: no draws.
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
   MTLRenderPassColorAttachmentDescriptor* color =
       descriptor.colorAttachments[0];
   color.texture = ctx.targets.ssao().texture();
   color.loadAction = MTLLoadActionClear;
   color.storeAction = MTLStoreActionStore;
   color.clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
-  [BeginRenderPass(ctx, descriptor, "ssao clear") endEncoding];
+  [BeginRenderPass(ctx.rec, descriptor, "ssao clear") endEncoding];
 }
 
 }  // namespace blue::render

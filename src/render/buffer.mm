@@ -33,6 +33,7 @@ Buffer::Buffer(const MetalContext& context, size_t size, Access access,
                                           options:ResourceOptions(access)];
   FatalIfNil(buffer_, nil, "newBufferWithLength");
   buffer_.label = label != nullptr ? @(label) : @"Buffer";
+  resident_ = Resident(context, buffer_);
 }
 
 Buffer CreateGpuBuffer(const MetalContext& context,

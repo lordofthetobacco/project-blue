@@ -53,12 +53,12 @@ MTLVertexDescriptor* LineVertexDescriptor() {
 // Begins rendering into `color` (loaded, or cleared to 0) with the scene
 // depth as a depth attachment that nothing writes, on the scene viewport so
 // that lines and the mask land on the same pixels as the scene depth.
-id<MTLRenderCommandEncoder> BeginOverlayRendering(const FrameContext& ctx,
-                                                  id<MTLTexture> color,
-                                                  MTLLoadAction color_load,
-                                                  const char* label) {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+id<MTL4RenderCommandEncoder> BeginOverlayRendering(const FrameContext& ctx,
+                                                   id<MTLTexture> color,
+                                                   MTLLoadAction color_load,
+                                                   const char* label) {
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
   MTLRenderPassColorAttachmentDescriptor* color_attachment =
       descriptor.colorAttachments[0];
   color_attachment.texture = color;
@@ -71,10 +71,10 @@ id<MTLRenderCommandEncoder> BeginOverlayRendering(const FrameContext& ctx,
   // Unchanged by the overlay; kept for its next encoder.
   depth.storeAction = MTLStoreActionStore;
 
-  const id<MTLRenderCommandEncoder> encoder =
-      BeginRenderPass(ctx, descriptor, label);
+  const id<MTL4RenderCommandEncoder> encoder =
+      BeginRenderPass(ctx.rec, descriptor, label);
   SetSceneViewport(encoder, ctx.targets.extent());
-  ctx.globals.Bind(encoder, ctx.frame_index);
+  ctx.globals.Bind(ctx.rec, ctx.frame_index);
   return encoder;
 }
 
@@ -95,28 +95,27 @@ OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
                    .blend = BlendMode::kAlpha,
                    .label = "selection outline",
                }) {
-  id<MTLDevice> device = context.device();
   programs.Add(
       core::JoinPath(shader_dir, "line.vert.metal"),
       core::JoinPath(shader_dir, "line.frag.metal"),
-      [this, device](
+      [this, &context](
           const shader::ShaderLibrary& vertex,
           const shader::ShaderLibrary* fragment) -> std::optional<std::string> {
         const auto make = [&](MTLCompareFunction compare, const char* label) {
           return Pipeline::Create(
-              device, GraphicsPipelineDesc{
-                          .vertex = &vertex,
-                          .fragment = fragment,
-                          .vertex_descriptor = LineVertexDescriptor(),
-                          .color_format = RenderTargets::kLdrFormat,
-                          .depth_format = RenderTargets::kDepthFormat,
-                          .cull_mode = MTLCullModeNone,
-                          .depth_compare = compare,
-                          .depth_write = false,
-                          .blend = BlendMode::kAlpha,
-                          .topology = MTLPrimitiveTopologyClassLine,
-                          .label = label,
-                      });
+              context, GraphicsPipelineDesc{
+                           .vertex = &vertex,
+                           .fragment = fragment,
+                           .vertex_descriptor = LineVertexDescriptor(),
+                           .color_format = RenderTargets::kLdrFormat,
+                           .depth_format = RenderTargets::kDepthFormat,
+                           .cull_mode = MTLCullModeNone,
+                           .depth_compare = compare,
+                           .depth_write = false,
+                           .blend = BlendMode::kAlpha,
+                           .topology = MTLPrimitiveTopologyClassLine,
+                           .label = label,
+                       });
         };
         // Reversed Z: nearer is greater.
         auto tested =
@@ -135,7 +134,7 @@ OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
   programs.Add(
       core::JoinPath(shader_dir, "depth.vert.metal"),
       core::JoinPath(shader_dir, "selection_mask.frag.metal"),
-      [this, device](
+      [this, &context](
           const shader::ShaderLibrary& vertex,
           const shader::ShaderLibrary* fragment) -> std::optional<std::string> {
         const auto make = [&](bool visible) {
@@ -146,7 +145,7 @@ OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
           // depth.vert.metal's invariant position matches the depth pre-pass
           // exactly, so the visible test can compare GreaterEqual.
           return Pipeline::Create(
-              device,
+              context,
               GraphicsPipelineDesc{
                   .vertex = &vertex,
                   .fragment = fragment,
@@ -200,7 +199,7 @@ void OverlayPass::Record(const FrameContext& ctx) {
   }
   if (!ctx.view.selected_draws.empty()) {
     const OutlineConstants constants{.color = ctx.view.selection_color};
-    outline_.Record(ctx,
+    outline_.Record(ctx.rec,
                     {.texture = ctx.targets.ldr().texture(),
                      .extent = ctx.targets.extent(),
                      .load_action = MTLLoadActionLoad},
@@ -219,9 +218,9 @@ void OverlayPass::UploadLines(const FrameContext& ctx) {
     while (size < needed) {
       size *= 2;
     }
-    // This frame slot's previous command buffer has completed (it was
-    // waited on before recording), so the buffer can be replaced right
-    // away.
+    // This frame slot's previous work has completed (it was waited on
+    // before recording), so the buffer can be replaced right away; the new
+    // one is resident before this frame is committed.
     buffer = Buffer(context_, size, Buffer::Access::kCpuSequentialWrite,
                     "debug lines");
   }
@@ -236,11 +235,10 @@ void OverlayPass::UploadLines(const FrameContext& ctx) {
 }
 
 void OverlayPass::RecordLines(const FrameContext& ctx) const {
-  const id<MTLRenderCommandEncoder> encoder = BeginOverlayRendering(
+  const id<MTL4RenderCommandEncoder> encoder = BeginOverlayRendering(
       ctx, ctx.targets.ldr().texture(), MTLLoadActionLoad, "debug lines");
-  [encoder setVertexBuffer:line_buffers_[ctx.frame_index].handle()
-                    offset:0
-                   atIndex:kBufferVertices];
+  BindBuffer(ctx.rec, kBufferVertices,
+             line_buffers_[ctx.frame_index].handle());
   const auto draw = [&](const Pipeline& pipeline, size_t first, size_t count) {
     if (count == 0) {
       return;
@@ -258,7 +256,7 @@ void OverlayPass::RecordLines(const FrameContext& ctx) const {
 }
 
 void OverlayPass::RecordSelectionMask(const FrameContext& ctx) const {
-  const id<MTLRenderCommandEncoder> encoder =
+  const id<MTL4RenderCommandEncoder> encoder =
       BeginOverlayRendering(ctx, ctx.targets.selection_mask().texture(),
                             MTLLoadActionClear, "selection mask");
   // Hidden parts first (0.5), then the visible ones overwrite them (1).
@@ -275,8 +273,8 @@ void OverlayPass::RecordSelectionMask(const FrameContext& ctx) const {
       }
       // DrawConstants of depth.vert.metal: the model matrix.
       const glm::mat4 model = item.transform;
-      [encoder setVertexBytes:&model length:sizeof(model) atIndex:kBufferDraw];
-      meshes_[mesh_index].Draw(encoder);
+      BindConstants(ctx.rec, kBufferDraw, model);
+      meshes_[mesh_index].Draw(ctx.rec, encoder);
       ++ctx.stats.draw_calls;
     }
   }

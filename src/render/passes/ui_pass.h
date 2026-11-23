@@ -28,7 +28,7 @@ inline constexpr MTLClearColor kUiClearBlack{0.0, 0.0, 0.0, 1.0};
 // Draws the ImGui overlay `ui` (when non-null) over the drawable of `ctx`,
 // which must not be nil, in one render pass without depth. `clear_color` is
 // linear (the drawable is sRGB) and only used with UiBackground::kClear. The
-// ImGui Metal backend must have been initialized (UiRenderer::Init()) when
+// ImGui Metal 4 backend must have been initialized (UiRenderer::Init()) when
 // `ui` is non-null. A frame whose UI was laid out for a larger output than
 // the drawable (a resize between building the UI and acquiring the
 // drawable) draws no UI.
@@ -44,10 +44,10 @@ void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
       reinterpret_cast<intptr_t>((__bridge void*)texture));
 }
 
-// The ImGui Metal backend. ImGui textures are bridged MTLTextures
-// (ToImTextureId()), so the backend owns nothing but its own pipelines and
-// font atlas. Starts uninitialized. Neither copyable nor movable. Not
-// thread-safe.
+// The ImGui Metal 4 backend. ImGui textures are bridged MTLTextures
+// (ToImTextureId()), so the backend owns nothing but its own pipelines,
+// buffers, residency set and font atlas. Starts uninitialized. Neither
+// copyable nor movable. Not thread-safe.
 class UiRenderer {
  public:
   UiRenderer() = default;
@@ -55,8 +55,8 @@ class UiRenderer {
   UiRenderer(const UiRenderer&) = delete;
   UiRenderer& operator=(const UiRenderer&) = delete;
 
-  // Initializes the backend on the device of `context`. Needs a current
-  // ImGui context. Failure is fatal.
+  // Initializes the backend on the device and the queue of `context`. Needs
+  // a current ImGui context. Failure is fatal.
   void Init(const MetalContext& context);
   // Shuts the backend down, destroying its font atlas texture. The GPU must
   // be idle. Does nothing when uninitialized.

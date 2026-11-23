@@ -86,6 +86,15 @@ RendererImpl::RendererImpl(const platform::Window& window,
   if (default_material != kDefaultMaterial) {
     core::log::Fatal("The default material must be created first");
   }
+  for (Frame& frame : frames_) {
+    frame.allocator = [context_.device() newCommandAllocator];
+    FatalIfNil(frame.allocator, nil, "newCommandAllocator");
+    frame.command_buffer = [context_.device() newCommandBuffer];
+    FatalIfNil(frame.command_buffer, nil, "newCommandBuffer");
+    frame.command_buffer.label = @"frame";
+    frame.constants =
+        std::make_unique<TransientArena>(context_, "Frame constants");
+  }
   frame_globals_.BindShadowMap(shadow_pass_.map());
   BindTargets();
 }
@@ -154,8 +163,7 @@ void RendererImpl::DestroyRetiredIfIdle() {
     return;
   }
   for (const Frame& frame : frames_) {
-    if (frame.command_buffer != nil &&
-        frame.command_buffer.status != MTLCommandBufferStatusCompleted) {
+    if (frame.submission != nullptr && !frame.submission->completed()) {
       return;
     }
   }
@@ -237,11 +245,9 @@ bool RendererImpl::RebuildSwapchain() {
 }
 
 void RendererImpl::WaitForFrame(const Frame& frame) {
-  if (frame.command_buffer == nil) {
-    return;  // Nothing recorded into this slot yet.
+  if (frame.submission != nullptr) {
+    frame.submission->Wait();
   }
-  [frame.command_buffer waitUntilCompleted];
-  CheckCommandBuffer(frame.command_buffer);
 }
 
 void RendererImpl::WaitForFramesInFlight() const {
@@ -320,13 +326,13 @@ ReadbackStatus RendererImpl::TakeViewportReadback(uint64_t ticket,
 }
 
 void RendererImpl::RecordViewportReadbacks(const FrameContext& ctx) {
-  id<MTLBlitCommandEncoder> blit = nil;
+  id<MTL4ComputeCommandEncoder> blit = nil;
   for (Readback& readback : readbacks_) {
     if (readback.frame_serial != 0) {
       continue;
     }
     if (blit == nil) {
-      blit = BeginBlit(ctx, "viewport readback");
+      blit = BeginCopy(ctx.rec, "viewport readback");
     }
     readback.extent = viewport_image_.extent();
     readback.frame_serial = frame_serial_;
@@ -382,15 +388,20 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
 
     Frame& frame = frames_[frame_index_];
     WaitForFrame(frame);
-    gpu_timer_.Collect(frame_index_, frame.command_buffer);
+    gpu_timer_.Collect(frame_index_, frame.submission.get());
     ++frame_serial_;
     materials_.BeginFrame(frame_serial_);
     DestroyRetired();
 
-    // Retains every resource it uses until it has completed.
-    frame.command_buffer = [context_.queue() commandBuffer];
-    FatalIfNil(frame.command_buffer, nil, "commandBuffer");
-    frame.command_buffer.label = @"frame";
+    // The slot's last work has completed: its drawable was presented, and
+    // the memory of its commands and constants can be reused.
+    frame.drawable = nil;
+    [frame.allocator reset];
+    frame.constants->Reset();
+    [frame.command_buffer beginCommandBufferWithAllocator:frame.allocator];
+    const Recording rec{.cmd = frame.command_buffer,
+                        .args = context_.argument_table(),
+                        .constants = *frame.constants};
 
     const bool shadows = view.shadows_enabled && view.sun.casts_shadows;
     std::array<lighting::Cascade, lighting::kCascadeCount> cascades{};
@@ -413,7 +424,7 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     environment_.FillUniforms(uniforms);
     frame_globals_.Write(frame_index_, uniforms);
     FrameContext ctx{
-        .cmd = frame.command_buffer,
+        .rec = rec,
         .frame_index = frame_index_,
         .globals = frame_globals_,
         .view = view,
@@ -428,7 +439,6 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
         .shadows = shadows,
         .draw_list = draw_list_.entries(),
         .stats = stats_,
-        .timer = gpu_timer_,
     };
 
     // The scope's picture: the same scene from the scope's camera, culled by
@@ -467,7 +477,7 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
       environment_.FillUniforms(scope_uniforms);
       frame_globals_.Write(frame_index_, scope_uniforms, FrameView::kScope);
       scope_ctx.emplace(FrameContext{
-          .cmd = frame.command_buffer,
+          .rec = rec,
           .frame_index = frame_index_,
           .globals = frame_globals_,
           .frame_view = FrameView::kScope,
@@ -482,15 +492,15 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
           .shadows = shadows,
           .draw_list = scope_draw_list_.entries(),
           .stats = scope_stats,
-          .timer = gpu_timer_,
       });
     }
     RecordCommands(ctx, scope_ctx ? &*scope_ctx : nullptr, ui, output);
     stats_.scope_draw_calls = scope_stats.draw_calls;
-    if (ctx.drawable != nil) {
-      [ctx.cmd presentDrawable:ctx.drawable];
-    }
-    context_.Commit(ctx.cmd);
+    [frame.command_buffer endCommandBuffer];
+    // Presents the drawable (when one was acquired) through the queue.
+    frame.drawable = ctx.drawable;
+    frame.submission =
+        context_.Commit(frame.command_buffer, "frame", frame.drawable);
 
     frame_index_ = (frame_index_ + 1) % kFramesInFlight;
   }
@@ -521,17 +531,13 @@ void RendererImpl::EnsureScopeTargets() {
                                   .label = "Scope depth"});
   // The lens may sample the picture before one was ever rendered (no light
   // through the scope): give it a defined, black content.
-  MTLRenderPassDescriptor* clear =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* clear = [[MTL4RenderPassDescriptor alloc] init];
   clear.colorAttachments[0].texture = scope_picture_.texture();
   clear.colorAttachments[0].loadAction = MTLLoadActionClear;
   clear.colorAttachments[0].storeAction = MTLStoreActionStore;
   clear.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-  context_.SubmitImmediate([clear](id<MTLCommandBuffer> cmd) {
-    const id<MTLRenderCommandEncoder> encoder =
-        [cmd renderCommandEncoderWithDescriptor:clear];
-    encoder.label = @"Clear scope picture";
-    [encoder endEncoding];
+  context_.SubmitImmediate([clear](const Recording& immediate) {
+    [BeginRenderPass(immediate, clear, "Clear scope picture") endEncoding];
   });
   scope_lens_pass_.BindPicture(scope_picture_.texture());
   core::log::Info("Scope picture target {} x {}", extent.width, extent.height);
@@ -539,14 +545,14 @@ void RendererImpl::EnsureScopeTargets() {
 
 void RendererImpl::RecordScopeView(const FrameContext& scope_ctx) {
   depth_prepass_.Record(scope_ctx);
-  const id<MTLRenderCommandEncoder> encoder = BeginScenePass(scope_ctx);
+  const id<MTL4RenderCommandEncoder> encoder = BeginScenePass(scope_ctx);
   mesh_pass_.Draw(scope_ctx, encoder);
   skybox_pass_.Draw(scope_ctx, encoder);
   EndScenePass(encoder);
 }
 
 void RendererImpl::DrawSights(const FrameContext& ctx,
-                              id<MTLRenderCommandEncoder> encoder) const {
+                              id<MTL4RenderCommandEncoder> encoder) const {
   reticle_pass_.Draw(ctx, encoder);
   scope_lens_pass_.Draw(ctx, encoder);
 }
@@ -556,9 +562,9 @@ void RendererImpl::RecordCommands(FrameContext& ctx,
                                   Output output) {
   // Times `record` as `scope`.
   const auto timed = [&](GpuScope scope, const auto& record) {
-    gpu_timer_.BeginScope(scope);
+    gpu_timer_.BeginScope(ctx.rec.cmd, scope);
     record();
-    gpu_timer_.EndScope(scope);
+    gpu_timer_.EndScope(ctx.rec.cmd, scope);
   };
 
   if (ctx.shadows) {
@@ -580,7 +586,7 @@ void RendererImpl::RecordCommands(FrameContext& ctx,
   const std::optional<MTLScissorRect> motion_blur_area =
       MotionBlurPass::FindArea(ctx);
   timed(GpuScope::kScene, [&] {
-    const id<MTLRenderCommandEncoder> encoder = BeginScenePass(ctx);
+    const id<MTL4RenderCommandEncoder> encoder = BeginScenePass(ctx);
     mesh_pass_.Draw(ctx, encoder);
     skybox_pass_.Draw(ctx, encoder);
     if (!motion_blur_area) {
@@ -592,7 +598,7 @@ void RendererImpl::RecordCommands(FrameContext& ctx,
     timed(GpuScope::kMotionBlur, [&] {
       motion_blur_pass_.Record(ctx, *motion_blur_area);
       if (ctx.view.sight || ctx.view.scope) {
-        const id<MTLRenderCommandEncoder> encoder = ResumeScenePass(ctx);
+        const id<MTL4RenderCommandEncoder> encoder = ResumeScenePass(ctx);
         DrawSights(ctx, encoder);
         EndScenePass(encoder);
       }

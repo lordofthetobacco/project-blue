@@ -20,9 +20,9 @@ namespace blue::render {
 // every draw item whose world bounds reach the cascade. Alpha-masked
 // materials cast solid shadows (the pass reads positions only).
 //
-// There is one map for all frames in flight: Metal's hazard tracking orders
-// this frame's depth writes after the previous frame's reads on the single
-// queue. While shadows are off the map is bound but never sampled
+// There is one map for all frames in flight: the barrier every render
+// encoder starts with (render/encoders.h) orders this frame's depth writes
+// after the previous frame's reads on the single queue. While shadows are off the map is bound but never sampled
 // (FrameUniforms::shadow_params.x is 0).
 //
 // Borrows `programs` and `meshes`, which must outlive it. Neither copyable
@@ -48,7 +48,7 @@ class ShadowPass {
   [[nodiscard]] uint64_t map_bytes() const { return map_.size_bytes(); }
 
  private:
-  id<MTLDevice> device_ = nil;
+  const MetalContext& context_;
   const std::vector<Mesh>& meshes_;
   Image map_;
   // Replaced when its shader is reloaded; never null after construction.

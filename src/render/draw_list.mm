@@ -7,6 +7,7 @@
 
 #include <glm/mat4x4.hpp>
 
+#include "render/encoders.h"
 #include "shaders/bindings.h"
 
 namespace blue::render {
@@ -83,7 +84,8 @@ void DrawList::Build(const SceneView& view,
   });
 }
 
-void RecordDrawList(id<MTLRenderCommandEncoder> encoder,
+void RecordDrawList(const Recording& rec,
+                    id<MTL4RenderCommandEncoder> encoder,
                     std::span<const DrawEntry> entries,
                     const DrawListPipelines& pipelines, const SceneView& view,
                     const MaterialSystem& materials,
@@ -98,27 +100,25 @@ void RecordDrawList(id<MTLRenderCommandEncoder> encoder,
     if (pipeline == nullptr) {
       continue;
     }
-    // Encoder bindings survive pipeline changes, so the material and the
-    // model matrix stay set across them.
+    // Bindings survive pipeline changes, so the material and the model
+    // matrix stay set across them.
     if (pipeline != bound_pipeline) {
       pipeline->Bind(encoder);
       bound_pipeline = pipeline;
     }
     if (pipelines.bind_material[variant] && bound_material != entry.material) {
-      materials.Bind(encoder, entry.material);
+      materials.Bind(rec, entry.material);
       bound_material = entry.material;
     }
     const DrawItem& item = view.draws[entry.item];
     const Mesh& mesh = meshes[static_cast<size_t>(item.mesh)];
     if (&mesh != bound_mesh) {
-      mesh.Bind(encoder);
+      mesh.Bind(rec);
       bound_mesh = &mesh;
     }
     if (entry.item != set_item) {
       const DrawConstants constants{.model = item.transform};
-      [encoder setVertexBytes:&constants
-                       length:sizeof(constants)
-                      atIndex:kBufferDraw];
+      BindConstants(rec, kBufferDraw, constants);
       set_item = entry.item;
     }
     mesh.DrawRange(encoder, entry.first_index, entry.index_count);

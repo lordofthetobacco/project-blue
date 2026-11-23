@@ -14,11 +14,11 @@ constexpr MTLClearColor kClearColor{0.015, 0.018, 0.022, 1.0};
 // Opens an encoder on the context's HDR target, cleared or loaded per
 // `load_action`, with the scene depth loaded, and sets the viewport, the
 // scissor and the frame's globals.
-id<MTLRenderCommandEncoder> BeginHdrPass(const FrameContext& ctx,
+id<MTL4RenderCommandEncoder> BeginHdrPass(const FrameContext& ctx,
                                          MTLLoadAction load_action,
                                          const char* label) {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
   MTLRenderPassColorAttachmentDescriptor* color =
       descriptor.colorAttachments[0];
   color.texture = ctx.scene_hdr.texture();
@@ -30,16 +30,16 @@ id<MTLRenderCommandEncoder> BeginHdrPass(const FrameContext& ctx,
   depth.loadAction = MTLLoadActionLoad;  // Written by the depth pre-pass.
   depth.storeAction = MTLStoreActionStore;
 
-  const id<MTLRenderCommandEncoder> encoder =
-      BeginRenderPass(ctx, descriptor, label);
+  const id<MTL4RenderCommandEncoder> encoder =
+      BeginRenderPass(ctx.rec, descriptor, label);
   SetSceneViewport(encoder, ctx.scene_extent);
-  ctx.globals.Bind(encoder, ctx.frame_index, ctx.frame_view);
+  ctx.globals.Bind(ctx.rec, ctx.frame_index, ctx.frame_view);
   return encoder;
 }
 
 }  // namespace
 
-void SetSceneViewport(id<MTLRenderCommandEncoder> encoder,
+void SetSceneViewport(id<MTL4RenderCommandEncoder> encoder,
                       core::Extent2D extent) {
   [encoder setViewport:MTLViewport{
                            .originX = 0.0,
@@ -57,15 +57,15 @@ void SetSceneViewport(id<MTLRenderCommandEncoder> encoder,
                           }];
 }
 
-id<MTLRenderCommandEncoder> BeginScenePass(const FrameContext& ctx) {
+id<MTL4RenderCommandEncoder> BeginScenePass(const FrameContext& ctx) {
   return BeginHdrPass(ctx, MTLLoadActionClear, "scene");
 }
 
-id<MTLRenderCommandEncoder> ResumeScenePass(const FrameContext& ctx) {
+id<MTL4RenderCommandEncoder> ResumeScenePass(const FrameContext& ctx) {
   return BeginHdrPass(ctx, MTLLoadActionLoad, "scene (resumed)");
 }
 
-void EndScenePass(id<MTLRenderCommandEncoder> encoder) {
+void EndScenePass(id<MTL4RenderCommandEncoder> encoder) {
   [encoder endEncoding];
 }
 

@@ -27,7 +27,7 @@ DepthPrepass::DepthPrepass(const MetalContext& context,
                            const std::string& shader_dir,
                            const MaterialSystem& materials,
                            const std::vector<Mesh>& meshes)
-    : device_(context.device()), materials_(materials), meshes_(meshes) {
+    : context_(context), materials_(materials), meshes_(meshes) {
   const std::string vertex_path =
       core::JoinPath(shader_dir, "depth.vert.metal");
   programs.Add(vertex_path, "",
@@ -64,7 +64,7 @@ std::optional<std::string> DepthPrepass::CreatePipelines(
         .depth_compare = MTLCompareFunctionGreater,
         .label = masked ? "depth prepass (masked)" : "depth prepass",
     };
-    auto pipeline = Pipeline::Create(device_, desc);
+    auto pipeline = Pipeline::Create(context_, desc);
     if (!pipeline.ok()) {
       return pipeline.error();
     }
@@ -79,26 +79,26 @@ std::optional<std::string> DepthPrepass::CreatePipelines(
 }
 
 void DepthPrepass::Record(const FrameContext& ctx) const {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
   MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
   depth.texture = ctx.scene_depth.texture();
   depth.loadAction = MTLLoadActionClear;
   depth.storeAction = MTLStoreActionStore;
   depth.clearDepth = kDepthClearValue;
 
-  const id<MTLRenderCommandEncoder> encoder =
-      BeginRenderPass(ctx, descriptor, "depth prepass");
+  const id<MTL4RenderCommandEncoder> encoder =
+      BeginRenderPass(ctx.rec, descriptor, "depth prepass");
   SetSceneViewport(encoder, ctx.scene_extent);
-  ctx.globals.Bind(encoder, ctx.frame_index, ctx.frame_view);
+  ctx.globals.Bind(ctx.rec, ctx.frame_index, ctx.frame_view);
 
   DrawListPipelines pipelines;
   for (size_t i = 0; i < kMaterialVariantCount; ++i) {
     pipelines.pipelines[i] = pipelines_[i].get();
     pipelines.bind_material[i] = IsMasked(static_cast<MaterialVariant>(i));
   }
-  RecordDrawList(encoder, ctx.draw_list, pipelines, ctx.view, materials_,
-                 meshes_, /*stats=*/nullptr);
+  RecordDrawList(ctx.rec, encoder, ctx.draw_list, pipelines, ctx.view,
+                 materials_, meshes_, /*stats=*/nullptr);
   [encoder endEncoding];
 }
 

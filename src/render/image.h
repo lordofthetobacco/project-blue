@@ -42,7 +42,8 @@ struct ImageViewDesc {
 };
 
 // A texture view of part of an image, e.g. one mip to sample on its own. It
-// keeps the image's memory alive. Move-only; a moved-from view is empty. Not
+// keeps the image's memory alive, but not resident: it must not be used by
+// the GPU after its image was destroyed. Move-only; a moved-from view is empty. Not
 // thread-safe.
 class ImageView {
  public:
@@ -60,15 +61,16 @@ class ImageView {
   id<MTLTexture> texture_ = nil;
 };
 
-// A private 2D texture (single, 2D array or cube). Rendering to one layer or
+// A private 2D texture (single, 2D array or cube), resident on the context's
+// queue for its lifetime (see MetalContext). Rendering to one layer or
 // mip uses the render pass attachment's `slice` / `level` on texture().
 // Move-only; a moved-from image is empty (nil texture, every accessor 0). Not
 // thread-safe.
 class Image {
  public:
   Image() = default;
-  // Creates the texture; a cube desc without 6 layers and a square extent,
-  // or a device failure, is fatal.
+  // Creates the texture on `context`, which must outlive it; a cube desc
+  // without 6 layers and a square extent, or a device failure, is fatal.
   Image(const MetalContext& context, const ImageDesc& desc);
 
   Image(const Image&) = delete;
@@ -94,6 +96,7 @@ class Image {
   // Every property is read from the texture itself, so that the defaulted
   // moves leave the moved-from image empty.
   id<MTLTexture> texture_ = nil;
+  Resident resident_;
 };
 
 // Creates a sampled color image from CPU texels and blocks until it is ready.

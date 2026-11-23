@@ -71,8 +71,8 @@ class MotionBlurPass {
   [[nodiscard]] static std::optional<MTLScissorRect> FindArea(
       const FrameContext& ctx);
 
-  // Records the four steps over `area` (from FindArea()) on ctx.cmd, each
-  // in its own encoder (three render passes and a blit), after the scene
+  // Records the four steps over `area` (from FindArea()) on ctx.rec, each
+  // in its own encoder (three render passes and a copy), after the scene
   // encoder was ended (EndScenePass()). Reads the scene depth the pre-pass
   // wrote and leaves it as it was.
   void Record(const FrameContext& ctx, const MTLScissorRect& area) const;

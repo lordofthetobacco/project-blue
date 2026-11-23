@@ -13,7 +13,7 @@
 
 #include "core/log.h"
 #include "core/path.h"
-#include "render/metal_check.h"
+#include "render/encoders.h"
 #include "render/texture_types.h"
 
 namespace blue::render {
@@ -164,7 +164,7 @@ void Environment::Set(const asset::ImageDataF& equirect, float intensity,
   const float clamp_luminance = sun_.clamp_luminance;
   const int32_t width = panorama.width;
   const int32_t height = panorama.height;
-  context_.SubmitImmediate([&](id<MTLCommandBuffer> cmd) {
+  context_.SubmitImmediate([&](const Recording& rec) {
     // Sky (unclamped) and specular source (sun clamped) at mip 0.
     for (uint32_t face = 0; face < kFaceCount; ++face) {
       ToCubeConstants constants{
@@ -172,21 +172,21 @@ void Environment::Set(const asset::ImageDataF& equirect, float intensity,
           .max_luminance = std::numeric_limits<float>::max(),
           .width = width,
           .height = height};
-      to_cube_pass_.RecordTo(cmd,
+      to_cube_pass_.Record(rec,
                              {.texture = sky_cube_.texture(),
                               .slice = face,
                               .extent = {kSkySize, kSkySize}},
                              0, ConstantBytes(constants));
       constants.max_luminance =
           std::min(clamp_luminance, std::numeric_limits<float>::max());
-      to_cube_pass_.RecordTo(cmd,
+      to_cube_pass_.Record(rec,
                              {.texture = source_cube_.texture(),
                               .slice = face,
                               .extent = {kSpecularSize, kSpecularSize}},
                              0, ConstantBytes(constants));
     }
-    RecordSourceMips(cmd);
-    RecordFiltering(cmd);
+    RecordSourceMips(rec);
+    RecordFiltering(rec);
   });
   // Releases the panorama (it can be large) instead of keeping it alive in
   // the input set until the next Set(); the pass is not recorded until then.
@@ -204,17 +204,16 @@ void Environment::Set(const asset::ImageDataF& equirect, float intensity,
       sun_.found ? "found" : "none", sun_.clamp_luminance, elapsed.count());
 }
 
-void Environment::RecordSourceMips(id<MTLCommandBuffer> cmd) const {
-  // Box-filters every face down the whole chain; Metal orders the blit
-  // after the render encoders that wrote mip 0.
-  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-  FatalIfNil(blit, nil, "blit encoder: environment source mips");
-  blit.label = @"Environment source mips";
-  [blit generateMipmapsForTexture:source_cube_.texture()];
-  [blit endEncoding];
+void Environment::RecordSourceMips(const Recording& rec) const {
+  // Box-filters every face down the whole chain, after the render encoders
+  // that wrote mip 0 (BeginCopy()'s barrier).
+  const id<MTL4ComputeCommandEncoder> encoder =
+      BeginCopy(rec, "Environment source mips");
+  [encoder generateMipmapsForTexture:source_cube_.texture()];
+  [encoder endEncoding];
 }
 
-void Environment::RecordFiltering(id<MTLCommandBuffer> cmd) const {
+void Environment::RecordFiltering(const Recording& rec) const {
   for (uint32_t mip = 0; mip < kPrefilterMips; ++mip) {
     const float roughness =
         static_cast<float>(mip) / static_cast<float>(kPrefilterMips - 1);
@@ -224,7 +223,7 @@ void Environment::RecordFiltering(id<MTLCommandBuffer> cmd) const {
           .roughness = roughness,
           .source_size = static_cast<float>(kSpecularSize),
           .sample_count = mip == 0 ? 1 : kPrefilterSamples};
-      prefilter_pass_.RecordTo(cmd,
+      prefilter_pass_.Record(rec,
                                {.texture = specular_cube_.texture(),
                                 .level = mip,
                                 .slice = face,
@@ -236,9 +235,9 @@ void Environment::RecordFiltering(id<MTLCommandBuffer> cmd) const {
 
 void Environment::GenerateBrdfLut() {
   const auto start = std::chrono::steady_clock::now();
-  context_.SubmitImmediate([&](id<MTLCommandBuffer> cmd) {
-    brdf_lut_pass_.RecordTo(cmd, {.texture = brdf_lut_.texture(),
-                                  .extent = {kBrdfLutSize, kBrdfLutSize}});
+  context_.SubmitImmediate([&](const Recording& rec) {
+    brdf_lut_pass_.Record(rec, {.texture = brdf_lut_.texture(),
+                                .extent = {kBrdfLutSize, kBrdfLutSize}});
   });
   const auto elapsed = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start);

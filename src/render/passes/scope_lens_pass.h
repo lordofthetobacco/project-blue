@@ -35,8 +35,9 @@ class ScopeLensPass {
 
   // Sets the scope picture the eyepiece shows: `picture`, which must not be
   // nil, is sampled with the frame's bilinear clamped sampler
-  // (kSamplerLinearClamp) and retained. Draw() records nothing before the
-  // first call.
+  // (kSamplerLinearClamp) and retained; its owner keeps it resident and
+  // alive while a frame in flight may draw it. Draw() records nothing before
+  // the first call.
   void BindPicture(id<MTLTexture> picture);
 
   // Records the eyepiece, if the view has a scope, on `encoder`, a scene
@@ -45,7 +46,8 @@ class ScopeLensPass {
   // the opaque meshes, so their depth hides the glass, and at most once per
   // frame in flight (the uniforms of ctx.frame_index are overwritten); the
   // picture must not be an attachment of `encoder`.
-  void Draw(const FrameContext& ctx, id<MTLRenderCommandEncoder> encoder) const;
+  void Draw(const FrameContext& ctx,
+            id<MTL4RenderCommandEncoder> encoder) const;
 
  private:
   // The lens uniforms of each frame in flight.

@@ -28,7 +28,8 @@ class ReticlePass {
   // (HDR colour, scene depth attachment) owned by the caller, which has set
   // the frame's globals on it (FrameGlobals::Bind()). Call after the opaque
   // meshes, so their depth hides the window.
-  void Draw(const FrameContext& ctx, id<MTLRenderCommandEncoder> encoder) const;
+  void Draw(const FrameContext& ctx,
+            id<MTL4RenderCommandEncoder> encoder) const;
 
  private:
   // Replaced when its shaders are reloaded; never null after construction.
