@@ -1,10 +1,10 @@
 #include "platform/window.h"
 
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_vulkan.h>
 
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <system_error>
@@ -36,7 +36,8 @@ std::optional<WindowPair> ParseWindowPair(std::string_view text) {
 }
 
 Window::Window(const char* title, int width, int height,
-               std::optional<WindowPair> position) {
+               WindowGraphics graphics, std::optional<WindowPair> position)
+    : graphics_(graphics) {
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     core::log::Fatal("SDL_Init failed: {}", SDL_GetError());
   }
@@ -46,10 +47,16 @@ Window::Window(const char* title, int width, int height,
   SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
   SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER,
                         height);
-  for (const char* flag : {SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN,
-                           SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN,
+  for (const char* flag : {SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN,
                            SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN}) {
     SDL_SetBooleanProperty(properties, flag, true);
+  }
+  if (graphics == WindowGraphics::kVulkan) {
+    SDL_SetBooleanProperty(properties, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN,
+                           true);
+  } else if (graphics == WindowGraphics::kMetal) {
+    SDL_SetBooleanProperty(properties, SDL_PROP_WINDOW_CREATE_METAL_BOOLEAN,
+                           true);
   }
   if (position) {
     SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_X_NUMBER,
@@ -62,18 +69,38 @@ Window::Window(const char* title, int width, int height,
   if (window_ == nullptr) {
     core::log::Fatal("SDL_CreateWindow failed: {}", SDL_GetError());
   }
+  if (graphics != WindowGraphics::kMetal) {
+    return;
+  }
+  metal_view_ = SDL_Metal_CreateView(window_);
+  if (metal_view_ == nullptr) {
+    core::log::Fatal("SDL_Metal_CreateView failed: {}", SDL_GetError());
+  }
 }
 
 Window::~Window() {
+  // The view is a subview of the window's content view: it goes first.
+  if (metal_view_ != nullptr) {
+    SDL_Metal_DestroyView(metal_view_);
+  }
   SDL_DestroyWindow(window_);
   SDL_Quit();
 }
 
-VkExtent2D Window::PixelSize() const {
+core::Extent2D Window::PixelSize() const {
   int width = 0;
   int height = 0;
   SDL_GetWindowSizeInPixels(window_, &width, &height);
   return {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+}
+
+void* Window::native_handle() const {
+  return SDL_GetPointerProperty(SDL_GetWindowProperties(window_),
+                                SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+}
+
+void* Window::metal_layer() const {
+  return metal_view_ != nullptr ? SDL_Metal_GetLayer(metal_view_) : nullptr;
 }
 
 float Window::DisplayScale() const {
@@ -102,24 +129,6 @@ void Window::SetRelativeMouseMode(bool enabled) {
     core::log::Error("SDL_SetWindowRelativeMouseMode({}) failed: {}", enabled,
                      SDL_GetError());
   }
-}
-
-std::span<const char* const> Window::RequiredInstanceExtensions() const {
-  Uint32 count = 0;
-  const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&count);
-  if (extensions == nullptr) {
-    core::log::Fatal("SDL_Vulkan_GetInstanceExtensions failed: {}",
-                     SDL_GetError());
-  }
-  return {extensions, count};
-}
-
-VkSurfaceKHR Window::CreateSurface(VkInstance instance) const {
-  VkSurfaceKHR surface = VK_NULL_HANDLE;
-  if (!SDL_Vulkan_CreateSurface(window_, instance, nullptr, &surface)) {
-    core::log::Fatal("SDL_Vulkan_CreateSurface failed: {}", SDL_GetError());
-  }
-  return surface;
 }
 
 }  // namespace blue::platform

@@ -7,7 +7,7 @@
 // R8: 0 = not selected, 0.5 = selected but hidden, 1 = selected, visible.
 layout(set = 0, binding = 0) uniform sampler2D selectionMask;
 
-// Must match OutlineConstants in src/render/passes/overlay_pass.cc.
+// Must match OutlineConstants in src/render/vulkan/passes/overlay_pass.cc.
 layout(push_constant) uniform OutlineConstants {
     vec4 color;  // display space; alpha = opacity
 } params;

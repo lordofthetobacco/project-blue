@@ -12,7 +12,7 @@ struct GpuPointLight {
 };
 
 // Per-frame data, one uniform buffer per frame in flight. Must match
-// FrameUniforms in src/render/frame_globals.h (std140; the C++ side asserts
+// FrameUniforms in src/render/frame_uniforms.h (std140; the C++ side asserts
 // every offset).
 layout(set = 0, binding = 0) uniform FrameUniforms {
     mat4 viewProj;
@@ -38,6 +38,9 @@ layout(set = 0, binding = 0) uniform FrameUniforms {
     mat4 previousViewProj;                    // Last frame's viewProj (motion blur).
     vec4 motionBlur;                          // x: blur scale (0: off), y: max blur
                                               // length (px), z: max radius (px)
+    mat4 unjitteredViewProj;                  // viewProj without the jitter.
+    vec4 jitter;                              // xy: jitter in pixels (x right,
+                                              // y down); 0 without a temporal scaler.
 } frame;
 
 // Cascaded sun shadow map, one layer per cascade; compares against the

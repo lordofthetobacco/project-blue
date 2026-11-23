@@ -12,7 +12,7 @@
 
 layout(set = 0, binding = 0) uniform sampler2D source;  // bilinear, clamped
 
-// Must match DownsampleConstants in src/render/passes/bloom_pass.cc.
+// Must match DownsampleConstants in src/render/vulkan/passes/bloom_pass.cc.
 layout(push_constant) uniform DownsampleConstants {
     vec2 sourceTexel;  // 1 / source size
     int karisAverage;  // 1 on the first step

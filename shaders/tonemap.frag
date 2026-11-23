@@ -11,7 +11,7 @@ layout(set = 0, binding = 0) uniform sampler2D hdrImage;
 // Mip 0 of the bloom chain, half resolution: the sum of every level.
 layout(set = 0, binding = 1) uniform sampler2D bloomImage;
 
-// Must match TonemapConstants in src/render/passes/tonemap_pass.cc.
+// Must match TonemapConstants in src/render/vulkan/passes/tonemap_pass.cc.
 layout(push_constant) uniform TonemapConstants {
     float exposureScale;  // 2^EV
     int tonemapper;       // render::Tonemapper

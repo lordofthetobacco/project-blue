@@ -7,16 +7,12 @@
 #include <vector>
 
 #include "core/result.h"
+#include "shader/compile_mode.h"
 
 // Compiles GLSL files to SPIR-V at run time with shaderc. Nothing here needs
 // a Vulkan device, so it works in unit tests and tools.
 
 namespace blue::shader {
-
-enum class CompileMode {
-  kDebug,    // No optimization, debug info (OpLine/OpSource) in the output.
-  kRelease,  // Full performance optimization, no debug info.
-};
 
 struct CompiledShader {
   std::vector<uint32_t> spirv;

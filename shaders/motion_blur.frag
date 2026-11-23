@@ -25,7 +25,7 @@ layout(set = 0, binding = 0) uniform sampler2D sourceImage;    // HDR scene copy
 layout(set = 0, binding = 1) uniform sampler2D velocityImage;  // EncodeBlur()
 layout(set = 0, binding = 2) uniform sampler2D tileMaxImage;   // rg: pixels
 
-// Must match BlurConstants in src/render/passes/motion_blur_pass.cc.
+// Must match BlurConstants in src/render/vulkan/passes/motion_blur_pass.cc.
 layout(push_constant) uniform BlurConstants {
     float maxLength;  // Longest blur vector in pixels (DecodeBlur).
     int tileSize;     // Pixels per tile side of tileMaxImage.

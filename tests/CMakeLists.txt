@@ -21,6 +21,11 @@ add_executable(blue_tests
     frame_uniforms_test.cc
     motion_blur_math_test.cc
     motion_history_test.cc
+    temporal_math_test.cc
+    draw_history_test.cc
+    draw_list_test.cc
+    frame_plan_test.cc
+    backend_test.cc
     brdf_reference_test.cc
     editor_viewport_test.cc
     mscn_scene_data_test.cc
@@ -44,6 +49,7 @@ add_executable(blue_tests
     fov_controller_test.cc
     player_controller_test.cc
     projection_test.cc
+    render_public_headers_test.cc
     frustum_test.cc
     result_test.cc
     path_test.cc
@@ -78,14 +84,13 @@ add_executable(blue_tests
     weapon_modding_test.cc
     inspect_screen_rules_test.cc
     window_pair_test.cc
-    shader_compiler_test.cc
+    shader_preprocessor_test.cc
     shader_watcher_test.cc
     material_file_test.cc
     image_decoder_test.cc
     environment_test.cc
     sample_content_test.cc
     texture_upload_test.cc
-    staging_upload_test.cc
     editor_core_test.cc
     cook_clip_test.cc
     cook_collision_test.cc
@@ -104,12 +109,26 @@ add_executable(blue_tests
     render/image_compare_test.cc
 )
 
+# Unit tests of a backend's GPU-free code, built with that backend.
+if(BLUE_RENDERER_VULKAN)
+    target_sources(blue_tests PRIVATE
+        vulkan/shader_compiler_test.cc
+        vulkan/staging_upload_test.cc
+        vulkan/vk_format_test.cc
+    )
+    target_link_libraries(blue_tests PRIVATE blue_render_vulkan)
+endif()
+
 target_include_directories(blue_tests PRIVATE ${CMAKE_SOURCE_DIR})
 
 target_compile_definitions(blue_tests PRIVATE
     BLUE_SAMPLES_DIR="${CMAKE_SOURCE_DIR}/samples"
     BLUE_ASSETS_DIR="${CMAKE_BINARY_DIR}/bin/assets"
     BLUE_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
+    # doctest then includes the standard <ostream> and <string> it otherwise
+    # forward-declares, so CHECKs can print std::string_view with MSVC's
+    # standard library too.
+    DOCTEST_CONFIG_USE_STD_HEADERS
 )
 
 blue_target_defaults(blue_tests ALLOW_EXCEPTIONS_AND_RTTI)

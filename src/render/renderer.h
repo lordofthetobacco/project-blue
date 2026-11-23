@@ -2,11 +2,10 @@
 #define BLUE_RENDER_RENDERER_H_
 
 #include <imgui.h>
-#include <vulkan/vulkan.h>
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -15,137 +14,62 @@
 
 #include "asset/image_decoder.h"
 #include "asset/mesh_data.h"
-#include "camera/frustum.h"
-#include "lighting/cascades.h"
+#include "core/extent.h"
 #include "material/material.h"
 #include "platform/window.h"
-#include "render/barriers.h"
-#include "render/buffer.h"
-#include "render/draw_list.h"
-#include "render/environment.h"
+#include "render/backend.h"
 #include "render/frame_config.h"
-#include "render/frame_globals.h"
-#include "render/gpu_timer.h"
-#include "render/image.h"
-#include "render/material_system.h"
+#include "render/frame_plan.h"
+#include "render/gpu_scope.h"
 #include "render/memory_stats.h"
-#include "render/mesh.h"
-#include "render/passes/bloom_pass.h"
-#include "render/passes/depth_prepass.h"
-#include "render/passes/frame_context.h"
-#include "render/passes/mesh_pass.h"
-#include "render/passes/motion_blur_pass.h"
-#include "render/passes/overlay_pass.h"
-#include "render/passes/present_pass.h"
-#include "render/passes/reticle_pass.h"
-#include "render/passes/scope_lens_pass.h"
-#include "render/passes/shadow_pass.h"
-#include "render/passes/skybox_pass.h"
-#include "render/passes/ssao_pass.h"
-#include "render/passes/tonemap_pass.h"
-#include "render/render_targets.h"
-#include "render/samplers.h"
 #include "render/scene_view.h"
-#include "render/shader_programs.h"
-#include "render/swapchain.h"
-#include "render/texture_cache.h"
-#include "render/vulkan_context.h"
-#include "shader/shader_compiler.h"
+#include "render/texture_types.h"
+#include "shader/compile_mode.h"
 
-// How a frame is built
-// --------------------
-// Renderer::RecordCommands() is the wiring: it records the passes in order,
-// each wrapped in a GPU timer scope:
-//
-//   shadow cascades      ShadowPass        (sun depth, 4 layers)
-//   depth pre-pass       DepthPrepass      draw list -> depth
-//   ssao                 SsaoPass          depth -> ssao (half res, blurred)
-//   scope picture        RecordScopeView   SceneView::scope only: the same
-//                                          DepthPrepass, MeshPass and
-//                                          SkyboxPass from the scope's
-//                                          camera into the scope picture
-//                                          (shadow map and IBL shared, no
-//                                          SSAO, the held weapon left out)
-//   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
-//                        SkyboxPass, ReticlePass, ScopeLensPass ->
-//                        EndScenePass
-//   motion blur          MotionBlurPass    weapon items -> velocity -> tile
-//                                          max; hdr blurred in place (via a
-//                                          copy); then ResumeScenePass ->
-//                                          ReticlePass, ScopeLensPass ->
-//                                          EndScenePass. Only in frames with
-//                                          weapon motion blur, where the
-//                                          sights move here from the scene
-//                                          pass.
-//   bloom                BloomPass         hdr -> bloom mip chain
-//   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
-//   overlay              OverlayPass       debug lines + selection outline
-//                                          -> ldr (editor; skipped if empty)
-//   present              PresentPass       ldr -> swapchain (FXAA), or ->
-//                                          the editor viewport image
-//   ui                   RecordUiPass      ImGui on the swapchain, -> present
-//   readbacks            (copies)          RequestViewportReadback() /
-//                                          RequestOutputReadback() copies
-//
-// Headless (RendererOptions::window null) there is no surface and no
-// swapchain: an offscreen output image of RendererOptions::headless_extent
-// stands in for the swapchain image (same passes, no acquire, no present).
-//
-// The visible submeshes are culled and sorted once per frame (DrawList) and
-// shared by the depth pre-pass and the mesh pass. Disabled effects
-// (SceneView::post) are skipped entirely.
-//
-// A pass is a class (or a pair of functions) in src/render/passes/ with its
-// own shaders. It gets the shared state it needs in its constructor
-// (VulkanContext, ShaderPrograms for hot-reloadable pipelines, the
-// FrameGlobals set layout, ...) and records with a FrameContext. To add one:
-//   1. Write passes/<name>_pass.{h,cc} and shaders/<name>.frag. A full-screen
-//      effect wraps a FullscreenPass (render/fullscreen_pass.h): it owns the
-//      input descriptor sets and the pipeline; set its inputs in a
-//      BindTargets() called at startup and after every swapchain rebuild.
-//   2. Add a GpuScope (render/gpu_timer.h) and a line in RecordCommands().
-//   3. Add the sources to CMakeLists.txt. Window-sized images belong in
-//      RenderTargets; scene-wide inputs (environment cube, BRDF LUT, AO) are
-//      already bindings of FrameGlobals' set 0 (render/frame_globals.h).
-// Each pass does its own image barriers: it knows the layout its inputs come
-// in (documented on the pass) and the scope of the previous frame's last use
-// of an image it overwrites (all frames in flight share the render targets).
-//
-// Layouts between passes: depth is DEPTH_READ_ONLY after the pre-pass (and
-// stays so through the scene and motion blur passes); ssao, hdr, bloom,
-// ldr and the motion blur images are SHADER_READ_ONLY whenever they are not
-// being written or copied (hdr is TRANSFER_SRC for the motion blur's copy);
-// the shadow map is
-// DEPTH_READ_ONLY; the swapchain image is COLOR_ATTACHMENT after the present
-// pass and PRESENT_SRC after the UI.
+// The renderer's public API. Each GPU API is a backend behind it
+// (render/renderer_backend.h); how a frame is built is described in the
+// backend's renderer (e.g. render/vulkan/vulkan_renderer.h).
 
 namespace blue::render {
 
+class RendererBackend;
+
+// Most anisotropy any material sampler uses unless RendererOptions caps it;
+// capped by the device limit too.
+inline constexpr float kMaterialAnisotropy = 8.0f;
+
 // How Renderer is created.
 struct RendererOptions {
-  // The window to present to, which must outlive the renderer. Null:
-  // headless (no surface, no swapchain, SDL's video subsystem untouched);
-  // DrawFrame() renders into an offscreen output image instead.
+  // The window to present to, which must outlive the renderer and must have
+  // been created for the backend (WindowGraphicsFor()). Null: headless (no
+  // surface, no swapchain, SDL's video subsystem untouched); DrawFrame()
+  // renders into an offscreen output image of `headless_extent` instead.
   const platform::Window* window = nullptr;
-  // GLSL sources, compiled with `shader_mode` (see Renderer()).
+  // The backend to start; another compiled one is used when it has no
+  // suitable device (see Renderer()).
+  Backend backend = DefaultBackend();
+  // Shader sources (and blobs), compiled with `shader_mode`.
   std::string shader_dir;
   shader::CompileMode shader_mode = shader::CompileMode::kRelease;
   AdapterPreference adapter = AdapterPreference::kHighPerformance;
   // The output image's size when headless (each side at least 1).
-  VkExtent2D headless_extent{1280, 720};
+  core::Extent2D headless_extent{1280, 720};
+  // Vulkan validation layers / D3D12 debug layer with GPU-based validation;
+  // Debug builds enable the API's validation regardless.
+  bool gpu_validation = false;
   // Caps the material sampler's anisotropy; 1 turns anisotropic filtering
   // off (render tests: it legitimately differs between vendors).
   float max_anisotropy = kMaterialAnisotropy;
 };
 
 // The editor viewport's offscreen image (Renderer::PrepareViewport()): the
-// tonemapped scene, R8G8B8A8 (_SRGB when the swapchain is), in
-// SHADER_READ_ONLY_OPTIMAL whenever the UI pass samples it.
+// tonemapped scene, 8-bit RGBA with the same sRGB encoding as the window
+// output, ready to be shown by the UI.
 struct ViewportImage {
-  VkImageView view = VK_NULL_HANDLE;
-  VkExtent2D extent{};
-  // Changes whenever the image is recreated (0: none yet); UI code
-  // registers the view again when it changes.
+  // What ImGui::Image() takes; 0 before the first PrepareViewport().
+  ImTextureID texture = 0;
+  core::Extent2D extent{};
+  // Changes whenever the image is recreated (0: none yet).
   uint64_t generation = 0;
 };
 
@@ -157,6 +81,15 @@ struct ViewportPixels {
   // width * height * 4 bytes, R8G8B8A8, top row first; the colour values
   // are sRGB-encoded (what the UI shows).
   std::vector<std::byte> rgba;
+};
+
+// What the GPU API's validation reported (Renderer::validation_stats()):
+// the Vulkan validation layer, the D3D12 debug layer.
+struct ValidationStats {
+  bool enabled = false;  // Validation is running (Debug builds, or
+                         // RendererOptions::gpu_validation when installed).
+  uint32_t errors = 0;   // Messages so far, by severity.
+  uint32_t warnings = 0;
 };
 
 // Where a viewport readback is (Renderer::TakeViewportReadback()).
@@ -184,18 +117,24 @@ class Renderer {
   // stretched, so dragging a panel edge does not stall every frame.
   static constexpr uint64_t kViewportResizeFrames = 4;
 
-  // Compiles the GLSL shaders in `options.shader_dir` with
-  // `options.shader_mode` and watches them for changes (see
-  // ReloadChangedShaders()). A shader that does not compile at startup is
-  // fatal.
+  // Starts options.backend; when it finds no suitable device, the other
+  // compiled backends that can draw to options.window are tried (default,
+  // Vulkan, D3D12, Metal), and none is fatal. Compiles the shaders in
+  // options.shader_dir with options.shader_mode and watches them for
+  // changes (see ReloadChangedShaders()). A shader that does not compile at
+  // startup is fatal.
   explicit Renderer(const RendererOptions& options);
-  // Same, presenting to `window`.
+  // Same, with the default backend presenting to `window`.
   Renderer(const platform::Window& window, const std::string& shader_dir,
            shader::CompileMode shader_mode);
   ~Renderer();
 
   Renderer(const Renderer&) = delete;
   Renderer& operator=(const Renderer&) = delete;
+
+  // The backend the renderer runs on, and what it can do.
+  [[nodiscard]] Backend backend() const;
+  [[nodiscard]] BackendCaps caps() const;
 
   // Renders and presents one frame (headless: renders it into the output
   // image). `ui` is drawn on top when non-null.
@@ -207,12 +146,12 @@ class Renderer {
   // the size the viewport panel had last frame. On a size change the image
   // and the render targets are recreated (waiting for the frames in flight,
   // not for the whole device), at most every kViewportResizeFrames frames;
-  // the returned image keeps its old extent until then. Images of earlier
-  // generations are destroyed here: the UI must not use their views after
-  // the call.
-  [[nodiscard]] ViewportImage PrepareViewport(VkExtent2D size);
+  // the returned image keeps its old extent until then. The textures of
+  // earlier generations stay valid for the frames in flight only: the UI
+  // must not use them after the call.
+  [[nodiscard]] ViewportImage PrepareViewport(core::Extent2D size);
   // Returns the image of the last PrepareViewport() (empty before).
-  [[nodiscard]] const ViewportImage& viewport() const { return viewport_; }
+  [[nodiscard]] const ViewportImage& viewport() const;
   // Renders `view` into the viewport image, then `ui` (when non-null; it
   // usually shows that image) over a cleared window, and presents. Requires
   // a PrepareViewport() call before.
@@ -221,7 +160,7 @@ class Renderer {
   // renders it (scene and overlays, no UI) and returns a ticket (never 0).
   // The copy is recorded into that frame and read once the GPU has finished
   // it, a few frames later: poll TakeViewportReadback() once per frame. No
-  // device wait; the host-visible buffer lives only until the pixels are
+  // device wait; the CPU-visible buffer lives only until the pixels are
   // taken. A skipped frame (minimized window) delays the copy.
   [[nodiscard]] uint64_t RequestViewportReadback();
   // Like RequestViewportReadback(), but copies the final window output of
@@ -230,9 +169,8 @@ class Renderer {
   // R8G8B8A8 whatever the swapchain's channel order.
   [[nodiscard]] uint64_t RequestOutputReadback();
   // Moves the pixels of `ticket` (from either request) into `pixels` when
-  // the GPU has finished the frame that copied them (kReady); otherwise
-  // leaves `pixels` alone. Does not wait: after WaitIdle() a recorded copy
-  // is ready without drawing more frames.
+  // they are ready (kReady); otherwise leaves `pixels` alone. Does not wait:
+  // after WaitIdle() a recorded copy is ready without drawing more frames.
   [[nodiscard]] ReadbackStatus TakeViewportReadback(uint64_t ticket,
                                                     ViewportPixels& pixels);
 
@@ -257,75 +195,61 @@ class Renderer {
   // frames.
   void ReleaseMesh(MeshId id);
   void ReleaseTextures(std::span<const TextureId> ids);
-  void ReleaseMaterial(MaterialId id) { materials_.Release(id); }
+  void ReleaseMaterial(MaterialId id);
   // Destroys every released mesh and texture now instead of after the
-  // frames in flight: waits for those frames' fences (not for the whole
-  // device). For loads that replace large resources, between releasing the
-  // old ones and uploading the new ones, so both never coexist in device
+  // frames in flight: waits for those frames' command buffers (not for the
+  // whole device). For loads that replace large resources, between releasing
+  // the old ones and uploading the new ones, so both never coexist in GPU
   // memory; not meant for every frame.
   void FlushReleases();
-  // Returns the view of uploaded texture `id` (the white default when it is
-  // unknown or released), e.g. to show it in the UI.
-  [[nodiscard]] VkImageView texture_view(TextureId id) const {
-    return textures_.view(id);
-  }
+  // Returns uploaded texture `id` as an ImGui texture (the white default when
+  // `id` is unknown or released). Valid until ReleaseTextures() of that id has
+  // taken effect (kFramesInFlight frames after the call, or the next
+  // FlushReleases()).
+  [[nodiscard]] ImTextureID ui_texture(TextureId id) const;
 
   // Creates an untextured material (every slot its default; TextureRefs
   // in `desc` are ignored) and returns its handle.
-  [[nodiscard]] MaterialId CreateMaterial(const material::MaterialDesc& desc) {
-    return materials_.Create(desc);
-  }
+  [[nodiscard]] MaterialId CreateMaterial(const material::MaterialDesc& desc);
 
   // Uploads already-encoded textures with ready mip chains (cooked prefab
-  // textures: BC7 / BC5 / RGBA8) in one batch; see TextureCache::Upload().
+  // textures: BC7 / BC5 / RGBA8) in one batch, as sampled textures: no
+  // decoding and no mip generation. Returns their ids in the order of
+  // `textures`. Blocks until the copies finished; logs the count, bytes and
+  // time. A malformed description (no mips, wrong mip size or count) is
+  // fatal: validate file data before.
   [[nodiscard]] std::vector<TextureId> UploadTextures(
-      std::span<const TextureUpload> textures) {
-    return textures_.Upload(textures);
-  }
+      std::span<const TextureUpload> textures);
   // Creates a material whose texture slots are the uploaded `textures`; the
   // TextureRef paths of `desc` are ignored. Update(id, desc) keeps them.
   [[nodiscard]] MaterialId CreateMaterial(const material::MaterialDesc& desc,
-                                          const MaterialTextures& textures) {
-    return materials_.Create(desc, textures);
-  }
+                                          const MaterialTextures& textures);
   // Replaces material `id` by `desc` from the next frame on (live editing);
   // frames in flight keep the old version. Call between frames.
-  void UpdateMaterial(MaterialId id, const material::MaterialDesc& desc) {
-    materials_.Update(id, desc);
-  }
+  void UpdateMaterial(MaterialId id, const material::MaterialDesc& desc);
   // Returns the current description of `id`, which must be valid.
-  [[nodiscard]] const material::MaterialDesc& material(MaterialId id) const {
-    return materials_.desc(id);
-  }
-  [[nodiscard]] size_t material_count() const { return materials_.count(); }
-  [[nodiscard]] TextureStats texture_stats() const { return textures_.stats(); }
-  // Returns what the renderer holds in device memory, per heap and per
+  [[nodiscard]] const material::MaterialDesc& material(MaterialId id) const;
+  [[nodiscard]] size_t material_count() const;
+  [[nodiscard]] TextureStats texture_stats() const;
+  // Returns what the renderer holds in GPU memory, for the device and per
   // owner; cheap enough to call every frame (see MemoryStats).
   [[nodiscard]] MemoryStats memory_stats() const;
 
   // Replaces the environment (sky and image-based lighting) by the
   // equirectangular HDR image `equirect`, scaled by `intensity` and turned
-  // by `rotation_radians` about +Y. Waits for the GPU and filters the image
-  // (see render::Environment): meant for scene loads, not every frame.
+  // by `rotation_radians` about +Y. Waits for the GPU and filters the image:
+  // meant for scene loads, not every frame.
   void SetEnvironment(const asset::ImageDataF& equirect, float intensity,
-                      float rotation_radians) {
-    context_.WaitIdle();
-    environment_.Set(equirect, intensity, rotation_radians);
-  }
+                      float rotation_radians);
   // Restores the built-in neutral default sky (intensity 1, no rotation).
   // Waits for the GPU like SetEnvironment().
-  void ResetEnvironment() {
-    context_.WaitIdle();
-    environment_.Set({}, 1.0f, 0.0f);
-  }
+  void ResetEnvironment();
   // Changes the intensity and rotation of the current environment; cheap.
-  void SetEnvironmentParams(float intensity, float rotation_radians) {
-    environment_.SetParams(intensity, rotation_radians);
-  }
+  void SetEnvironmentParams(float intensity, float rotation_radians);
 
   // Rebuilds the swapchain before the next frame, e.g. after a resize
   // (ignored when headless).
-  void RequestSwapchainRebuild() { swapchain_dirty_ = true; }
+  void RequestSwapchainRebuild();
   void SetVsync(bool enabled);
 
   // Recompiles the shaders whose sources changed and swaps in the new
@@ -333,200 +257,49 @@ class Renderer {
   // Cheap when nothing changed, but not free (it stats the watched files):
   // call it a few times per second, not every frame, and not while a frame is
   // being recorded.
-  void ReloadChangedShaders() { shader_programs_.ReloadChanged(); }
+  void ReloadChangedShaders();
   // Returns the compiler message of the most recent shader that failed to
   // reload and has not compiled since, or an empty view. Valid until the next
   // ReloadChangedShaders() call.
-  [[nodiscard]] std::string_view last_shader_error() const {
-    return shader_programs_.last_error();
-  }
+  [[nodiscard]] std::string_view last_shader_error() const;
 
-  [[nodiscard]] bool vsync() const { return vsync_; }
-  [[nodiscard]] const VulkanContext& context() const { return context_; }
-  [[nodiscard]] bool headless() const { return !swapchain_.has_value(); }
-  // The swapchain; only with a window (not headless()).
-  [[nodiscard]] const Swapchain& swapchain() const { return *swapchain_; }
-  // The size and format of the window output: the swapchain's, or the
-  // output image's when headless.
-  [[nodiscard]] VkExtent2D output_extent() const;
-  [[nodiscard]] VkFormat output_format() const;
-  // Waits until the GPU has finished everything submitted.
-  void WaitIdle() const { context_.WaitIdle(); }
-  [[nodiscard]] std::optional<double> gpu_frame_ms() const {
-    return gpu_timer_.last_frame_ms();
-  }
+  [[nodiscard]] bool vsync() const;
+  // The name of the GPU the renderer runs on.
+  [[nodiscard]] std::string_view device_name() const;
+  // The size in pixels of the window output (the swapchain extent, or the
+  // output image's when headless).
+  [[nodiscard]] core::Extent2D output_extent() const;
+  // The size the scene is rendered at, and the size it is shown at after
+  // the temporal scaler (the window's or the editor viewport's): equal
+  // unless an upscaling mode is active.
+  [[nodiscard]] core::Extent2D render_extent() const;
+  [[nodiscard]] core::Extent2D scene_output_extent() const;
+  // The upscaling mode of the most recently drawn frame:
+  // SceneView::post.upscaling, or kOff when the device has no temporal
+  // scaler.
+  [[nodiscard]] Upscaling active_upscaling() const;
+  // Blocks until the GPU has finished all submitted work.
+  void WaitIdle() const;
+
+  [[nodiscard]] std::optional<double> gpu_frame_ms() const;
   // Returns the most recent GPU time of `scope`, or nullopt if unavailable.
-  [[nodiscard]] std::optional<double> gpu_scope_ms(GpuScope scope) const {
-    return gpu_timer_.last_ms(scope);
-  }
+  [[nodiscard]] std::optional<double> gpu_scope_ms(GpuScope scope) const;
   // Returns the draw statistics of the most recently recorded frame.
-  [[nodiscard]] RenderStats stats() const { return stats_; }
+  [[nodiscard]] RenderStats stats() const;
+  // Returns what the GPU API's validation reported so far (render tests
+  // require zero errors).
+  [[nodiscard]] ValidationStats validation_stats() const;
+
+  // Called by ui::ImGuiLayer only: starts / stops ImGui's renderer backend.
+  // InitImGuiRenderer() needs a current ImGui context whose platform backend is
+  // already initialised. ShutdownImGuiRenderer() destroys the backend's own
+  // objects (font atlas, pipelines); call it once the GPU is idle
+  // (WaitIdle()).
+  void InitImGuiRenderer() const;
+  void ShutdownImGuiRenderer() const;
 
  private:
-  using Cascades = std::array<lighting::Cascade, lighting::kCascadeCount>;
-
-  // Per-frame-in-flight command recording and synchronization.
-  struct Frame {
-    VkCommandPool command_pool = VK_NULL_HANDLE;
-    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-    VkFence in_flight = VK_NULL_HANDLE;
-    VkSemaphore image_acquired = VK_NULL_HANDLE;
-  };
-
-  // Where a frame's tonemapped scene goes.
-  enum class Output {
-    kSwapchain,  // The window (DrawFrame()).
-    kViewport,   // viewport_image_, with the UI alone on the window.
-  };
-
-  // What a readback copies.
-  enum class ReadbackSource : uint8_t {
-    kViewport,  // viewport_image_ (RequestViewportReadback()).
-    kOutput,    // The window output (RequestOutputReadback()).
-  };
-
-  void CreateFrames();
-  // Destroys the retired meshes and images no frame in flight can use any
-  // more. Call after the current frame's fence was waited on.
-  void DestroyRetired();
-  // Destroys every retired mesh and image if no frame is in flight any more
-  // (all fences signalled; does not wait). Keeps releases moving while
-  // frames are skipped (minimized window, out-of-date swapchain).
-  void DestroyRetiredIfIdle();
-  // Points the passes that read render targets at the current ones.
-  void BindTargets();
-  [[nodiscard]] bool RebuildSwapchain();
-  // Blocks until no frame in flight runs on the GPU any more (their fences),
-  // so that render targets and their descriptor sets can be replaced.
-  void WaitForFramesInFlight() const;
-  // Recreates the viewport image and the render targets at `size`.
-  void ResizeViewport(VkExtent2D size);
-  // The body of DrawFrame() and DrawViewportFrame().
-  void DrawFrameTo(const SceneView& view, ImDrawData* ui, Output output);
-
-  // Acquires the next swapchain image for `frame`. Returns nullopt, marking
-  // the swapchain dirty, when it is out of date and nothing can be drawn.
-  [[nodiscard]] std::optional<uint32_t> AcquireImage(const Frame& frame);
-  // Submits the recorded commands of `frame` and presents `image_index`
-  // (headless, nullopt: only submits).
-  void SubmitAndPresent(const Frame& frame,
-                        std::optional<uint32_t> image_index);
-  // Records every pass of the frame described by `ctx` (see the top of this
-  // file); `scope_ctx` is the scope picture's, or null.
-  void RecordCommands(const Frame& frame, const FrameContext& ctx,
-                      const FrameContext* scope_ctx, ImDrawData* ui,
-                      Output output);
-  // Creates the scope picture and its depth (kMaxScopeResolution square) the
-  // first time a frame has a scope; they live as long as the renderer.
-  void EnsureScopeTargets();
-  // Records the scope picture: depth pre-pass, meshes and sky of
-  // `scope_ctx`.
-  void RecordScopeView(const FrameContext& scope_ctx);
-  // Draws the sights (reflex dot, scope eyepiece) of `ctx`; inside the
-  // scene pass.
-  void DrawSights(const FrameContext& ctx) const;
-  // The image a readback copies, in `layout` (left so afterwards) after
-  // `last_write`.
-  struct ReadbackImage {
-    VkImage image = VK_NULL_HANDLE;
-    VkExtent2D extent{};
-    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    BarrierScope last_write;
-    // B8G8R8A8 (a swapchain): channels are swapped when taken.
-    bool bgra = false;
-  };
-  // Records the copy of `image` for every readback of `source` not recorded
-  // yet.
-  void RecordReadbacks(VkCommandBuffer cmd, ReadbackSource source,
-                       const ReadbackImage& image);
-  // Computes the world-space bounds of every draw item into world_bounds_.
-  void ComputeWorldBounds(const SceneView& view);
-
-  const platform::Window* window_;  // Null when headless.
-  std::string shader_dir_;
-  VkExtent2D headless_extent_;
-  VulkanContext context_;
-  bool vsync_ = true;
-  bool swapchain_dirty_ = false;
-  // Empty when headless.
-  std::optional<Swapchain> swapchain_;
-  Samplers samplers_;
-  RenderTargets targets_;
-  FrameGlobals frame_globals_;
-  TextureCache textures_;
-  MaterialSystem materials_;
-  ShaderPrograms shader_programs_;
-  Environment environment_;
-  // Declared before the passes that borrow it.
-  std::vector<Mesh> meshes_;
-  // Device memory of the resident meshes in meshes_ and their count.
-  VkDeviceSize mesh_bytes_ = 0;
-  uint32_t mesh_count_ = 0;
-  // Released GPU objects waiting until no frame in flight uses them
-  // (ReleaseMesh(), ReleaseTextures()); declared after the context so they
-  // are destroyed before it.
-  template <typename T>
-  struct Retired {
-    T object;
-    uint64_t last_frame = 0;  // The last frame serial that may use it.
-  };
-  std::vector<Retired<Mesh>> retired_meshes_;
-  std::vector<Retired<Image>> retired_images_;
-  DrawList draw_list_;
-  // The scope view's culled draw list and its picture and depth
-  // (EnsureScopeTargets(); empty until a frame has a scope).
-  DrawList scope_draw_list_;
-  Image scope_picture_;
-  Image scope_depth_;
-
-  ShadowPass shadow_pass_;
-  DepthPrepass depth_prepass_;
-  SsaoPass ssao_pass_;
-  MeshPass mesh_pass_;
-  SkyboxPass skybox_pass_;
-  ReticlePass reticle_pass_;
-  ScopeLensPass scope_lens_pass_;
-  MotionBlurPass motion_blur_pass_;
-  BloomPass bloom_pass_;
-  TonemapPass tonemap_pass_;
-  OverlayPass overlay_pass_;
-  PresentPass present_pass_;
-  // The present pass into viewport_image_'s format; created by the first
-  // PrepareViewport().
-  std::optional<PresentPass> viewport_present_pass_;
-
-  // The window output when headless (stands in for the swapchain image):
-  // TRANSFER_SRC_OPTIMAL between frames.
-  Image output_image_;
-  // Editor viewport output (PrepareViewport()); empty in the game.
-  Image viewport_image_;
-  ViewportImage viewport_;
-  // frame_serial_ at the last viewport recreation.
-  uint64_t viewport_resized_at_ = 0;
-  // Requested copies (RequestViewportReadback(), RequestOutputReadback()).
-  struct Readback {
-    uint64_t ticket = 0;
-    ReadbackSource source = ReadbackSource::kViewport;
-    // The frame that records the copy (0 until recorded) and its slot in
-    // frames_, whose fence tells when the copy is done.
-    uint64_t frame_serial = 0;
-    size_t frame_slot = 0;
-    VkExtent2D extent{};
-    bool bgra = false;
-    Buffer buffer;
-  };
-  std::vector<Readback> readbacks_;
-  uint64_t next_readback_ticket_ = 1;
-
-  std::array<Frame, kFramesInFlight> frames_;
-  size_t frame_index_ = 0;
-  // Number of the frame being recorded; counts every recorded frame from 1.
-  uint64_t frame_serial_ = 0;
-  // World-space bounds of the current frame's draw items, parallel to
-  // SceneView::draws; kept as a member to reuse its allocation.
-  std::vector<camera::Aabb> world_bounds_;
-  RenderStats stats_;
-  GpuTimer gpu_timer_;
+  std::unique_ptr<RendererBackend> backend_;
 };
 
 }  // namespace blue::render

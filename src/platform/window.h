@@ -1,12 +1,14 @@
 #ifndef BLUE_PLATFORM_WINDOW_H_
 #define BLUE_PLATFORM_WINDOW_H_
 
+#include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_video.h>
-#include <vulkan/vulkan.h>
 
 #include <optional>
-#include <span>
 #include <string_view>
+
+#include "core/extent.h"
+#include "platform/window_graphics.h"
 
 namespace blue::platform {
 
@@ -21,15 +23,18 @@ struct WindowPair {
 // --window-pos or --window-size. Returns nullopt for anything else.
 [[nodiscard]] std::optional<WindowPair> ParseWindowPair(std::string_view text);
 
-// Owns SDL initialization and the native window. Vulkan-capable by
-// construction. Failure to initialize SDL or create the window is fatal.
-// Neither copyable nor movable. Not thread-safe.
+// Owns SDL initialization, the native window and, for
+// WindowGraphics::kMetal, the Metal view (with its CAMetalLayer) the
+// renderer draws into. Failure to initialize SDL or create the window or its
+// view is fatal. Neither copyable nor movable. Not
+// thread-safe.
 class Window {
  public:
   // Creates the window `width` x `height` points large, with its top-left
   // corner at `position` (screen coordinates) when given, else where the
-  // system puts it. The window is placed before it is first shown.
-  Window(const char* title, int width, int height,
+  // system puts it. The window is placed before it is first shown, prepared
+  // for `graphics`.
+  Window(const char* title, int width, int height, WindowGraphics graphics,
          std::optional<WindowPair> position = std::nullopt);
   ~Window();
 
@@ -37,10 +42,19 @@ class Window {
   Window& operator=(const Window&) = delete;
 
   [[nodiscard]] SDL_Window* handle() const { return window_; }
+  [[nodiscard]] WindowGraphics graphics() const { return graphics_; }
+  // Returns the native window handle as an untyped pointer (the HWND on
+  // Windows; null elsewhere), so that this header includes no system header.
+  [[nodiscard]] void* native_handle() const;
+  // Returns the CAMetalLayer of the window's Metal view as an untyped
+  // pointer, so that this header stays plain C++. The renderer bridges it
+  // with `(__bridge CAMetalLayer*)`. Valid as long as the window lives; null
+  // unless the window was created for WindowGraphics::kMetal.
+  [[nodiscard]] void* metal_layer() const;
 
   // Returns the size of the drawable area in pixels (may differ from the
   // window size on HiDPI).
-  [[nodiscard]] VkExtent2D PixelSize() const;
+  [[nodiscard]] core::Extent2D PixelSize() const;
   // Returns the content scale of the display the window is on; always > 0.
   [[nodiscard]] float DisplayScale() const;
   // Logical (points, not pixels) window size; 0 if unknown.
@@ -52,14 +66,10 @@ class Window {
   // device motion.
   void SetRelativeMouseMode(bool enabled);
 
-  // Returns the instance extensions Vulkan needs to present to this window.
-  // The array is owned by SDL and stays valid until SDL shuts down.
-  [[nodiscard]] std::span<const char* const> RequiredInstanceExtensions() const;
-  // Creates a presentation surface for `instance`. The caller owns it.
-  [[nodiscard]] VkSurfaceKHR CreateSurface(VkInstance instance) const;
-
  private:
   SDL_Window* window_ = nullptr;
+  WindowGraphics graphics_;
+  SDL_MetalView metal_view_ = nullptr;  // Only for WindowGraphics::kMetal.
 };
 
 }  // namespace blue::platform

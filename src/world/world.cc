@@ -368,6 +368,7 @@ struct World::Builder {
 
 std::vector<WorldIssue> World::Build(const scene::SceneData& scene) {
   const auto start = std::chrono::steady_clock::now();
+  ++draw_layout_;
   placements_.clear();
   states_.clear();
   instances_.clear();
@@ -594,6 +595,7 @@ bool World::HideInstance(scene::InstanceId id) {
       continue;
     }
     entry.hidden = true;
+    ++draw_layout_;  // AppendDraws() skips its placements from now on.
     if (entry.first_placement >= 0) {
       const auto first = static_cast<size_t>(entry.first_placement);
       const auto count = static_cast<size_t>(entry.placement_count);

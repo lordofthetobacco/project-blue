@@ -104,8 +104,11 @@ std::string ModeName(EditorMode mode) {
 EditorApp::EditorApp(EditorOptions options)
     : options_(std::move(options)),
       window_(kWindowTitle, options_.window_size.x, options_.window_size.y,
-              options_.window_pos),
-      renderer_(window_, ShaderDirectory(), kShaderCompileMode),
+              render::WindowGraphicsFor(options_.backend), options_.window_pos),
+      renderer_(render::RendererOptions{.window = &window_,
+                                        .backend = options_.backend,
+                                        .shader_dir = ShaderDirectory(),
+                                        .shader_mode = kShaderCompileMode}),
       imgui_(window_, renderer_,
              {.scale_mode = ui::UiScaleMode::kDisplayScale,
               .docking = true,

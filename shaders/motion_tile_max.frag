@@ -9,7 +9,7 @@
 
 layout(set = 0, binding = 0) uniform sampler2D velocityImage;
 
-// Must match TileMaxConstants in src/render/passes/motion_blur_pass.cc.
+// Must match TileMaxConstants in src/render/vulkan/passes/motion_blur_pass.cc.
 layout(push_constant) uniform TileMaxConstants {
     ivec4 area;       // Pixels to look at: xy min, zw max (exclusive).
     int tileSize;     // Pixels per tile side.

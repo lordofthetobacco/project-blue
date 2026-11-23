@@ -5,7 +5,6 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
-#include <array>
 #include <cstdio>
 #include <optional>
 #include <span>
@@ -14,14 +13,13 @@
 #include <utility>
 #include <vector>
 
+#include "render/backend.h"
 #include "tests/render/harness_options.h"
 #include "tests/render/png_io.h"
 #include "tests/render/scenes.h"
 
 namespace blue::render_test {
 namespace {
-
-constexpr std::array<std::string_view, 1> kCompiledBackends = {"vulkan"};
 
 HarnessOptions& MutableOptions() {
   static HarnessOptions* options = new HarnessOptions();
@@ -60,24 +58,29 @@ bool WriteContactSheet(const std::string& path) {
 
 }  // namespace
 
-std::span<const std::string_view> CompiledBackends() {
-  return kCompiledBackends;
-}
-
 std::optional<HarnessOptions> ParseHarnessOptions(
     std::vector<std::string>& args, std::string default_out_dir) {
   HarnessOptions options;
   options.out_dir = std::move(default_out_dir);
   std::vector<std::string> rest;
   for (const std::string& arg : args) {
-    if (std::optional<std::string> backend = FlagValue(arg, "backend")) {
-      if (std::ranges::find(kCompiledBackends, *backend) ==
-          kCompiledBackends.end()) {
-        std::fprintf(stderr, "Backend '%s' is not compiled in (have: vulkan)\n",
-                     backend->c_str());
+    if (std::optional<std::string> name = FlagValue(arg, "backend")) {
+      const std::optional<render::Backend> backend =
+          render::ParseBackend(*name);
+      if (!backend || !render::IsCompiled(*backend)) {
+        std::string compiled;
+        for (const render::Backend each : render::CompiledBackends()) {
+          compiled += compiled.empty() ? "" : ", ";
+          compiled += render::BackendName(each);
+        }
+        std::fprintf(stderr, "Backend '%s' is not compiled in (have: %s)\n",
+                     name->c_str(), compiled.c_str());
         return std::nullopt;
       }
-      options.backends.push_back(*backend);
+      if (std::ranges::find(options.backends, *backend) ==
+          options.backends.end()) {
+        options.backends.push_back(*backend);
+      }
     } else if (std::optional<std::string> adapter = FlagValue(arg, "adapter")) {
       if (*adapter == "hw") {
         options.adapter = render::AdapterPreference::kHighPerformance;
@@ -100,7 +103,9 @@ std::optional<HarnessOptions> ParseHarnessOptions(
     }
   }
   if (options.backends.empty()) {
-    options.backends.assign(kCompiledBackends.begin(), kCompiledBackends.end());
+    const std::span<const render::Backend> compiled =
+        render::CompiledBackends();
+    options.backends.assign(compiled.begin(), compiled.end());
   }
   args = std::move(rest);
   return options;

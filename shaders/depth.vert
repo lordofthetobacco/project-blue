@@ -4,7 +4,7 @@
 
 // Depth pre-pass of the camera view (render::DepthPrepass).
 
-// Must match DrawConstants in src/render/draw_list.cc.
+// Must match DrawConstants in src/render/vulkan/draw_record.cc.
 layout(push_constant) uniform DrawConstants {
     mat4 model;
 } draw;

@@ -7,7 +7,7 @@
 #include <string_view>
 #include <vector>
 
-#include "render/vulkan_context.h"
+#include "render/backend.h"
 
 namespace blue::render_test {
 
@@ -18,15 +18,13 @@ namespace blue::render_test {
 //   --out=<dir>            rendered images and failure diffs
 //   --contact-sheet=<png>  after the tests, tile every golden into <png>
 struct HarnessOptions {
-  std::vector<std::string> backends;
-  render::AdapterPreference adapter = render::AdapterPreference::kHighPerformance;
+  std::vector<render::Backend> backends;
+  render::AdapterPreference adapter =
+      render::AdapterPreference::kHighPerformance;
   bool update_golden = false;
   std::string out_dir;
   std::string contact_sheet;
 };
-
-// The backends this build can render with.
-[[nodiscard]] std::span<const std::string_view> CompiledBackends();
 
 // Parses the harness arguments out of `args`, removing them; returns
 // nullopt (after printing why) for a malformed one or an unknown backend.

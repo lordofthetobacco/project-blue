@@ -9,7 +9,7 @@
 
 layout(set = 0, binding = 0) uniform sampler2D source;  // bilinear, clamped
 
-// Must match UpsampleConstants in src/render/passes/bloom_pass.cc.
+// Must match UpsampleConstants in src/render/vulkan/passes/bloom_pass.cc.
 layout(push_constant) uniform UpsampleConstants {
     vec2 sourceTexel;  // 1 / source size: the tent's tap spacing
 } params;

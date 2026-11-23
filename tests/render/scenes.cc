@@ -29,7 +29,7 @@
 #include "camera/projection.h"
 #include "core/log.h"
 #include "material/material.h"
-#include "render/texture_cache.h"
+#include "render/texture_types.h"
 
 namespace blue::render_test {
 namespace {

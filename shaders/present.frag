@@ -13,7 +13,7 @@
 
 layout(set = 0, binding = 0) uniform sampler2D ldrImage;  // bilinear, clamped
 
-// Must match PresentConstants in src/render/passes/present_pass.cc.
+// Must match PresentConstants in src/render/vulkan/passes/present_pass.cc.
 layout(push_constant) uniform PresentConstants {
     int decodeSrgb;   // 1: the target encodes, so output linear values
     int fxaa;         // 1: anti-alias

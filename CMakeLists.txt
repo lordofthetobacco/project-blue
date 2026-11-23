@@ -12,7 +12,71 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
+# --- Renderer backends --------------------------------------------------------------------
+# Each backend is a native renderer behind render::Renderer (src/render/renderer_backend.h),
+# in its own directory with its own CMakeLists.txt. Vulkan builds everywhere (macOS: MoltenVK
+# from the Vulkan SDK); D3D12 only on Windows, Metal only on Apple platforms. A backend whose
+# directory does not exist yet (D3D12 before package D1, Metal before the Metal branch is
+# merged) defaults to OFF and cannot be switched on.
+set(blue_d3d12_available OFF)
+if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/render/d3d12/CMakeLists.txt")
+    set(blue_d3d12_available ON)
+endif()
+set(blue_metal_available OFF)
+if(APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/render/metal/CMakeLists.txt")
+    set(blue_metal_available ON)
+endif()
+
+option(BLUE_RENDERER_VULKAN "Build the Vulkan renderer backend" ON)
+option(BLUE_RENDERER_D3D12 "Build the Direct3D 12 renderer backend (Windows)" ${blue_d3d12_available})
+option(BLUE_RENDERER_METAL "Build the Metal renderer backend (Apple)" ${blue_metal_available})
+option(BLUE_SHADER_HOT_RELOAD
+    "Compile shaders at run time and reload them when their sources change" ON)
+
+if(BLUE_RENDERER_D3D12 AND NOT WIN32)
+    message(FATAL_ERROR "BLUE_RENDERER_D3D12 is only available on Windows")
+endif()
+if(BLUE_RENDERER_METAL AND NOT APPLE)
+    message(FATAL_ERROR "BLUE_RENDERER_METAL is only available on Apple platforms")
+endif()
+if(BLUE_RENDERER_D3D12 AND NOT blue_d3d12_available)
+    message(FATAL_ERROR "BLUE_RENDERER_D3D12: src/render/d3d12 does not exist yet")
+endif()
+if(BLUE_RENDERER_METAL AND NOT blue_metal_available)
+    message(FATAL_ERROR "BLUE_RENDERER_METAL: src/render/metal does not exist yet")
+endif()
+if(NOT BLUE_RENDERER_VULKAN AND NOT BLUE_RENDERER_D3D12 AND NOT BLUE_RENDERER_METAL)
+    message(FATAL_ERROR "Enable at least one renderer backend (BLUE_RENDERER_VULKAN, "
+        "BLUE_RENDERER_D3D12, BLUE_RENDERER_METAL)")
+endif()
+if(NOT BLUE_SHADER_HOT_RELOAD)
+    # Every backend compiles its shaders at run time until the build-time compilation of
+    # package S1 exists.
+    message(FATAL_ERROR "BLUE_SHADER_HOT_RELOAD=OFF needs build-time shader compilation, "
+        "which does not exist yet")
+endif()
+
+# The backend used unless --renderer= or BLUE_RENDERER names another one.
+if(BLUE_RENDERER_METAL)
+    set(blue_default_renderer metal)
+else()
+    set(blue_default_renderer vulkan)
+endif()
+set(BLUE_DEFAULT_RENDERER "${blue_default_renderer}" CACHE STRING
+    "Renderer backend used unless --renderer= or BLUE_RENDERER names another (vulkan, d3d12, metal)")
+set_property(CACHE BLUE_DEFAULT_RENDERER PROPERTY STRINGS vulkan d3d12 metal)
+string(TOUPPER "${BLUE_DEFAULT_RENDERER}" blue_default_renderer_upper)
+if(NOT BLUE_DEFAULT_RENDERER MATCHES "^(vulkan|d3d12|metal)$"
+   OR NOT BLUE_RENDERER_${blue_default_renderer_upper})
+    message(FATAL_ERROR "BLUE_DEFAULT_RENDERER '${BLUE_DEFAULT_RENDERER}' must name an "
+        "enabled backend")
+endif()
+message(STATUS "Renderer backends: Vulkan ${BLUE_RENDERER_VULKAN}, D3D12 ${BLUE_RENDERER_D3D12}, "
+    "Metal ${BLUE_RENDERER_METAL}; default ${BLUE_DEFAULT_RENDERER}")
+
+if(BLUE_RENDERER_VULKAN)
+    find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
+endif()
 
 # ProjectOptions first: cmake/Dependencies.cmake uses its MSVC flag helpers.
 include(ProjectOptions)
@@ -343,7 +407,9 @@ target_link_libraries(blue_interact PUBLIC glm::glm)
 # it; include results are allocated and freed on our side), so the DLL's CRT does not matter.
 # Executables linking blue_shader get the DLL copied next to them (blue_copy_runtime_dlls).
 # Elsewhere the static shaderc_combined is kept as before.
-if(WIN32)
+if(NOT BLUE_RENDERER_VULKAN)
+    set(blue_shaderc_target "")
+elseif(WIN32)
     cmake_path(GET Vulkan_INCLUDE_DIR PARENT_PATH blue_vulkan_sdk_dir)
     set(blue_shaderc_files
         "${blue_vulkan_sdk_dir}/Lib/shaderc_shared.lib"
@@ -382,12 +448,16 @@ function(blue_copy_runtime_dlls target)
     endif()
 endfunction()
 
-# Runtime GLSL -> SPIR-V compilation (shaderc) and source change detection. No Vulkan device
-# needed. shaderc stays private: no shaderc type appears in the public headers.
+# Runtime shader compilation and source change detection: the include preprocessor (pure
+# C++), the file watcher and, with Vulkan, GLSL -> SPIR-V (shaderc). No GPU device needed.
+# shaderc stays private: no shaderc type appears in the public headers.
 add_library(blue_shader STATIC
-    src/shader/shader_compiler.cc
+    src/shader/shader_preprocessor.cc
     src/shader/shader_watcher.cc
 )
+if(BLUE_RENDERER_VULKAN)
+    target_sources(blue_shader PRIVATE src/shader/shader_compiler.cc)
+endif()
 
 target_include_directories(blue_shader PUBLIC src)
 
@@ -398,7 +468,8 @@ target_link_libraries(blue_shader
     PRIVATE ${blue_shaderc_target}
 )
 
-# SDL3 window with a Vulkan surface; shared by the game and the editor.
+# SDL3 window, created for the renderer backend's graphics API (platform::WindowGraphics);
+# shared by the game and the editor. No graphics API header.
 add_library(blue_window STATIC
     src/platform/window.cc
 )
@@ -407,74 +478,82 @@ target_include_directories(blue_window PUBLIC src)
 
 blue_target_defaults(blue_window)
 
-target_link_libraries(blue_window PUBLIC blue_core SDL3::SDL3-static Vulkan::Vulkan)
+target_link_libraries(blue_window PUBLIC blue_core SDL3::SDL3-static)
 
-# The Vulkan renderer: device, swapchain, render targets, the frame's passes, meshes,
-# materials and textures. Linked by the game and the editor; draws to the swapchain or,
-# for the editor viewport, to an offscreen image.
-add_library(blue_render STATIC
-    src/render/vulkan_context.cc
-    src/render/swapchain.cc
-    src/render/barriers.cc
+# The renderer's backend-neutral part: public types, per-frame CPU math (frame uniforms,
+# temporal jitter, motion blur), the draw list (cull + sort) and the frame plan. Pure C++
+# on glm; compiled on every platform, shared by every backend.
+add_library(blue_render_common STATIC
+    src/render/backend.cc
     src/render/debug_lines.cc
     src/render/draw_list.cc
-    src/render/environment.cc
-    src/render/buffer.cc
-    src/render/frame_globals.cc
-    src/render/fullscreen_pass.cc
-    src/render/image.cc
-    src/render/material_system.cc
+    src/render/frame_plan.cc
+    src/render/frame_uniforms.cc
+    src/render/gpu_scope.cc
     src/render/motion_blur_math.cc
-    src/render/pipeline.cc
-    src/render/render_targets.cc
-    src/render/samplers.cc
-    src/render/shader_programs.cc
-    src/render/gpu_timer.cc
-    src/render/mesh.cc
+    src/render/temporal_math.cc
+    src/render/texture_types.cc
+)
+
+target_include_directories(blue_render_common PUBLIC src)
+
+blue_target_defaults(blue_render_common)
+
+target_link_libraries(blue_render_common PUBLIC
+    blue_core
+    blue_camera
+    blue_lighting
+    blue_scene
+    blue_mesh
+    blue_material
+    glm::glm
+)
+
+# render::Renderer: forwards every call to the backend chosen at startup (one indirect call
+# per public call, nothing per draw), and the backend factory. Linked by the game, the
+# editor and the tests; no consumer names a backend target or a graphics API library.
+add_library(blue_render STATIC
+    src/render/backend_factory.cc
     src/render/renderer.cc
-    src/render/staging_upload.cc
-    src/render/texture_cache.cc
-    src/render/passes/bloom_pass.cc
-    src/render/passes/depth_prepass.cc
-    src/render/passes/mesh_pass.cc
-    src/render/passes/motion_blur_pass.cc
-    src/render/passes/overlay_pass.cc
-    src/render/passes/present_pass.cc
-    src/render/passes/reticle_pass.cc
-    src/render/passes/scene_pass.cc
-    src/render/passes/scope_lens_pass.cc
-    src/render/passes/shadow_pass.cc
-    src/render/passes/ssao_pass.cc
-    src/render/passes/skybox_pass.cc
-    src/render/passes/tonemap_pass.cc
-    src/render/passes/ui_pass.cc
-    src/render/vma.cc
-    src/render/vk_check.cc
 )
 
 target_include_directories(blue_render PUBLIC src)
 
 blue_target_defaults(blue_render)
 
-target_link_libraries(blue_render PUBLIC
-    blue_core
-    blue_window
-    blue_mesh
-    blue_image
-    blue_animation
-    blue_material
-    blue_scene
-    blue_lighting
-    blue_camera
-    blue_shader
-    Vulkan::Vulkan
-    SDL3::SDL3-static
-    glm::glm
-    GPUOpen::VulkanMemoryAllocator
-    imgui
+target_link_libraries(blue_render
+    PUBLIC
+        blue_render_common
+        blue_window
+        blue_image
+        blue_shader
+        imgui
+    PRIVATE
+        $<$<BOOL:${BLUE_RENDERER_VULKAN}>:blue_render_vulkan>
+        $<$<BOOL:${BLUE_RENDERER_D3D12}>:blue_render_d3d12>
+        $<$<BOOL:${BLUE_RENDERER_METAL}>:blue_render_metal>
 )
 
-# Dear ImGui on SDL3 + Vulkan (ui::ImGuiLayer); shared by the game overlay and the editor.
+# The only #if on backends outside the per-backend sources (backend_factory.cc).
+target_compile_definitions(blue_render PRIVATE
+    BLUE_RENDERER_HAS_VULKAN=$<BOOL:${BLUE_RENDERER_VULKAN}>
+    BLUE_RENDERER_HAS_D3D12=$<BOOL:${BLUE_RENDERER_D3D12}>
+    BLUE_RENDERER_HAS_METAL=$<BOOL:${BLUE_RENDERER_METAL}>
+    BLUE_DEFAULT_RENDERER_NAME="${BLUE_DEFAULT_RENDERER}"
+)
+
+if(BLUE_RENDERER_VULKAN)
+    add_subdirectory(src/render/vulkan)
+endif()
+if(BLUE_RENDERER_D3D12)
+    add_subdirectory(src/render/d3d12)
+endif()
+if(BLUE_RENDERER_METAL)
+    add_subdirectory(src/render/metal)
+endif()
+
+# Dear ImGui on SDL3 (ui::ImGuiLayer; the renderer owns ImGui's renderer backend); shared
+# by the game overlay and the editor.
 add_library(blue_ui STATIC
     src/ui/imgui_layer.cc
 )
@@ -489,6 +568,7 @@ target_link_libraries(blue_ui PUBLIC blue_render imgui)
 # upload per .pbo), scenes resolved into posed prefabs with overrides, lights,
 # draw items, picking, and physics bodies from cooked shapes.
 add_library(blue_world STATIC
+    src/world/draw_history.cc
     src/world/gpu_backend.cc
     src/world/prefab_cache.cc
     src/world/prefab_pose.cc
@@ -556,10 +636,8 @@ target_link_libraries(project-blue PRIVATE
     blue_world
     blue_prefab
     blue_shader
-    Vulkan::Vulkan
     SDL3::SDL3-static
     glm::glm
-    GPUOpen::VulkanMemoryAllocator
     imgui
 )
 

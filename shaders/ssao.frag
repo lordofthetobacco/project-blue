@@ -9,7 +9,7 @@
 
 layout(set = 0, binding = 0) uniform sampler2D depthImage;  // full resolution
 
-// Must match SsaoConstants in src/render/passes/ssao_pass.cc.
+// Must match SsaoConstants in src/render/vulkan/passes/ssao_pass.cc.
 layout(push_constant) uniform SsaoConstants {
     vec4 projection;  // x: proj[0][0], y: proj[1][1], z: near plane
     vec4 params;      // x: radius (m), y: intensity, z: max radius (full-res px)

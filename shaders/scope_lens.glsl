@@ -2,10 +2,10 @@
 // Included with #include "scope_lens.glsl" after common.glsl.
 
 // Must match the line count of ScopeLensUniforms in
-// src/render/passes/scope_lens_pass.cc (render::kMaxScopeReticleLines).
+// src/render/vulkan/passes/scope_lens_pass.cc (render::kMaxScopeReticleLines).
 const int kMaxReticleLines = 8;
 
-// Must match ScopeLensUniforms in src/render/passes/scope_lens_pass.cc
+// Must match ScopeLensUniforms in src/render/vulkan/passes/scope_lens_pass.cc
 // (std140; offsets asserted there). Tangents are of directions against the
 // scope's frame: t = (d.right, d.up) / (d.axis).
 layout(set = 1, binding = 0) uniform ScopeLensUniforms {

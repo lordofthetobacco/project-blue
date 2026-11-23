@@ -7,7 +7,7 @@
 
 layout(set = 0, binding = 0) uniform sampler2D aoImage;
 
-// Must match BlurConstants in src/render/passes/ssao_pass.cc.
+// Must match BlurConstants in src/render/vulkan/passes/ssao_pass.cc.
 layout(push_constant) uniform BlurConstants {
     ivec2 axis;  // (1, 0) or (0, 1)
 } params;

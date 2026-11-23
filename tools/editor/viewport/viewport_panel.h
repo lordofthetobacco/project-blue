@@ -2,7 +2,6 @@
 #define BLUE_EDITOR_VIEWPORT_VIEWPORT_PANEL_H_
 
 #include <imgui.h>
-#include <vulkan/vulkan.h>
 
 #include <array>
 #include <cstddef>
@@ -14,6 +13,7 @@
 #include <glm/vec3.hpp>
 
 #include "asset/mesh_data.h"
+#include "core/extent.h"
 #include "editor/document.h"
 #include "editor/panel.h"
 #include "editor/viewport/editor_camera.h"
@@ -199,7 +199,7 @@ class ViewportPanel final : public Panel {
   // client's storage.
   render::SceneView view_;
 
-  VkExtent2D size_{1, 1};
+  core::Extent2D size_{1, 1};
   ImVec2 image_min_{0.0f, 0.0f};
   ImVec2 image_size_{1.0f, 1.0f};
   float dt_ = 0.0f;

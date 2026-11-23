@@ -16,7 +16,7 @@
 // point's motion on screen becomes the blur vector it is smeared along.
 //
 // ScreenVelocity() and BlurVector() are copies of the functions of the same
-// names in shaders/motion_blur.glsl, expression for expression: keep the two
+// names in shaders/motion_blur.h, expression for expression: keep the two
 // in sync. The shader runs them per pixel; this copy lets tests check them.
 // The other functions here are CPU-only: the shader's inputs and the area
 // the pass works on.
@@ -66,7 +66,7 @@ inline constexpr float kMotionBlurMinClipW = 1.0e-6f;
   return strength * kMotionBlurReferenceSeconds / frame_seconds;
 }
 
-// motion_blur.glsl: returns how far a surface point moved on screen since the
+// motion_blur.h: returns how far a surface point moved on screen since the
 // previous frame, in pixels (x right, y down), from its clip-space position
 // this frame and last frame, on a target of `extent` pixels whose clip-space
 // y points up (the scene passes' flipped viewport). Zero when either
@@ -88,7 +88,7 @@ inline constexpr float kMotionBlurMinClipW = 1.0e-6f;
              : glm::vec2(0.0f);
 }
 
-// motion_blur.glsl: returns the blur vector of a point moving by `velocity`
+// motion_blur.h: returns the blur vector of a point moving by `velocity`
 // pixels per frame: velocity * scale (MotionBlurScale()), with the dead zone
 // (kMotionBlurDeadZonePixels) applied and its length clamped to
 // `max_length` (> 0, twice MotionBlurMaxRadius()). Zero when the length is
@@ -115,7 +115,7 @@ struct ScreenBounds {
 
 // Returns the pixel bounds, on a target of `extent` pixels, of the part of the
 // world-space box [box_min, box_max] that the rasterizer can draw through
-// `view_proj` (clip-space y up, Vulkan depth 0 <= z <= w): the box's faces are
+// `view_proj` (clip-space y up, depth 0 <= z <= w): the box's faces are
 // clipped in clip space against z >= 0, z <= w (the near plane of the
 // reversed-Z projection) and w >= kMotionBlurMinClipW before projecting, so
 // a box reaching behind the camera is still bounded by its visible part.

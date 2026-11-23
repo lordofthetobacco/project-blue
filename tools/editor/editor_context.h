@@ -169,8 +169,8 @@ class EditorContext {
   // cached.
   [[nodiscard]] ImTextureID CreateImageTexture(int width, int height,
                                                std::span<const std::byte> rgba);
-  // Stops showing a texture from CreateImageTexture() (the ImGui descriptor
-  // is freed once no frame in flight uses it).
+  // Stops showing a texture from CreateImageTexture() (the renderer frees it
+  // once no frame in flight uses it).
   void ReleaseImageTexture(ImTextureID texture);
 
   // --- Commands, dialogs, messages -----------------------------------------

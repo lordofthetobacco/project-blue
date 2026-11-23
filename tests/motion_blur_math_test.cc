@@ -17,7 +17,7 @@
 
 #include "camera/projection.h"
 
-// ScreenVelocity() and BlurVector() mirror shaders/motion_blur.glsl.
+// ScreenVelocity() and BlurVector() mirror shaders/motion_blur.h.
 
 namespace blue::render {
 namespace {

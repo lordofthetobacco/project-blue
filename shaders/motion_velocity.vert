@@ -5,7 +5,7 @@
 // Velocity of the moving draw items (render::MotionBlurPass): their position
 // this frame and last frame in clip space.
 
-// Must match VelocityConstants in src/render/passes/motion_blur_pass.cc.
+// Must match VelocityConstants in src/render/vulkan/passes/motion_blur_pass.cc.
 layout(push_constant) uniform VelocityConstants {
     mat4 model;
     mat4 previousModel;  // The item's model matrix last frame.

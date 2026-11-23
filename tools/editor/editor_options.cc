@@ -3,6 +3,7 @@
 #include <format>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -54,6 +55,8 @@ core::Result<EditorOptions, std::string> ParseEditorOptions(
       options.mcp = true;
       options.mcp_port = port.value();
       ++i;
+    } else if (arg.starts_with("--renderer=")) {
+      options.renderer = arg.substr(std::string_view("--renderer=").size());
     } else if (arg.starts_with("--")) {
       return ParseResult::Error(std::format("unknown option {}", arg));
     } else if (options.file.empty()) {

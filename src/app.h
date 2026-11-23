@@ -2,7 +2,6 @@
 #define BLUE_APP_H_
 
 #include <SDL3/SDL_events.h>
-#include <vulkan/vulkan.h>
 
 #include <array>
 #include <chrono>
@@ -53,6 +52,7 @@
 #include "weapon/weapon_def.h"
 #include "weapon/weapon_item.h"
 #include "weapon/weapon_throw.h"
+#include "world/draw_history.h"
 #include "world/gpu_backend.h"
 #include "world/prefab_cache.h"
 #include "world/prefab_pose.h"
@@ -64,11 +64,16 @@ namespace blue {
 struct CliOptions {
   std::optional<std::string> scene_path;
   std::optional<platform::WindowPair> window_position;
+  // The value of --renderer=, unchecked (render::ChooseBackend() checks it).
+  std::optional<std::string> renderer;
   bool show_help = false;
 };
 
 inline constexpr const char* kUsage =
-    "usage: project-blue [--scene <file.mscn>] [--window-pos X,Y]";
+    "usage: project-blue [--scene <file.mscn>] [--window-pos X,Y] "
+    "[--renderer=vulkan|d3d12|metal]\n"
+    "The environment variable BLUE_RENDERER chooses the renderer backend "
+    "when --renderer= does not.";
 
 // Parses the command line. Returns nullopt for unknown arguments, options
 // missing their value and malformed values. --help / -h sets show_help.
@@ -88,9 +93,11 @@ enum class ViewMode {
 // thread-safe.
 class App {
  public:
+  // Renders with `backend` (render::ChooseBackend()), or another compiled
+  // one that can draw to the same window when it has no suitable device.
   // `process_start` is when main() was entered; the time to the first frame
   // is logged.
-  App(const CliOptions& options,
+  App(const CliOptions& options, render::Backend backend,
       std::chrono::steady_clock::time_point process_start);
 
   App(const App&) = delete;
@@ -352,7 +359,7 @@ class App {
   // when the history is valid, sets their previous_transform and the
   // camera's previous_view_projection so the weapon is motion-blurred.
   void ApplyWeaponMotion(std::span<render::DrawItem> weapon_draws,
-                         float frame_seconds, VkExtent2D extent,
+                         float frame_seconds, core::Extent2D extent,
                          render::Camera& camera);
   [[nodiscard]] ui::WeaponOverlayInfo MakeWeaponOverlayInfo() const;
   [[nodiscard]] ui::HitLogOverlayInfo MakeHitLogOverlayInfo() const;
@@ -435,6 +442,10 @@ class App {
   std::optional<weapon::ScopeViewState> scope_state_;
   // This frame's weapon draw transforms for weapon_motion_; reused.
   std::vector<glm::mat4> weapon_transforms_;
+  // Last frame's camera and transforms of what moves in the world (physics
+  // bodies, animated prefabs, dropped weapons), for the motion vectors of
+  // the temporal scaler. Cut whenever the view jumps.
+  world::DrawHistory draw_history_;
   EffectMesh effect_cube_;
   // Ring buffer of the transforms of the most recent bullet holes on static
   // surfaces, each a small tile of the effect cube: the first

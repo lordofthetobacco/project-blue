@@ -9,9 +9,9 @@
 #include <string>
 #include <string_view>
 
+#include "render/backend.h"
 #include "render/renderer.h"
-#include "render/vulkan_context.h"
-#include "shader/shader_compiler.h"
+#include "shader/compile_mode.h"
 #include "tests/render/harness_options.h"
 #include "tests/render/image_compare.h"
 #include "tests/render/png_io.h"
@@ -23,15 +23,15 @@ namespace {
 // What rendering one scene produced.
 struct SceneResult {
   RgbaImage image;
-  render::VulkanContext::ValidationCounts validation;
-  bool validation_enabled = false;
+  render::ValidationStats validation;
 };
 
 // A fresh headless renderer for every scene: no state leaks between scenes,
 // so each golden depends only on its own scene.
-std::unique_ptr<render::Renderer> MakeRenderer() {
-  return std::make_unique<render::Renderer>(render::RendererOptions{
+std::unique_ptr<render::Renderer> MakeRenderer(render::Backend backend) {
+  auto renderer = std::make_unique<render::Renderer>(render::RendererOptions{
       .window = nullptr,
+      .backend = backend,
       .shader_dir = BLUE_SHADER_SOURCE_DIR,
       // Fixed (not per build type): Debug and Release must render the same.
       .shader_mode = shader::CompileMode::kRelease,
@@ -39,11 +39,14 @@ std::unique_ptr<render::Renderer> MakeRenderer() {
       .headless_extent = {kSceneWidth, kSceneHeight},
       .max_anisotropy = 1.0f,
   });
+  // A fallback to another backend would compare the wrong renderer.
+  REQUIRE(renderer->backend() == backend);
+  return renderer;
 }
 
 // Draws `scene_name` and reads back its last frame (alpha forced to 255).
-SceneResult RenderScene(std::string_view scene_name) {
-  std::unique_ptr<render::Renderer> renderer = MakeRenderer();
+SceneResult RenderScene(std::string_view scene_name, render::Backend backend) {
+  std::unique_ptr<render::Renderer> renderer = MakeRenderer(backend);
   const std::unique_ptr<TestScene> scene = BuildScene(scene_name, *renderer);
   uint64_t ticket = 0;
   for (int frame = 0; frame < scene->frames; ++frame) {
@@ -79,8 +82,7 @@ SceneResult RenderScene(std::string_view scene_name) {
     result.image.rgba[i] = (i % 4 == 3) ? uint8_t{255}
                                         : static_cast<uint8_t>(pixels.rgba[i]);
   }
-  result.validation_enabled = renderer->context().validation();
-  result.validation = renderer->context().validation_counts();
+  result.validation = renderer->validation_stats();
   return result;
 }
 
@@ -103,12 +105,13 @@ const Tolerance& GoldenTolerance() {
 }
 
 TEST_CASE("Headless scenes match the golden images") {
-  for (const std::string& backend : Options().backends) {
+  for (const render::Backend backend_id : Options().backends) {
+    const std::string backend(render::BackendName(backend_id));
     for (const std::string_view scene : SceneNames()) {
       const std::string label = std::string(scene) + "." + backend;
       INFO("scene ", label);
       const auto start = std::chrono::steady_clock::now();
-      const SceneResult result = RenderScene(scene);
+      const SceneResult result = RenderScene(scene, backend_id);
       const double seconds = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - start)
                                  .count();
@@ -116,7 +119,7 @@ TEST_CASE("Headless scenes match the golden images") {
       CHECK(result.image.width == kSceneWidth);
       CHECK(result.image.height == kSceneHeight);
       CHECK_MESSAGE(result.validation.errors == 0,
-                    "Vulkan validation errors: ", result.validation.errors);
+                    "GPU validation errors: ", result.validation.errors);
       CHECK(WritePng(OutPath(scene, backend), result.image));
 
       if (Options().update_golden) {
@@ -124,7 +127,7 @@ TEST_CASE("Headless scenes match the golden images") {
         std::printf("%-18s %s  golden written (%.2f s, validation %s, %u "
                     "warnings)\n",
                     std::string(scene).c_str(), backend.c_str(), seconds,
-                    result.validation_enabled ? "on" : "off",
+                    result.validation.enabled ? "on" : "off",
                     result.validation.warnings);
         continue;
       }
@@ -138,7 +141,7 @@ TEST_CASE("Headless scenes match the golden images") {
       std::printf("%-18s %s  %s  %s (%.2f s, validation %s, %u warnings)\n",
                   std::string(scene).c_str(), backend.c_str(),
                   passed ? "ok  " : "FAIL", Describe(metrics).c_str(), seconds,
-                  result.validation_enabled ? "on" : "off",
+                  result.validation.enabled ? "on" : "off",
                   result.validation.warnings);
       if (!passed) {
         CHECK(WritePng(OutPath(scene, "ref"), *golden));
@@ -154,16 +157,21 @@ TEST_CASE("Headless scenes match the golden images") {
 }
 
 TEST_CASE("Rendering the same scene twice gives identical images") {
-  const SceneResult first = RenderScene("lit_full_aces");
-  const SceneResult second = RenderScene("lit_full_aces");
-  const CompareMetrics metrics = Compare(first.image, second.image, 0);
-  CHECK_MESSAGE(Passes(metrics, kExact), Describe(metrics));
+  for (const render::Backend backend : Options().backends) {
+    INFO("backend ", render::BackendName(backend));
+    const SceneResult first = RenderScene("lit_full_aces", backend);
+    const SceneResult second = RenderScene("lit_full_aces", backend);
+    const CompareMetrics metrics = Compare(first.image, second.image, 0);
+    CHECK_MESSAGE(Passes(metrics, kExact), Describe(metrics));
+  }
 }
 
 TEST_CASE("Headless rendering never starts SDL video") {
   // Runs after the scenes (doctest keeps file order): nothing in them may
   // have initialized the video subsystem.
-  { const SceneResult result = RenderScene("clear_and_upload"); }
+  for (const render::Backend backend : Options().backends) {
+    const SceneResult result = RenderScene("clear_and_upload", backend);
+  }
   CHECK(SDL_WasInit(SDL_INIT_VIDEO) == 0);
 }
 

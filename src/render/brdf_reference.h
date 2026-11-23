@@ -8,10 +8,10 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
-// A CPU copy of the shading math in shaders/pbr.glsl, shaders/sanitize.glsl
-// and shaders/environment.glsl (ImportanceSampleGgx), for tests that sweep
-// it over every legal input and check that it stays finite. Functions have
-// the GLSL names and the same expressions, line for line: keep the two in
+// A CPU copy of the shading math in shaders/pbr.h, shaders/sanitize.h and
+// shaders/environment.h (ImportanceSampleGgx), for tests that sweep it over
+// every legal input and check that it stays finite. Functions have the
+// shader names and the same expressions, line for line: keep the two in
 // sync. Not used for rendering.
 namespace blue::render::brdf_reference {
 
@@ -20,7 +20,7 @@ inline constexpr float kMinPerceptualRoughness = 0.045f;
 inline constexpr float kDielectricF0 = 0.04f;
 inline constexpr float kMaxSceneRadiance = 4096.0f;
 
-// sanitize.glsl: NaN -> 0, then clamped to [0, max_value].
+// sanitize.h: NaN -> 0, then clamped to [0, max_value].
 inline float SanitizeColor(float value, float max_value) {
   return std::isnan(value) ? 0.0f : std::clamp(value, 0.0f, max_value);
 }
@@ -59,7 +59,7 @@ inline glm::vec3 FresnelSchlick(const glm::vec3& f0, float v_dot_h) {
   return f + f0 * (1.0f - f);
 }
 
-// The parts of the GLSL Surface that the BRDF reads.
+// The parts of the shaders' Surface (shaders/pbr.h) that the BRDF reads.
 struct Surface {
   glm::vec3 normal;
   glm::vec3 view;
@@ -130,11 +130,12 @@ inline glm::vec3 AmbientWeights(const Surface& s, const glm::vec2& lut) {
   return {single_scatter.x, (multi_scatter * multi_energy).x, diffuse_weight.x};
 }
 
-// Division as the GPU may do it (x * rcp(y), which Vulkan lets be 2.5 ulp
-// off): tests pass one that returns 1 + ulp for equal operands.
+// Division as the GPU may do it (x * rcp(y), which the Metal Shading
+// Language lets be 2.5 ulp off): tests pass one that returns 1 + ulp for
+// equal operands.
 using Divide = float (*)(float numerator, float denominator);
 
-// environment.glsl: a GGX half vector around +Z for the uniform sample `xi`.
+// environment.h: a GGX half vector around +Z for the uniform sample `xi`.
 inline glm::vec3 ImportanceSampleGgx(const glm::vec2& xi, float alpha,
                                      Divide quotient) {
   const float phi = 2.0f * kPi * xi.x;

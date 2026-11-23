@@ -1,7 +1,7 @@
 // Material set (set 1, render::MaterialSystem), shared by mesh.frag and the
 // alpha-masked depth pre-pass. Included with #include "material.glsl".
 
-// Must match MaterialParams in src/render/material_system.h (std140).
+// Must match MaterialParams in src/render/vulkan/material_system.h (std140).
 layout(set = 1, binding = 0) uniform MaterialParams {
     vec4 baseColor;  // linear RGBA factor
     vec4 emissive;   // rgb: emissive * strength

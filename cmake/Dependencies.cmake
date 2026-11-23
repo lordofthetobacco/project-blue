@@ -148,7 +148,10 @@ FetchContent_Declare(JoltPhysics
     SOURCE_SUBDIR  Build
     SYSTEM)
 
-FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui imguizmo stb)
+FetchContent_MakeAvailable(SDL3 glm imgui imguizmo stb)
+if(BLUE_RENDERER_VULKAN)
+    FetchContent_MakeAvailable(VulkanMemoryAllocator)
+endif()
 
 # SDL compiles SDL_mslibc.c with an explicit /GL- on MSVC; our link-time optimisation default
 # (/GL) would make cl print a D9025 override note and a C4652 warning for it. SDL is thin glue
@@ -223,14 +226,19 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
 )
 target_include_directories(imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
-target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL3::SDL3-static)
+target_link_libraries(imgui PUBLIC SDL3::SDL3-static)
+# Only the renderer backends of the enabled renderers; each renderer owns its ImGui backend.
+# Graphics API headers stay private: only the backend sources include imgui_impl_<api>.h.
+if(BLUE_RENDERER_VULKAN)
+    target_sources(imgui PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
+    target_link_libraries(imgui PRIVATE Vulkan::Vulkan)
+endif()
 blue_restore_msvc_default_flags(imgui)
 
 add_library(imguizmo STATIC ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp)

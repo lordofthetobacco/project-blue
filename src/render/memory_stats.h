@@ -1,59 +1,70 @@
 #ifndef BLUE_RENDER_MEMORY_STATS_H_
 #define BLUE_RENDER_MEMORY_STATS_H_
 
-#include <vulkan/vulkan.h>
-
 #include <array>
 #include <cstdint>
 
 namespace blue::render {
 
-// Device memory of one Vulkan memory heap as the renderer's allocator sees
-// it (VMA's heap budget).
+// The most memory heaps MemoryStats can describe: a Vulkan device reports up
+// to 16 (VK_MAX_MEMORY_HEAPS). A Metal device has one pool of GPU memory, so
+// the Metal renderer reports exactly one heap.
+inline constexpr uint32_t kMaxMemoryHeaps = 16;
+
+// GPU memory of one heap of the device. Metal has no memory heaps or
+// allocator blocks to inspect, only two numbers per device: what the process
+// has allocated on it and how much the system recommends it stays below.
 struct HeapMemoryStats {
-  VkDeviceSize heap_size = 0;  // VkMemoryHeap::size.
-  bool device_local = false;   // VRAM (or the shared pool of an iGPU).
-  // VkDeviceMemory blocks the allocator holds in this heap, dedicated
-  // allocations included, and how much of them live allocations use; the
-  // difference is free space kept inside blocks.
-  VkDeviceSize block_bytes = 0;
-  VkDeviceSize allocation_bytes = 0;
+  // MTLDevice.recommendedMaxWorkingSetSize: there is no fixed heap size (on
+  // Apple silicon the GPU shares the system's memory).
+  uint64_t heap_size = 0;
+  bool device_local = false;  // GPU memory; always true for Metal's one heap.
+  // What Metal has allocated for the process on the device
+  // (MTLDevice.currentAllocatedSize: every texture, buffer and heap, the
+  // drawables and ImGui's objects included), and how much of it the objects
+  // the renderer accounts for by owner (below) use; the difference is what
+  // nobody accounts for.
+  uint64_t block_bytes = 0;
+  uint64_t allocation_bytes = 0;
+  // Always 0: Metal reports neither blocks nor a number of allocations.
   uint32_t block_count = 0;
   uint32_t allocation_count = 0;
-  // The process's usage of the heap and the budget the OS grants it, from
-  // VK_EXT_memory_budget when MemoryStats::driver_budget (all allocations of
-  // the process, not only the renderer's); otherwise estimated by VMA
-  // (usage = block_bytes, budget = 80% of the heap).
-  VkDeviceSize usage = 0;
-  VkDeviceSize budget = 0;
+  // The process's usage of the device (block_bytes again) and the size the
+  // system recommends it stays below (heap_size again); both come from the
+  // driver (MemoryStats::driver_budget).
+  uint64_t usage = 0;
+  uint64_t budget = 0;
 };
 
 // What the renderer holds in memory (Renderer::memory_stats()). Cheap: no
 // allocation, no walk over allocations; fine to call every frame.
 struct MemoryStats {
-  std::array<HeapMemoryStats, VK_MAX_MEMORY_HEAPS> heaps{};
+  std::array<HeapMemoryStats, kMaxMemoryHeaps> heaps{};
   uint32_t heap_count = 0;
-  // Whether usage/budget come from the driver (VK_EXT_memory_budget).
+  // Whether usage/budget come from the driver; always true with Metal.
   bool driver_budget = false;
 
-  // Device memory by owner, in bytes.
-  VkDeviceSize texture_bytes = 0;  // Uploaded textures (defaults excluded).
+  // GPU memory by owner, in bytes (MTLTexture.allocatedSize, MTLBuffer
+  // length).
+  uint64_t texture_bytes = 0;  // Uploaded textures (defaults excluded).
   uint32_t texture_count = 0;
-  VkDeviceSize mesh_bytes = 0;  // Resident vertex and index buffers.
+  uint64_t mesh_bytes = 0;  // Resident vertex and index buffers.
   uint32_t mesh_count = 0;
   // Window- or viewport-sized targets (HDR, depth, SSAO, bloom, LDR, the
-  // editor viewport image) and the shadow map.
-  VkDeviceSize render_target_bytes = 0;
-  // Environment cubes (sky, irradiance, prefiltered) and the BRDF LUT.
-  VkDeviceSize environment_bytes = 0;
+  // motion blur images, the editor viewport image), the shadow map and a
+  // scope's picture and depth.
+  uint64_t render_target_bytes = 0;
+  // Environment cubes (sky, specular source, prefiltered) and the BRDF LUT.
+  uint64_t environment_bytes = 0;
   // Released meshes and textures still waiting for the frames in flight.
-  VkDeviceSize retired_bytes = 0;
+  uint64_t retired_bytes = 0;
 
-  // Upload staging: the fixed per-upload budget, the largest staging buffer
-  // created so far, and what is allocated right now (0 between uploads).
-  VkDeviceSize staging_budget_bytes = 0;
-  VkDeviceSize staging_peak_bytes = 0;
-  VkDeviceSize staging_current_bytes = 0;
+  // Upload staging: the fixed per-upload budget, the most staging memory
+  // allocated at once so far, and what is allocated right now (0 between
+  // uploads).
+  uint64_t staging_budget_bytes = 0;
+  uint64_t staging_peak_bytes = 0;
+  uint64_t staging_current_bytes = 0;
 };
 
 }  // namespace blue::render
