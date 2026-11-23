@@ -11,6 +11,18 @@
 
 namespace blue::render::d3d12 {
 
+// How render target 0 combines a pipeline's output with what it holds; the
+// Vulkan backend's BlendMode, factor for factor (the target's alpha is kept
+// by kAdditive and kAlpha).
+enum class BlendMode : uint8_t {
+  kReplace,   // No blending.
+  kAdditive,  // colour: ONE + ONE.
+  kAlpha,     // colour: SRC_ALPHA + INV_SRC_ALPHA.
+};
+
+// Returns the blend state of render target 0 for `mode`.
+[[nodiscard]] D3D12_RENDER_TARGET_BLEND_DESC BlendDesc(BlendMode mode);
+
 // How a graphics pipeline state object is made from a program's DXIL. The
 // defaults are a full-screen pass: no vertex input, no culling, no depth,
 // no blending, one render target.
@@ -33,19 +45,13 @@ struct GraphicsPipelineDesc {
   int32_t depth_bias = 0;
   float slope_scaled_depth_bias = 0.0f;
   // Blend state of render target 0 (the others: no blending).
-  D3D12_RENDER_TARGET_BLEND_DESC blend{
-      .BlendEnable = FALSE,
-      .LogicOpEnable = FALSE,
-      .SrcBlend = D3D12_BLEND_ONE,
-      .DestBlend = D3D12_BLEND_ZERO,
-      .BlendOp = D3D12_BLEND_OP_ADD,
-      .SrcBlendAlpha = D3D12_BLEND_ONE,
-      .DestBlendAlpha = D3D12_BLEND_ZERO,
-      .BlendOpAlpha = D3D12_BLEND_OP_ADD,
-      .LogicOp = D3D12_LOGIC_OP_NOOP,
-      .RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL,
-  };
-  D3D12_PRIMITIVE_TOPOLOGY_TYPE topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  D3D12_RENDER_TARGET_BLEND_DESC blend = BlendDesc(BlendMode::kReplace);
+  D3D12_PRIMITIVE_TOPOLOGY_TYPE topology =
+      D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  // Lines as one-pixel-wide rectangles (Vulkan's strict lines) instead of
+  // the aliased diamond-exit rule; only where the device supports it
+  // (D3d12Context::narrow_lines_supported()).
+  bool narrow_lines = false;
   const wchar_t* name = L"blue pipeline";
 };
 

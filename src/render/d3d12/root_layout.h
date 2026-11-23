@@ -76,8 +76,7 @@ struct RootLayout {
   // The index of the root parameter of kind `kind` in `space` whose
   // register is `shader_register` (tables: whose ranges include it), or
   // nullopt.
-  [[nodiscard]] std::optional<uint32_t> Find(RootParamKind kind,
-                                             uint32_t space,
+  [[nodiscard]] std::optional<uint32_t> Find(RootParamKind kind, uint32_t space,
                                              uint32_t shader_register) const;
 };
 

@@ -19,13 +19,16 @@ namespace {
 
 constexpr std::array<D3D12_INPUT_ELEMENT_DESC, 5> kVertexInputLayout = {{
     {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
-     offsetof(asset::Vertex, position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+     offsetof(asset::Vertex, position),
+     D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,
-     offsetof(asset::Vertex, normal), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+     offsetof(asset::Vertex, normal),
+     D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(asset::Vertex, uv0),
      D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,
-     offsetof(asset::Vertex, tangent), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+     offsetof(asset::Vertex, tangent),
+     D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(asset::Vertex, uv1),
      D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
 }};
@@ -47,7 +50,8 @@ Mesh::Mesh(const D3d12Context& context, std::span<const asset::Vertex> vertices,
   {
     StagingUploader uploader(context,
                              vertices.size_bytes() + indices.size_bytes());
-    uploader.CopyToBuffer(std::as_bytes(vertices), vertex_buffer_.resource(), 0);
+    uploader.CopyToBuffer(std::as_bytes(vertices), vertex_buffer_.resource(),
+                          0);
     uploader.CopyToBuffer(std::as_bytes(indices), index_buffer_.resource(), 0);
     // Finish() executes the copies; at the end of that ExecuteCommandLists()
     // the buffers decay back to COMMON, from which drawing promotes them.

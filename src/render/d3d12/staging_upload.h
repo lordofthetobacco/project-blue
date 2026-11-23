@@ -54,10 +54,9 @@ class StagingUploader {
   // (whose mip 0 is `extent`, with `mip_levels` mips, in COPY_DEST when the
   // copy executes; `format` is its resource format). A size that does not
   // match is fatal.
-  void CopyToTexture(std::span<const std::byte> packed,
-                     ID3D12Resource* texture, DXGI_FORMAT format,
-                     CopyBlock block, core::Extent2D extent, uint32_t level,
-                     uint32_t layer, uint32_t mip_levels);
+  void CopyToTexture(std::span<const std::byte> packed, ID3D12Resource* texture,
+                     DXGI_FORMAT format, CopyBlock block, core::Extent2D extent,
+                     uint32_t level, uint32_t layer, uint32_t mip_levels);
 
   // Executes what is recorded, waits for the GPU and frees the upload
   // memory. Nothing may be recorded afterwards.

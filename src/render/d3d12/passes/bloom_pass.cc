@@ -7,6 +7,7 @@
 #include <span>
 
 #include "render/d3d12/image.h"
+#include "render/d3d12/pipeline.h"
 #include "render/d3d12/render_targets.h"
 #include "render/d3d12/samplers.h"
 #include "render/shader_manifest.h"
@@ -50,7 +51,7 @@ BloomPass::BloomPass(const D3d12Context& context, ShaderPrograms& programs,
       downsample_(context, programs, fullscreen_root, ShaderProgram::kBloomDown,
                   RenderTargets::kBloomFormat),
       upsample_(context, programs, fullscreen_root, ShaderProgram::kBloomUp,
-                RenderTargets::kBloomFormat, /*additive=*/true) {}
+                RenderTargets::kBloomFormat, BlendMode::kAdditive) {}
 
 void BloomPass::Record(const FrameContext& ctx) const {
   ID3D12GraphicsCommandList* cmd = ctx.cmd;
@@ -92,8 +93,8 @@ void BloomPass::Record(const FrameContext& ctx) const {
     };
     const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 1> inputs = {
         targets.bloom(level).staging_srv()};
-    upsample_.Record(cmd, bloom.rtv(), targets.bloom_mip_extent(target),
-                     inputs, linear, Bytes(constants));
+    upsample_.Record(cmd, bloom.rtv(), targets.bloom_mip_extent(target), inputs,
+                     linear, Bytes(constants));
     Move(cmd, bloom, kRead);
   }
 }

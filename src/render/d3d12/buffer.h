@@ -45,8 +45,7 @@ class Buffer {
   }
   [[nodiscard]] uint64_t size() const { return size_; }
   [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS gpu_address() const {
-    return allocation_ ? allocation_->GetResource()->GetGPUVirtualAddress()
-                       : 0;
+    return allocation_ ? allocation_->GetResource()->GetGPUVirtualAddress() : 0;
   }
   // The persistent mapping (kUpload, kReadback), else nullptr.
   [[nodiscard]] void* mapped() const { return mapped_; }

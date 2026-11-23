@@ -20,8 +20,7 @@ std::atomic<ID3D12Device*> removed_reason_device{nullptr};
 
 bool IsDeviceLost(HRESULT result) {
   return result == DXGI_ERROR_DEVICE_REMOVED ||
-         result == DXGI_ERROR_DEVICE_RESET ||
-         result == DXGI_ERROR_DEVICE_HUNG;
+         result == DXGI_ERROR_DEVICE_RESET || result == DXGI_ERROR_DEVICE_HUNG;
 }
 
 }  // namespace
@@ -31,8 +30,8 @@ std::string HrToString(HRESULT result) {
   const DWORD length = FormatMessageA(
       FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
           FORMAT_MESSAGE_IGNORE_INSERTS,
-      nullptr, static_cast<DWORD>(result), 0, reinterpret_cast<char*>(&text),
-      0, nullptr);
+      nullptr, static_cast<DWORD>(result), 0, reinterpret_cast<char*>(&text), 0,
+      nullptr);
   std::string message;
   if (length > 0 && text != nullptr) {
     message.assign(text, length);
@@ -61,7 +60,8 @@ void CheckHr(HRESULT result, std::source_location location) {
   std::string reason;
   ID3D12Device* device = removed_reason_device.load();
   if (IsDeviceLost(result) && device != nullptr) {
-    reason = ", device removed: " + HrToString(device->GetDeviceRemovedReason());
+    reason =
+        ", device removed: " + HrToString(device->GetDeviceRemovedReason());
   }
   core::log::Fatal("Direct3D 12 call failed: {}{} ({}:{} in {})",
                    HrToString(result), reason, location.file_name(),

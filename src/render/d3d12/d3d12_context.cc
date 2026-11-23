@@ -45,8 +45,8 @@ template <typename T>
 bool CheckFeature(ID3D12Device* device, D3D12_FEATURE feature, T& data) {
   ComPtr<ID3D12Device16> device16;
   if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device16)))) {
-    return SUCCEEDED(device16->CheckFeatureSupport1(feature, &data, sizeof(data),
-                                                    D3D12_SDK_VERSION));
+    return SUCCEEDED(device16->CheckFeatureSupport1(
+        feature, &data, sizeof(data), D3D12_SDK_VERSION));
   }
   return SUCCEEDED(device->CheckFeatureSupport(feature, &data, sizeof(data)));
 }
@@ -122,13 +122,12 @@ D3d12Context::D3d12Context(AdapterPreference adapter, bool gpu_validation) {
   const std::string core_path = ModulePath(L"D3D12Core.dll");
   const std::string warp_path =
       software_adapter_ ? ModulePath(L"d3d10warp.dll") : std::string();
-  core::log::Info("Direct3D 12 device: {}{}{} (runtime {}; debug layer {}{})",
-                  device_name_, software_adapter_ ? " (software) " : "",
-                  warp_path, core_path.empty() ? "unknown" : core_path,
-                  validation() ? "on" : "off",
-                  validation() && gpu_based_validation_
-                      ? ", GPU-based validation"
-                      : "");
+  core::log::Info(
+      "Direct3D 12 device: {}{}{} (runtime {}; debug layer {}{}; {} lines)",
+      device_name_, software_adapter_ ? " (software) " : "", warp_path,
+      core_path.empty() ? "unknown" : core_path, validation() ? "on" : "off",
+      validation() && gpu_based_validation_ ? ", GPU-based validation" : "",
+      narrow_lines_supported_ ? "narrow quadrilateral" : "aliased");
 }
 
 D3d12Context::~D3d12Context() {
@@ -153,8 +152,9 @@ bool D3d12Context::CreateFactory(bool debug) {
       }
       flags |= DXGI_CREATE_FACTORY_DEBUG;
     } else {
-      core::log::Warn("Direct3D 12 debug layer not available "
-                      "(d3d12SDKLayers.dll missing); validation is off");
+      core::log::Warn(
+          "Direct3D 12 debug layer not available "
+          "(d3d12SDKLayers.dll missing); validation is off");
       gpu_based_validation_ = false;
     }
   }
@@ -217,12 +217,17 @@ bool D3d12Context::CreateDevice(AdapterPreference preference) {
     software_adapter_ = preference == AdapterPreference::kSoftware ||
                         (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
     device_->SetName(L"blue device");
+    D3D12_FEATURE_DATA_D3D12_OPTIONS19 options19{};
+    narrow_lines_supported_ =
+        CheckFeature(device_.Get(), D3D12_FEATURE_D3D12_OPTIONS19, options19) &&
+        options19.RasterizerDesc2Supported &&
+        options19.NarrowQuadrilateralLinesSupported;
     return true;
   }
-  core::log::Warn("Direct3D 12: no {} adapter with feature level 12_0, "
-                  "Shader Model 6.0 and resource binding tier 2",
-                  preference == AdapterPreference::kSoftware ? "software"
-                                                             : "hardware");
+  core::log::Warn(
+      "Direct3D 12: no {} adapter with feature level 12_0, "
+      "Shader Model 6.0 and resource binding tier 2",
+      preference == AdapterPreference::kSoftware ? "software" : "hardware");
   return false;
 }
 
@@ -254,7 +259,8 @@ void D3d12Context::CreateQueueAndAllocator() {
   };
   CheckHr(device_->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue_)));
   queue_->SetName(L"blue direct queue");
-  CheckHr(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)));
+  CheckHr(
+      device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)));
   fence_->SetName(L"blue queue fence");
   fence_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (fence_event_ == nullptr) {
@@ -268,11 +274,11 @@ void D3d12Context::CreateQueueAndAllocator() {
   allocator_desc.pAdapter = adapter_.Get();
   CheckHr(D3D12MA::CreateAllocator(&allocator_desc, &allocator_));
 
-  CheckHr(device_->CreateCommandAllocator(
-      D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&immediate_allocator_)));
-  CheckHr(device_->CreateCommandList(
-      0, D3D12_COMMAND_LIST_TYPE_DIRECT, immediate_allocator_.Get(), nullptr,
-      IID_PPV_ARGS(&immediate_list_)));
+  CheckHr(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                          IID_PPV_ARGS(&immediate_allocator_)));
+  CheckHr(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                     immediate_allocator_.Get(), nullptr,
+                                     IID_PPV_ARGS(&immediate_list_)));
   immediate_list_->SetName(L"blue immediate commands");
   CheckHr(immediate_list_->Close());
 }

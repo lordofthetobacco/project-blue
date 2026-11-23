@@ -33,9 +33,9 @@ using Microsoft::WRL::ComPtr;
 //
 // Validation: Debug builds, or `gpu_validation`, enable the debug layer
 // (when d3d12SDKLayers.dll is available) and count its messages;
-// `gpu_validation` also enables GPU-based validation (slow). Debug builds enable DRED
-// (auto-breadcrumbs and page faults) and break into an attached debugger on
-// errors. Neither copyable nor movable. Not thread-safe.
+// `gpu_validation` also enables GPU-based validation (slow). Debug builds
+// enable DRED (auto-breadcrumbs and page faults) and break into an attached
+// debugger on errors. Neither copyable nor movable. Not thread-safe.
 class D3d12Context {
  public:
   D3d12Context(AdapterPreference adapter, bool gpu_validation);
@@ -66,6 +66,12 @@ class D3d12Context {
   // Whether DXGI can present without vsync while tearing
   // (DXGI_FEATURE_PRESENT_ALLOW_TEARING).
   [[nodiscard]] bool tearing_supported() const { return tearing_supported_; }
+  // Whether pipelines can rasterize lines as one-pixel-wide rectangles
+  // (D3D12_LINE_RASTERIZATION_MODE_QUADRILATERAL_NARROW through
+  // D3D12_RASTERIZER_DESC2): Vulkan's strict line rasterization.
+  [[nodiscard]] bool narrow_lines_supported() const {
+    return narrow_lines_supported_;
+  }
 
   // Whether the debug layer is active.
   [[nodiscard]] bool validation() const { return info_queue_ != nullptr; }
@@ -128,6 +134,7 @@ class D3d12Context {
   std::string device_name_;
   bool software_adapter_ = false;
   bool tearing_supported_ = false;
+  bool narrow_lines_supported_ = false;
   bool gpu_based_validation_ = false;
   uint64_t timestamp_frequency_ = 0;
   mutable ValidationCounts validation_counts_;

@@ -31,7 +31,7 @@ FullscreenPass::FullscreenPass(const D3d12Context& context,
                                ShaderPrograms& programs,
                                const RootSignature& root_signature,
                                ShaderProgram program, DXGI_FORMAT target_format,
-                               bool additive)
+                               BlendMode blend)
     : context_(context), root_signature_(root_signature) {
   const RootLayout& layout = root_signature.layout();
   if (layout.Find(RootParamKind::kTable, kInputSet, 0) != kInputsParam ||
@@ -39,25 +39,19 @@ FullscreenPass::FullscreenPass(const D3d12Context& context,
                   kFullscreenSampler.binding) != kSamplerParam) {
     core::log::Fatal("FullscreenPass needs the full-screen root signature");
   }
-  programs.Add(program, [this, target_format, additive](
-                            std::span<const std::byte> vertex,
-                            std::span<const std::byte> pixel) {
-    GraphicsPipelineDesc desc;
-    desc.root_signature = root_signature_.get();
-    desc.vertex = vertex;
-    desc.pixel = pixel;
-    desc.rtv_formats[0] = target_format;
-    desc.rtv_count = 1;
-    if (additive) {
-      desc.blend.BlendEnable = TRUE;
-      desc.blend.SrcBlend = D3D12_BLEND_ONE;
-      desc.blend.DestBlend = D3D12_BLEND_ONE;
-      desc.blend.SrcBlendAlpha = D3D12_BLEND_ONE;
-      desc.blend.DestBlendAlpha = D3D12_BLEND_ONE;
-    }
-    desc.name = L"blue fullscreen pipeline";
-    pipeline_ = CreateGraphicsPipeline(context_.device(), desc);
-  });
+  programs.Add(program,
+               [this, target_format, blend](std::span<const std::byte> vertex,
+                                            std::span<const std::byte> pixel) {
+                 GraphicsPipelineDesc desc;
+                 desc.root_signature = root_signature_.get();
+                 desc.vertex = vertex;
+                 desc.pixel = pixel;
+                 desc.rtv_formats[0] = target_format;
+                 desc.rtv_count = 1;
+                 desc.blend = BlendDesc(blend);
+                 desc.name = L"blue fullscreen pipeline";
+                 pipeline_ = CreateGraphicsPipeline(context_.device(), desc);
+               });
 }
 
 void FullscreenPass::Record(ID3D12GraphicsCommandList* cmd,
@@ -90,16 +84,20 @@ void FullscreenPass::Record(ID3D12GraphicsCommandList* cmd,
   }
 
   cmd->OMSetRenderTargets(1, &target, FALSE, nullptr);
-  const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(extent.width),
-                                static_cast<float>(extent.height), 0.0f, 1.0f};
+  const D3D12_VIEWPORT viewport{0.0f,
+                                0.0f,
+                                static_cast<float>(extent.width),
+                                static_cast<float>(extent.height),
+                                0.0f,
+                                1.0f};
   cmd->RSSetViewports(1, &viewport);
   cmd->RSSetScissorRects(1, &scissor);
   cmd->SetGraphicsRootSignature(root_signature_.get());
   cmd->SetPipelineState(pipeline_.Get());
   if (!constants.empty()) {
-    cmd->SetGraphicsRoot32BitConstants(
-        kPushConstantsParam, static_cast<UINT>(constants.size() / 4),
-        constants.data(), 0);
+    cmd->SetGraphicsRoot32BitConstants(kPushConstantsParam,
+                                       static_cast<UINT>(constants.size() / 4),
+                                       constants.data(), 0);
   }
   cmd->SetGraphicsRootDescriptorTable(kInputsParam, table.gpu);
   cmd->SetGraphicsRootDescriptorTable(kSamplerParam, sampler);

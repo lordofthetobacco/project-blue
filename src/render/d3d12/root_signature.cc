@@ -68,7 +68,8 @@ RootSignature::RootSignature(ID3D12Device* device, const RootLayout& layout,
         out.Descriptor = {
             .ShaderRegister = param.shader_register,
             .RegisterSpace = param.space,
-            .Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
+            .Flags =
+                D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
         break;
       case RootParamKind::kTable:
         for (uint32_t r = 0; r < param.range_count; ++r) {
@@ -78,7 +79,8 @@ RootSignature::RootSignature(ID3D12Device* device, const RootLayout& layout,
               .NumDescriptors = range.count,
               .BaseShaderRegister = range.first_register,
               .RegisterSpace = param.space,
-              .Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
+              .Flags =
+                  D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
               .OffsetInDescriptorsFromTableStart = range.table_offset,
           };
         }
@@ -112,12 +114,13 @@ RootSignature::RootSignature(ID3D12Device* device, const RootLayout& layout,
       .pParameters = params.data(),
       .NumStaticSamplers = 0,
       .pStaticSamplers = nullptr,
-      .Flags = (uses_input_assembler
-                    ? D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
-                    : D3D12_ROOT_SIGNATURE_FLAG_NONE) |
-               D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
-               D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
-               D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS,
+      .Flags =
+          (uses_input_assembler
+               ? D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
+               : D3D12_ROOT_SIGNATURE_FLAG_NONE) |
+          D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+          D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+          D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS,
   };
   Microsoft::WRL::ComPtr<ID3DBlob> blob;
   Microsoft::WRL::ComPtr<ID3DBlob> error;
@@ -125,8 +128,9 @@ RootSignature::RootSignature(ID3D12Device* device, const RootLayout& layout,
       D3D12SerializeVersionedRootSignature(&desc, &blob, &error);
   if (FAILED(result)) {
     const std::string_view message =
-        error ? std::string_view(static_cast<const char*>(error->GetBufferPointer()),
-                                 error->GetBufferSize())
+        error ? std::string_view(
+                    static_cast<const char*>(error->GetBufferPointer()),
+                    error->GetBufferSize())
               : std::string_view();
     core::log::Fatal("Root signature serialization failed: {} {}",
                      HrToString(result), message);

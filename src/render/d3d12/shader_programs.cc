@@ -14,8 +14,8 @@
 #include "core/path.h"
 #include "core/result.h"
 #include "platform/file_system.h"
-#include "render/shader_manifest.h"
 #include "render/d3d12/d3d12_context.h"
+#include "render/shader_manifest.h"
 
 #if BLUE_SHADER_HOT_RELOAD
 #include "shader/slang_compiler.h"
@@ -118,9 +118,10 @@ std::vector<std::byte> ShaderPrograms::LoadBlob(
   const std::string path = core::JoinPath(blob_dir_, file_name);
   const auto bytes = platform::ReadFile(path, kMaxBlobBytes);
   if (!bytes.ok()) {
-    core::log::Fatal("Cannot read the shader blob {} ({}); build the "
-                     "blue_shaders target",
-                     path, platform::ToString(bytes.error()));
+    core::log::Fatal(
+        "Cannot read the shader blob {} ({}); build the "
+        "blue_shaders target",
+        path, platform::ToString(bytes.error()));
   }
   // A DXIL container starts with the tag "DXBC".
   std::vector<std::byte> dxil = bytes.value();
@@ -191,10 +192,9 @@ void ShaderPrograms::ReloadChanged() {
     }
     const ShaderProgramInfo& info = ShaderProgramInfoOf(program.id);
     CompiledProgram compiled;
-    std::optional<shader::ShaderError> error =
-        CompileStage(*compiler_, info, program.source_path,
-                     shader::ShaderStage::kVertex, compiled.vertex,
-                     compiled.dependencies);
+    std::optional<shader::ShaderError> error = CompileStage(
+        *compiler_, info, program.source_path, shader::ShaderStage::kVertex,
+        compiled.vertex, compiled.dependencies);
     if (!error && !info.fragment_entry.empty()) {
       error = CompileStage(*compiler_, info, program.source_path,
                            shader::ShaderStage::kFragment, compiled.fragment,

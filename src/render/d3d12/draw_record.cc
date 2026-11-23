@@ -79,9 +79,8 @@ void RecordDrawList(ID3D12GraphicsCommandList* cmd,
       bound_mesh = &mesh;
     }
     if (entry.item != pushed_item) {
-      cmd->SetGraphicsRoot32BitConstants(kPushConstantsParam,
-                                         kDrawConstantCount, &item.transform,
-                                         0);
+      cmd->SetGraphicsRoot32BitConstants(
+          kPushConstantsParam, kDrawConstantCount, &item.transform, 0);
       pushed_item = entry.item;
     }
     Mesh::DrawRange(cmd, entry.first_index, entry.index_count);

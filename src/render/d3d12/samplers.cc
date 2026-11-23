@@ -39,19 +39,21 @@ Descriptor Create(const D3d12Context& context, const D3D12_SAMPLER_DESC& desc) {
 }  // namespace
 
 Samplers::Samplers(const D3d12Context& context, float max_anisotropy) {
-  D3D12_SAMPLER_DESC material =
-      SamplerDesc(D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+  D3D12_SAMPLER_DESC material = SamplerDesc(D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                            D3D12_TEXTURE_ADDRESS_MODE_WRAP);
   if (max_anisotropy > 1.0f) {
     material.Filter = D3D12_FILTER_ANISOTROPIC;
-    material.MaxAnisotropy = static_cast<UINT>(std::clamp(
-        std::lround(max_anisotropy), 1L,
-        static_cast<long>(D3D12_MAX_MAXANISOTROPY)));
+    material.MaxAnisotropy = static_cast<UINT>(
+        std::clamp(std::lround(max_anisotropy), 1L,
+                   static_cast<long>(D3D12_MAX_MAXANISOTROPY)));
   }
   material_ = Create(context, material);
-  linear_clamp_ = Create(context, SamplerDesc(D3D12_FILTER_MIN_MAG_MIP_LINEAR,
-                                              D3D12_TEXTURE_ADDRESS_MODE_CLAMP));
-  nearest_clamp_ = Create(context, SamplerDesc(D3D12_FILTER_MIN_MAG_MIP_POINT,
-                                               D3D12_TEXTURE_ADDRESS_MODE_CLAMP));
+  linear_clamp_ =
+      Create(context, SamplerDesc(D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                  D3D12_TEXTURE_ADDRESS_MODE_CLAMP));
+  nearest_clamp_ =
+      Create(context, SamplerDesc(D3D12_FILTER_MIN_MAG_MIP_POINT,
+                                  D3D12_TEXTURE_ADDRESS_MODE_CLAMP));
   D3D12_SAMPLER_DESC shadow =
       SamplerDesc(D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,
                   D3D12_TEXTURE_ADDRESS_MODE_BORDER);

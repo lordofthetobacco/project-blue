@@ -58,7 +58,8 @@ Swapchain::Swapchain(const D3d12Context& context, HWND window,
       .AlphaMode = DXGI_ALPHA_MODE_IGNORE,
       .Flags = flags_,
   };
-  swapchain_ = CreateSwapchain(context.factory(), context.queue(), window, desc);
+  swapchain_ =
+      CreateSwapchain(context.factory(), context.queue(), window, desc);
   CheckHr(swapchain_->SetMaximumFrameLatency(kFramesInFlight));
   frame_latency_waitable_ = swapchain_->GetFrameLatencyWaitableObject();
   AcquireBuffers();
@@ -102,8 +103,8 @@ void Swapchain::ReleaseBuffers() {
 void Swapchain::Resize(core::Extent2D extent) {
   extent_ = {std::max(extent.width, 1u), std::max(extent.height, 1u)};
   ReleaseBuffers();
-  CheckHr(swapchain_->ResizeBuffers(kBufferCount, extent_.width,
-                                    extent_.height, kBufferFormat, flags_));
+  CheckHr(swapchain_->ResizeBuffers(kBufferCount, extent_.width, extent_.height,
+                                    kBufferFormat, flags_));
   AcquireBuffers();
 }
 

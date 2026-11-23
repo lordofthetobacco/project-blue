@@ -37,7 +37,8 @@ uint32_t FirstScopeQuery(size_t frame, GpuScope scope) {
 GpuTimer::GpuTimer(const D3d12Context& context)
     : readback_(context, uint64_t{kQueryCount} * sizeof(uint64_t),
                 Buffer::Access::kReadback, L"blue gpu timer readback"),
-      ms_per_tick_(1000.0 / static_cast<double>(context.timestamp_frequency())) {
+      ms_per_tick_(1000.0 /
+                   static_cast<double>(context.timestamp_frequency())) {
   const D3D12_QUERY_HEAP_DESC desc{
       .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
       .Count = kQueryCount,
@@ -58,8 +59,7 @@ void GpuTimer::Collect(size_t frame) {
       last_ms_[scope] = std::nullopt;  // The scope did not run in this frame.
       continue;
     }
-    const uint32_t first =
-        FirstScopeQuery(frame, static_cast<GpuScope>(scope));
+    const uint32_t first = FirstScopeQuery(frame, static_cast<GpuScope>(scope));
     const uint64_t begin = ticks[first];
     const uint64_t end = ticks[first + 1];
     last_ms_[scope] =
@@ -96,11 +96,10 @@ void GpuTimer::EndFrame(ID3D12GraphicsCommandList* cmd, size_t frame) {
       ++scope;
     }
     const uint32_t query = FirstScopeQuery(frame, static_cast<GpuScope>(first));
-    cmd->ResolveQueryData(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query,
-                          static_cast<uint32_t>(scope - first) *
-                              kQueriesPerScope,
-                          readback_.resource(),
-                          uint64_t{query} * sizeof(uint64_t));
+    cmd->ResolveQueryData(
+        heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query,
+        static_cast<uint32_t>(scope - first) * kQueriesPerScope,
+        readback_.resource(), uint64_t{query} * sizeof(uint64_t));
   }
 }
 

@@ -26,31 +26,31 @@ constexpr UINT kVertexCount = 3;
 SkyboxPass::SkyboxPass(const D3d12Context& context, ShaderPrograms& programs,
                        const RootSignature& root_signature,
                        const FrameGlobals& frame_globals,
-                       const Environment& environment,
-                       const Samplers& samplers)
+                       const Environment& environment, const Samplers& samplers)
     : context_(context),
       root_signature_(root_signature),
       params_(SceneRootParams::Of(root_signature.layout(), kSkyBindings)),
       frame_globals_(frame_globals),
       environment_(environment),
       samplers_(samplers) {
-  programs.Add(ShaderProgram::kSkybox, [this](std::span<const std::byte> vertex,
-                                              std::span<const std::byte> pixel) {
-    GraphicsPipelineDesc desc;
-    desc.root_signature = root_signature_.get();
-    desc.vertex = vertex;
-    desc.pixel = pixel;
-    desc.rtv_formats[0] = RenderTargets::kHdrFormat;
-    desc.rtv_count = 1;
-    desc.dsv_format = RenderTargets::kDepthFormat;
-    // Only where nothing was drawn: the depth there is still the clear value
-    // 0, which the triangle at depth 0 equals.
-    desc.depth_test = true;
-    desc.depth_write = false;
-    desc.depth_func = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-    desc.name = L"blue skybox pipeline";
-    pipeline_ = CreateGraphicsPipeline(context_.device(), desc);
-  });
+  programs.Add(ShaderProgram::kSkybox,
+               [this](std::span<const std::byte> vertex,
+                      std::span<const std::byte> pixel) {
+                 GraphicsPipelineDesc desc;
+                 desc.root_signature = root_signature_.get();
+                 desc.vertex = vertex;
+                 desc.pixel = pixel;
+                 desc.rtv_formats[0] = RenderTargets::kHdrFormat;
+                 desc.rtv_count = 1;
+                 desc.dsv_format = RenderTargets::kDepthFormat;
+                 // Only where nothing was drawn: the depth there is still the
+                 // clear value 0, which the triangle at depth 0 equals.
+                 desc.depth_test = true;
+                 desc.depth_write = false;
+                 desc.depth_func = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+                 desc.name = L"blue skybox pipeline";
+                 pipeline_ = CreateGraphicsPipeline(context_.device(), desc);
+               });
 }
 
 void SkyboxPass::Draw(const FrameContext& ctx) const {

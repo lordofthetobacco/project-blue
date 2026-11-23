@@ -30,6 +30,15 @@ class D3d12Context;
 //          GPU-based validation reports reading any single-mip view while
 //          mip 0 of the same resource is a render target (the last upsample)
 //          as a hazard, so the levels are separate resources.
+//   selection_mask  R8_UNORM coverage of the selected draws, which the
+//                   overlay pass outlines (editor only)
+//   velocity  R10G10B10A2_UNORM blur vectors of the motion-blurred draw
+//             items (shaders/motion_blur.slang, EncodeBlur; the bit layout
+//             of Vulkan's A2B10G10R10_UNORM_PACK32)
+//   motion_tiles   R16G16_FLOAT, one texel per motion_tile_size() square of
+//                  pixels: the longest blur vector in it
+//   motion_source  R16G16B16A16_FLOAT copy of the part of hdr the motion
+//                  blur reads while it writes hdr (not a render target)
 // Between frames every target is PIXEL_SHADER_RESOURCE (every bloom level) but
 // depth, which is DEPTH_READ | PIXEL_SHADER_RESOURCE. Created through a
 // clear or discard (placed render targets must be initialized before use).
@@ -42,11 +51,19 @@ class RenderTargets {
   static constexpr DXGI_FORMAT kSsaoRawFormat = DXGI_FORMAT_R16G16_FLOAT;
   static constexpr DXGI_FORMAT kSsaoFormat = DXGI_FORMAT_R8_UNORM;
   static constexpr DXGI_FORMAT kBloomFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  static constexpr DXGI_FORMAT kSelectionMaskFormat = DXGI_FORMAT_R8_UNORM;
+  static constexpr DXGI_FORMAT kVelocityFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+  static constexpr DXGI_FORMAT kMotionTileFormat = DXGI_FORMAT_R16G16_FLOAT;
   // Most bloom mips; fewer for tiny outputs.
   static constexpr uint32_t kMaxBloomLevels = 6;
   // Linear radiance where nothing (not even the sky) is drawn: what the
   // scene pass clears hdr to (its optimized clear value).
   static constexpr float kHdrClear[4] = {0.015f, 0.018f, 0.022f, 1.0f};
+  // "No motion" in the velocity target: a zero blur vector (0.5 in the
+  // encoding) and no coverage (shaders/motion_blur.slang, EncodeBlur).
+  static constexpr float kNoMotion[4] = {0.5f, 0.5f, 0.0f, 0.0f};
+  // What the overlay pass clears the selection mask to: not selected.
+  static constexpr float kNotSelected[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   // The state of the depth target between passes that only read it.
   static constexpr D3D12_RESOURCE_STATES kDepthReadState =
       D3D12_RESOURCE_STATE_DEPTH_READ |
@@ -79,10 +96,19 @@ class RenderTargets {
     return {std::max(half_extent_.width >> level, 1u),
             std::max(half_extent_.height >> level, 1u)};
   }
+  [[nodiscard]] Image& selection_mask() { return selection_mask_; }
+  [[nodiscard]] Image& velocity() { return velocity_; }
+  [[nodiscard]] Image& motion_tiles() { return motion_tiles_; }
+  [[nodiscard]] Image& motion_source() { return motion_source_; }
+  // Pixels per side of a motion_tiles() texel: the largest blur radius,
+  // MotionBlurMaxRadius() of the height.
+  [[nodiscard]] int motion_tile_size() const { return motion_tile_size_; }
   [[nodiscard]] uint64_t size_bytes() const {
     return hdr_.size_bytes() + depth_.size_bytes() + ldr_.size_bytes() +
            ssao_raw_.size_bytes() + ssao_blur_.size_bytes() +
-           ssao_.size_bytes() + bloom_bytes();
+           ssao_.size_bytes() + bloom_bytes() + selection_mask_.size_bytes() +
+           velocity_.size_bytes() + motion_tiles_.size_bytes() +
+           motion_source_.size_bytes();
   }
 
  private:
@@ -104,7 +130,19 @@ class RenderTargets {
   Image ssao_blur_;
   Image ssao_;
   std::vector<Image> bloom_;
+  Image selection_mask_;
+  Image velocity_;
+  Image motion_tiles_;
+  Image motion_source_;
+  int motion_tile_size_ = 1;
 };
+
+// Returns a depth target of `extent` in kDepthFormat (an R32_TYPELESS
+// resource with a DSV, a read-only DSV and an R32_FLOAT staging SRV),
+// cleared to reversed-Z infinity and left in kDepthReadState; call between
+// frames.
+[[nodiscard]] Image MakeDepthTarget(const D3d12Context& context,
+                                    core::Extent2D extent, const wchar_t* name);
 
 // Returns a render target of `extent` in `format` (views in `format`, a
 // staging SRV, and with `shader_visible` one for ImGui), cleared to `clear`

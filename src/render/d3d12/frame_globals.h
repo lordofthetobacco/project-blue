@@ -31,8 +31,8 @@ struct SceneRootParams {
 
   // Returns the indices of `layout`; `pass_set` is the pass set the layout
   // was made with (empty: none).
-  [[nodiscard]] static SceneRootParams Of(const RootLayout& layout,
-                                          std::span<const BindingDesc> pass_set);
+  [[nodiscard]] static SceneRootParams Of(
+      const RootLayout& layout, std::span<const BindingDesc> pass_set);
 };
 
 // What one view of one frame binds as the frame set: its FrameUniforms in the

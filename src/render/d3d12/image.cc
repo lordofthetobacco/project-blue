@@ -64,8 +64,8 @@ Image::Image(const D3d12Context& context, const ImageDesc& desc)
   const D3D12_CLEAR_VALUE* clear =
       desc.clear_value ? &*desc.clear_value : nullptr;
   CheckHr(context.allocator()->CreateResource(
-      &allocation_desc, &resource_desc, desc.initial_state, clear,
-      &allocation_, __uuidof(ID3D12Resource), nullptr));
+      &allocation_desc, &resource_desc, desc.initial_state, clear, &allocation_,
+      __uuidof(ID3D12Resource), nullptr));
   allocation_->GetResource()->SetName(desc.name);
   size_bytes_ = allocation_->GetSize();
 }
@@ -171,7 +171,8 @@ size_t Image::AddLayerDsv(DXGI_FORMAT format, uint32_t layer) {
   desc.Format = format;
   desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
   desc.Flags = D3D12_DSV_FLAG_NONE;
-  desc.Texture2DArray = {.MipSlice = 0, .FirstArraySlice = layer, .ArraySize = 1};
+  desc.Texture2DArray = {
+      .MipSlice = 0, .FirstArraySlice = layer, .ArraySize = 1};
   context_->device()->CreateDepthStencilView(resource(), &desc, dsv.cpu);
   layer_dsvs_.push_back(dsv);
   return layer_dsvs_.size() - 1;

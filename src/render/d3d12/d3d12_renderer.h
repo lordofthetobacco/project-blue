@@ -22,7 +22,6 @@
 #include "material/material.h"
 #include "platform/window.h"
 #include "render/backend.h"
-#include "render/draw_list.h"
 #include "render/d3d12/buffer.h"
 #include "render/d3d12/d3d12_context.h"
 #include "render/d3d12/draw_record.h"
@@ -35,7 +34,12 @@
 #include "render/d3d12/mesh.h"
 #include "render/d3d12/passes/bloom_pass.h"
 #include "render/d3d12/passes/depth_prepass.h"
+#include "render/d3d12/passes/frame_context.h"
 #include "render/d3d12/passes/mesh_pass.h"
+#include "render/d3d12/passes/motion_blur_pass.h"
+#include "render/d3d12/passes/overlay_pass.h"
+#include "render/d3d12/passes/reticle_pass.h"
+#include "render/d3d12/passes/scope_lens_pass.h"
 #include "render/d3d12/passes/shadow_pass.h"
 #include "render/d3d12/passes/skybox_pass.h"
 #include "render/d3d12/passes/ssao_pass.h"
@@ -47,6 +51,7 @@
 #include "render/d3d12/swapchain.h"
 #include "render/d3d12/texture_cache.h"
 #include "render/d3d12/upload_ring.h"
+#include "render/draw_list.h"
 #include "render/frame_config.h"
 #include "render/frame_plan.h"
 #include "render/gpu_scope.h"
@@ -65,10 +70,17 @@
 //   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
 //   ssao                 SsaoPass          depth -> ssao (half res, blurred)
+//   scope view           RecordScopeView() the scene from a scope's camera
+//                        -> the scope picture (depth pre-pass, meshes, sky)
 //   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
-//                        SkyboxPass -> EndScenePass
+//                        SkyboxPass, the sights (ReticlePass, ScopeLensPass)
+//                        -> EndScenePass
+//   motion blur          MotionBlurPass    weapon blur of hdr; the sights are
+//                        then drawn after it (ResumeScenePass) so they stay
+//                        sharp
 //   bloom                BloomPass         hdr -> bloom mip chain
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
+//   overlay              OverlayPass       editor lines and selection -> ldr
 //   present              FullscreenPass(present): ldr -> the window output
 //                        (FXAA), or -> the editor viewport image
 //   ui                   ImGui (imgui_impl_dx12) on the window output; the
@@ -76,29 +88,28 @@
 //   readbacks            copies for RequestViewportReadback() /
 //                        RequestOutputReadback()
 //
-// Not yet (package D4): the scope picture, the sights, weapon motion blur
-// and the editor overlay; frames that ask for them render without them.
-//
 // The visible submeshes are culled and sorted once per frame by the shared
 // DrawList and recorded by RecordDrawList() (draw_record.h). The frame set
 // (FrameUniforms, shadow map, environment, BRDF LUT, AO) is FrameGlobals';
-// the image-based lighting is Environment's.
+// the image-based lighting is Environment's. A scope view is culled by its
+// own frustum into a second DrawList and gets its own frame set.
 //
 // Headless (RendererOptions::window null) there is no swapchain: an
 // offscreen R8G8B8A8_UNORM_SRGB output image of RendererOptions::
 // headless_extent stands in for the swapchain buffer.
 //
-// States between frames: hdr, ldr, the environment images and the viewport
-// image are PIXEL_SHADER_RESOURCE, the depth target DEPTH_READ |
-// PIXEL_SHADER_RESOURCE, uploaded textures PIXEL | NON_PIXEL_SHADER_RESOURCE,
-// the swapchain buffers PRESENT; every pass transitions what it uses through
-// Image::Transition() (exact per-resource tracking, design §4.1).
+// States between frames: hdr, ldr, the environment images, the scope picture
+// and the viewport image are PIXEL_SHADER_RESOURCE, the depth targets (the
+// scene's and the scope's) DEPTH_READ | PIXEL_SHADER_RESOURCE, uploaded
+// textures PIXEL | NON_PIXEL_SHADER_RESOURCE, the swapchain buffers PRESENT;
+// every pass transitions what it uses through Image::Transition() (exact
+// per-resource tracking, design §4.1).
 
 namespace blue::render::d3d12 {
 
 // The Direct3D 12 backend of render::Renderer. Every public function has the
-// contract of the Renderer function of the same name (render/renderer.h);
-// the effects not drawn yet are listed above. Created by
+// contract of the Renderer function of the same name (render/renderer.h).
+// Created by
 // CreateD3d12Renderer(). Neither copyable nor movable. Not thread-safe.
 class D3d12Renderer final : public RendererBackend {
  public:
@@ -279,12 +290,19 @@ class D3d12Renderer final : public RendererBackend {
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
   void ResizeViewport(core::Extent2D size);
+  // Creates the scope picture and depth (kMaxScopeResolution square) on the
+  // first frame with a scope.
+  void EnsureScopeTargets();
+  // The scope's picture: depth pre-pass and scene pass of `scope_ctx`.
+  void RecordScopeView(const FrameContext& scope_ctx) const;
+  // The reflex sight and the scope's eyepiece, inside the scene pass.
+  void DrawSights(const FrameContext& ctx) const;
   [[nodiscard]] bool RebuildSwapchain();
   // The body of DrawFrame() and DrawViewportFrame().
   void DrawFrameTo(const SceneView& view, ImDrawData* ui, Output output);
   // Records the window output's UI (and, for kViewport, its clear).
-  void RecordUi(ID3D12GraphicsCommandList* cmd, ImDrawData* ui,
-                Output output, D3D12_CPU_DESCRIPTOR_HANDLE target);
+  void RecordUi(ID3D12GraphicsCommandList* cmd, ImDrawData* ui, Output output,
+                D3D12_CPU_DESCRIPTOR_HANDLE target);
   // Records the copy of `resource` (in COPY_SOURCE) for every readback of
   // `source` not recorded yet.
   void RecordReadbacks(ID3D12GraphicsCommandList* cmd, ReadbackSource source,
@@ -314,8 +332,8 @@ class D3d12Renderer final : public RendererBackend {
   MaterialSystem materials_;
   ShaderPrograms shader_programs_;
   RootSignature fullscreen_root_;
-  // The scene families (frame set + material / sky / scope set); the scope
-  // one is used from package D4 on.
+  // The scene families (frame set + material / sky / scope set); the
+  // material one also serves the programs that read the frame set only.
   RootSignature scene_material_root_;
   RootSignature scene_sky_root_;
   RootSignature scene_scope_root_;
@@ -327,6 +345,8 @@ class D3d12Renderer final : public RendererBackend {
   // The meshes and materials as the draw list reads them.
   DrawListSource draw_source_{materials_, meshes_};
   DrawList draw_list_;
+  // The scope view's draw list (FramePlan::scope_picture).
+  DrawList scope_draw_list_;
   // World-space bounds of the current frame's draw items (parallel to
   // SceneView::draws); a member to reuse its allocation.
   std::vector<camera::Aabb> world_bounds_;
@@ -335,8 +355,12 @@ class D3d12Renderer final : public RendererBackend {
   SsaoPass ssao_pass_;
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
+  ReticlePass reticle_pass_;
+  ScopeLensPass scope_lens_pass_;
+  MotionBlurPass motion_blur_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
+  OverlayPass overlay_pass_;
   FullscreenPass present_pass_;
   // The present pass into the editor viewport image; created by the first
   // PrepareViewport().
@@ -349,6 +373,10 @@ class D3d12Renderer final : public RendererBackend {
 
   // The window output when headless.
   Image output_image_;
+  // The scope's picture (HDR) and its depth, kMaxScopeResolution square;
+  // empty until the first frame with a scope (EnsureScopeTargets()).
+  Image scope_picture_;
+  Image scope_depth_;
   // Editor viewport output (PrepareViewport()); empty in the game.
   Image viewport_image_;
   mutable ViewportImage viewport_;

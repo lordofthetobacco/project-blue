@@ -7,6 +7,7 @@
 #include "core/extent.h"
 #include "render/d3d12/d3d12_context.h"
 #include "render/d3d12/image.h"
+#include "render/motion_blur_math.h"
 #include "render/texture_types.h"
 
 namespace blue::render::d3d12 {
@@ -18,7 +19,10 @@ constexpr float kWhite[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 // Reversed-Z: infinity is 0 (DepthPrepass clears to it).
 constexpr float kDepthClear = 0.0f;
 
-Image MakeDepthTarget(const D3d12Context& context, core::Extent2D extent) {
+}  // namespace
+
+Image MakeDepthTarget(const D3d12Context& context, core::Extent2D extent,
+                      const wchar_t* name) {
   D3D12_CLEAR_VALUE clear{};
   clear.Format = RenderTargets::kDepthFormat;
   clear.DepthStencil = {.Depth = kDepthClear, .Stencil = 0};
@@ -27,7 +31,7 @@ Image MakeDepthTarget(const D3d12Context& context, core::Extent2D extent) {
                         .flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
                         .initial_state = D3D12_RESOURCE_STATE_DEPTH_WRITE,
                         .clear_value = clear,
-                        .name = L"blue scene depth"});
+                        .name = name});
   image.CreateDsv(RenderTargets::kDepthFormat);
   image.CreateSrv(DXGI_FORMAT_R32_FLOAT, /*shader_visible=*/false);
   context.SubmitImmediate([&](ID3D12GraphicsCommandList* cmd) {
@@ -38,8 +42,6 @@ Image MakeDepthTarget(const D3d12Context& context, core::Extent2D extent) {
   });
   return image;
 }
-
-}  // namespace
 
 Image MakeColorTarget(const D3d12Context& context, core::Extent2D extent,
                       DXGI_FORMAT format, D3D12_RESOURCE_STATES state,
@@ -74,7 +76,7 @@ void RenderTargets::Resize(core::Extent2D extent) {
   hdr_ = MakeColorTarget(context_, extent_, kHdrFormat,
                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kHdrClear,
                          false, L"blue hdr");
-  depth_ = MakeDepthTarget(context_, extent_);
+  depth_ = MakeDepthTarget(context_, extent_, L"blue scene depth");
   ldr_ = MakeColorTarget(context_, extent_, kLdrFormat,
                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kBlack,
                          false, L"blue ldr");
@@ -97,6 +99,25 @@ void RenderTargets::Resize(core::Extent2D extent) {
                                      kBloomFormat, kRead, kBlack, false,
                                      L"blue bloom"));
   }
+
+  selection_mask_ =
+      MakeColorTarget(context_, extent_, kSelectionMaskFormat, kRead,
+                      kNotSelected, false, L"blue selection mask");
+  motion_tile_size_ = MotionBlurMaxRadius(extent_.height);
+  const auto tile_size = static_cast<uint32_t>(motion_tile_size_);
+  velocity_ = MakeColorTarget(context_, extent_, kVelocityFormat, kRead,
+                              kNoMotion, false, L"blue velocity");
+  motion_tiles_ = MakeColorTarget(
+      context_,
+      {(extent_.width + tile_size - 1) / tile_size,
+       (extent_.height + tile_size - 1) / tile_size},
+      kMotionTileFormat, kRead, kBlack, false, L"blue motion tiles");
+  // Only copied into and sampled: no render target, no initialization.
+  motion_source_ = Image(context_, {.extent = extent_,
+                                    .format = kHdrFormat,
+                                    .initial_state = kRead,
+                                    .name = L"blue motion source"});
+  motion_source_.CreateSrv(kHdrFormat, /*shader_visible=*/false);
 }
 
 }  // namespace blue::render::d3d12

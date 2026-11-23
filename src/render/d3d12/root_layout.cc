@@ -44,7 +44,8 @@ void AddSet(RootLayout& layout, uint32_t space,
   }
   std::array<BindingDesc, kMaxSetBindings> sorted{};
   std::copy(bindings.begin(), bindings.end(), sorted.begin());
-  std::sort(sorted.begin(), sorted.begin() + static_cast<ptrdiff_t>(bindings.size()),
+  std::sort(sorted.begin(),
+            sorted.begin() + static_cast<ptrdiff_t>(bindings.size()),
             [](const BindingDesc& a, const BindingDesc& b) {
               return a.binding < b.binding;
             });

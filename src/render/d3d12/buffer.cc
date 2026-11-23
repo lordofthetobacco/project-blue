@@ -40,10 +40,9 @@ Buffer::Buffer(const D3d12Context& context, uint64_t size, Access access,
       .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
       .Flags = D3D12_RESOURCE_FLAG_NONE,
   };
-  CheckHr(context.allocator()->CreateResource(&allocation_desc, &desc, state,
-                                              nullptr, &allocation_,
-                                              __uuidof(ID3D12Resource),
-                                              nullptr));
+  CheckHr(context.allocator()->CreateResource(
+      &allocation_desc, &desc, state, nullptr, &allocation_,
+      __uuidof(ID3D12Resource), nullptr));
   allocation_->GetResource()->SetName(name);
   if (access != Access::kGpuOnly) {
     // An empty read range: the CPU reads nothing it did not ask for.

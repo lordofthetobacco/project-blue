@@ -25,8 +25,10 @@ namespace blue::render::d3d12 {
 
 namespace {
 
-static_assert(BLUE_FRAME_ENVIRONMENT_BINDING == BLUE_FRAME_SHADOW_MAP_BINDING + 1 &&
-                  BLUE_FRAME_BRDF_LUT_BINDING == BLUE_FRAME_SHADOW_MAP_BINDING + 2 &&
+static_assert(BLUE_FRAME_ENVIRONMENT_BINDING ==
+                      BLUE_FRAME_SHADOW_MAP_BINDING + 1 &&
+                  BLUE_FRAME_BRDF_LUT_BINDING ==
+                      BLUE_FRAME_SHADOW_MAP_BINDING + 2 &&
                   BLUE_FRAME_AO_BINDING == BLUE_FRAME_SHADOW_MAP_BINDING + 3,
               "The frame textures are one contiguous table");
 
@@ -44,7 +46,10 @@ Image MakeDefault(const D3d12Context& context, DXGI_FORMAT format,
   const std::vector<std::span<const std::byte>> subresources(layers, texel);
   return CreateSampledImage(
       context,
-      {.extent = {1, 1}, .layers = layers, .cube = cube, .format = format,
+      {.extent = {1, 1},
+       .layers = layers,
+       .cube = cube,
+       .format = format,
        .name = name},
       {.extent = 1, .bytes = static_cast<uint32_t>(texel.size())},
       subresources);
@@ -55,14 +60,12 @@ Image MakeDefault(const D3d12Context& context, DXGI_FORMAT format,
 SceneRootParams SceneRootParams::Of(const RootLayout& layout,
                                     std::span<const BindingDesc> pass_set) {
   SceneRootParams params;
-  params.frame_uniforms =
-      Require(layout.Find(RootParamKind::kCbv, kFrameSet,
-                          BLUE_FRAME_UNIFORMS_BINDING),
-              "frame uniforms");
-  params.frame_textures =
-      Require(layout.Find(RootParamKind::kTable, kFrameSet,
-                          BLUE_FRAME_SHADOW_MAP_BINDING),
-              "frame textures");
+  params.frame_uniforms = Require(
+      layout.Find(RootParamKind::kCbv, kFrameSet, BLUE_FRAME_UNIFORMS_BINDING),
+      "frame uniforms");
+  params.frame_textures = Require(layout.Find(RootParamKind::kTable, kFrameSet,
+                                              BLUE_FRAME_SHADOW_MAP_BINDING),
+                                  "frame textures");
   params.shadow_sampler =
       Require(layout.Find(RootParamKind::kSamplerTable, kFrameSet,
                           BLUE_FRAME_SHADOW_SAMPLER_BINDING),
@@ -77,9 +80,9 @@ SceneRootParams SceneRootParams::Of(const RootLayout& layout,
           layout.Find(RootParamKind::kSamplerTable, kPassSet, binding.binding),
           "pass sampler");
     } else if (params.pass_table == UINT32_MAX) {
-      params.pass_table = Require(
-          layout.Find(RootParamKind::kTable, kPassSet, binding.binding),
-          "pass table");
+      params.pass_table =
+          Require(layout.Find(RootParamKind::kTable, kPassSet, binding.binding),
+                  "pass table");
     }
   }
   return params;
@@ -92,10 +95,9 @@ FrameGlobals::FrameGlobals(const D3d12Context& context,
   constexpr std::array<std::byte, 8> kZeroHalf4{};
   constexpr std::array<std::byte, 4> kZeroHalf2{};
   constexpr std::array<std::byte, 1> kWhiteR8{std::byte{255}};
-  default_shadow_map_ =
-      MakeDefault(context, DXGI_FORMAT_R32_FLOAT,
-                  std::as_bytes(std::span(&kLit, 1)), BLUE_CASCADE_COUNT,
-                  false, L"blue default shadow map");
+  default_shadow_map_ = MakeDefault(
+      context, DXGI_FORMAT_R32_FLOAT, std::as_bytes(std::span(&kLit, 1)),
+      BLUE_CASCADE_COUNT, false, L"blue default shadow map");
   default_cube_ = MakeDefault(context, DXGI_FORMAT_R16G16B16A16_FLOAT,
                               kZeroHalf4, 6, true, L"blue default cube");
   default_lut_ = MakeDefault(context, DXGI_FORMAT_R16G16_FLOAT, kZeroHalf2, 1,

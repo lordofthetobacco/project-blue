@@ -65,10 +65,10 @@ void StagingUploader::CopyToBuffer(std::span<const std::byte> bytes,
 }
 
 void StagingUploader::CopyToTexture(std::span<const std::byte> packed,
-                                    ID3D12Resource* texture,
-                                    DXGI_FORMAT format, CopyBlock block,
-                                    core::Extent2D extent, uint32_t level,
-                                    uint32_t layer, uint32_t mip_levels) {
+                                    ID3D12Resource* texture, DXGI_FORMAT format,
+                                    CopyBlock block, core::Extent2D extent,
+                                    uint32_t level, uint32_t layer,
+                                    uint32_t mip_levels) {
   const MipFootprint footprint = MipFootprintOf(block, extent, level);
   const size_t expected = size_t{footprint.row_bytes} * footprint.row_count;
   if (block.bytes == 0 || packed.size_bytes() != expected) {
@@ -85,8 +85,8 @@ void StagingUploader::CopyToTexture(std::span<const std::byte> packed,
       .SubresourceIndex = level + layer * mip_levels,
   };
   // Footprints of block-compressed formats cover whole blocks.
-  const uint32_t aligned_width = static_cast<uint32_t>(
-      AlignUp(footprint.width, block.extent));
+  const uint32_t aligned_width =
+      static_cast<uint32_t>(AlignUp(footprint.width, block.extent));
 
   uint32_t row = 0;
   while (row < footprint.row_count) {

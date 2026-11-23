@@ -94,7 +94,11 @@ add_library(blue_render_d3d12 STATIC
     passes/bloom_pass.cc
     passes/depth_prepass.cc
     passes/mesh_pass.cc
+    passes/motion_blur_pass.cc
+    passes/overlay_pass.cc
+    passes/reticle_pass.cc
     passes/scene_pass.cc
+    passes/scope_lens_pass.cc
     passes/shadow_pass.cc
     passes/skybox_pass.cc
     passes/ssao_pass.cc

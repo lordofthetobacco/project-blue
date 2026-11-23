@@ -48,7 +48,8 @@ MipFootprint MipFootprintOf(CopyBlock block, core::Extent2D extent,
   MipFootprint footprint;
   footprint.width = std::max(extent.width >> level, 1u);
   footprint.height = std::max(extent.height >> level, 1u);
-  const uint32_t blocks_wide = (footprint.width + block.extent - 1) / block.extent;
+  const uint32_t blocks_wide =
+      (footprint.width + block.extent - 1) / block.extent;
   footprint.row_count = (footprint.height + block.extent - 1) / block.extent;
   footprint.row_bytes = blocks_wide * block.bytes;
   footprint.row_pitch =
@@ -64,10 +65,11 @@ void RepackRows(const MipFootprint& footprint,
                 std::span<std::byte> upload) {
   const size_t packed_bytes = size_t{footprint.row_bytes} * footprint.row_count;
   if (packed.size() != packed_bytes || upload.size() < footprint.upload_bytes) {
-    core::log::Fatal("Texture rows: {} bytes given for {} rows of {} bytes, {} "
-                     "bytes to write them into ({} needed)",
-                     packed.size(), footprint.row_count, footprint.row_bytes,
-                     upload.size(), footprint.upload_bytes);
+    core::log::Fatal(
+        "Texture rows: {} bytes given for {} rows of {} bytes, {} "
+        "bytes to write them into ({} needed)",
+        packed.size(), footprint.row_count, footprint.row_bytes, upload.size(),
+        footprint.upload_bytes);
   }
   if (footprint.row_pitch == footprint.row_bytes) {
     std::memcpy(upload.data(), packed.data(), packed_bytes);

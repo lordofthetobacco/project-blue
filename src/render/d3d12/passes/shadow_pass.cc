@@ -34,7 +34,8 @@ constexpr float kDepthClearValue = 1.0f;
 // viewport is not flipped: clip y = -1 is texel row 0. Direct3D puts clip
 // y = +1 there, so the cascades are rendered mirrored in y (no culling, so
 // the winding does not matter) and both backends store the same texels.
-const glm::mat4 kVulkanRows = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
+const glm::mat4 kVulkanRows =
+    glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
 
 }  // namespace
 
@@ -122,9 +123,8 @@ void ShadowPass::Record(const FrameContext& ctx) {
       ++ctx.stats.shadow_draw_calls;
       const glm::mat4 light_model_view_proj =
           kVulkanRows * cascade.view_projection * item.transform;
-      cmd->SetGraphicsRoot32BitConstants(kPushConstantsParam,
-                                         kDrawConstantCount,
-                                         &light_model_view_proj, 0);
+      cmd->SetGraphicsRoot32BitConstants(
+          kPushConstantsParam, kDrawConstantCount, &light_model_view_proj, 0);
       const Mesh& mesh = meshes_[mesh_index];
       mesh.Bind(cmd);
       Mesh::DrawRange(cmd, 0, mesh.index_count());

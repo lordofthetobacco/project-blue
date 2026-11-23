@@ -61,8 +61,8 @@ void DepthPrepass::CreatePipelines(bool masked,
     desc.pixel = pixel;
     desc.input_layout = VertexInputLayout();
     desc.dsv_format = RenderTargets::kDepthFormat;
-    desc.cull = IsDoubleSided(variant) ? D3D12_CULL_MODE_NONE
-                                       : D3D12_CULL_MODE_BACK;
+    desc.cull =
+        IsDoubleSided(variant) ? D3D12_CULL_MODE_NONE : D3D12_CULL_MODE_BACK;
     desc.depth_test = true;
     desc.depth_write = true;
     desc.depth_func = D3D12_COMPARISON_FUNC_GREATER;
@@ -73,7 +73,7 @@ void DepthPrepass::CreatePipelines(bool masked,
 
 void DepthPrepass::Record(const FrameContext& ctx) const {
   ID3D12GraphicsCommandList* cmd = ctx.cmd;
-  Image& depth = ctx.targets.depth();
+  Image& depth = ctx.scene_depth;
   {
     BarrierBatch barriers(cmd);
     depth.Transition(barriers, D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -82,7 +82,7 @@ void DepthPrepass::Record(const FrameContext& ctx) const {
   cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, kDepthClearValue, 0,
                              0, nullptr);
   cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
-  SetViewport(cmd, ctx.targets.extent());
+  SetViewport(cmd, ctx.scene_extent);
   cmd->SetGraphicsRootSignature(root_signature_.get());
   frame_globals_.Bind(cmd, params_, ctx.frame);
 

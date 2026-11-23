@@ -104,8 +104,8 @@ void MaterialSystem::Release(MaterialId id) {
 Descriptor MaterialSystem::Write(const Material& material) {
   DescriptorHeaps& heaps = context_.descriptors();
   const Descriptor table = heaps.AllocateTable();
-  const uint64_t slot =
-      (table.index - DescriptorHeaps::kSingleCount) / DescriptorHeaps::kTableSize;
+  const uint64_t slot = (table.index - DescriptorHeaps::kSingleCount) /
+                        DescriptorHeaps::kTableSize;
 
   const MaterialParams params = MakeMaterialParams(material.desc);
   std::memcpy(static_cast<std::byte*>(params_.mapped()) + slot * kParamsStride,
@@ -126,11 +126,13 @@ Descriptor MaterialSystem::Write(const Material& material) {
       &textures_.ImageOr(uploaded.occlusion, DefaultTexture::kWhite),
       &textures_.ImageOr(uploaded.emissive, DefaultTexture::kWhite),
   };
-  const D3D12_DESCRIPTOR_HEAP_TYPE type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  const D3D12_DESCRIPTOR_HEAP_TYPE type =
+      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
   const UINT increment = device->GetDescriptorHandleIncrementSize(type);
   for (uint32_t i = 0; i < kMaterialTextureCount; ++i) {
     const D3D12_CPU_DESCRIPTOR_HANDLE destination{
-        table.cpu.ptr + size_t{BLUE_MATERIAL_BASE_COLOR_BINDING + i} * increment};
+        table.cpu.ptr +
+        size_t{BLUE_MATERIAL_BASE_COLOR_BINDING + i} * increment};
     device->CopyDescriptorsSimple(1, destination, images[i]->staging_srv(),
                                   type);
   }

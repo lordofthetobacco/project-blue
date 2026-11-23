@@ -9,21 +9,22 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
 
 #include "camera/frustum.h"
+#include "camera/projection.h"
 #include "core/extent.h"
-#include "lighting/cascades.h"
-#include "render/frame_plan.h"
-#include "render/frame_uniforms.h"
 #include "core/log.h"
 #include "core/path.h"
+#include "lighting/cascades.h"
 #include "platform/window.h"
 #include "render/binding_layout.h"
 #include "render/d3d12/buffer.h"
@@ -36,6 +37,8 @@
 #include "render/d3d12/root_layout.h"
 #include "render/d3d12/staging_upload.h"
 #include "render/frame_config.h"
+#include "render/frame_plan.h"
+#include "render/frame_uniforms.h"
 #include "render/gpu_scope.h"
 #include "render/memory_stats.h"
 #include "render/renderer.h"
@@ -51,6 +54,9 @@ namespace {
 constexpr DXGI_FORMAT kOutputFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 // The editor's window output under the UI.
 constexpr float kUiBackground[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+// m, the scope camera's near plane: nothing of the world is that close to
+// the objective.
+constexpr float kScopeNearPlane = 0.05f;
 
 // Neutral grey dielectric: what kDefaultMaterial looks like.
 material::MaterialDesc DefaultMaterialDesc() {
@@ -115,15 +121,24 @@ D3d12Renderer::D3d12Renderer(const RendererOptions& options,
                  frame_globals_, materials_, meshes_),
       skybox_pass_(context_, shader_programs_, scene_sky_root_, frame_globals_,
                    environment_, samplers_),
+      reticle_pass_(context_, shader_programs_, scene_material_root_,
+                    frame_globals_),
+      scope_lens_pass_(context_, shader_programs_, scene_scope_root_,
+                       frame_globals_, samplers_, upload_ring_),
+      motion_blur_pass_(context_, shader_programs_, scene_material_root_,
+                        fullscreen_root_, frame_globals_, samplers_, meshes_),
       bloom_pass_(context_, shader_programs_, fullscreen_root_, samplers_),
       tonemap_pass_(context_, shader_programs_, fullscreen_root_, samplers_),
+      overlay_pass_(context_, shader_programs_, scene_material_root_,
+                    fullscreen_root_, frame_globals_, samplers_, meshes_),
       present_pass_(context_, shader_programs_, fullscreen_root_,
                     ShaderProgram::kPresent, kOutputFormat),
       gpu_timer_(context_) {
   if (!swapchain_) {
-    output_image_ = MakeColorTarget(context_, headless_extent_, kOutputFormat,
-                               D3D12_RESOURCE_STATE_COPY_SOURCE, kUiBackground,
-                               false, L"blue headless output");
+    output_image_ =
+        MakeColorTarget(context_, headless_extent_, kOutputFormat,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE, kUiBackground, false,
+                        L"blue headless output");
     core::log::Info("Headless output {} x {}", headless_extent_.width,
                     headless_extent_.height);
   }
@@ -255,10 +270,10 @@ MemoryStats D3d12Renderer::memory_stats() const {
   stats.texture_count = static_cast<uint32_t>(textures.count);
   stats.mesh_bytes = mesh_bytes_;
   stats.mesh_count = mesh_count_;
-  stats.render_target_bytes = targets_.size_bytes() +
-                              shadow_pass_.map().size_bytes() +
-                              viewport_image_.size_bytes() +
-                              output_image_.size_bytes();
+  stats.render_target_bytes =
+      targets_.size_bytes() + shadow_pass_.map().size_bytes() +
+      viewport_image_.size_bytes() + output_image_.size_bytes() +
+      scope_picture_.size_bytes() + scope_depth_.size_bytes();
   stats.environment_bytes = environment_.size_bytes();
   for (const Retired<Mesh>& retired : retired_meshes_) {
     stats.retired_bytes += retired.object.size_bytes();
@@ -311,9 +326,8 @@ ViewportImage D3d12Renderer::PrepareViewport(core::Extent2D requested) {
   const core::Extent2D size{std::max(requested.width, 1u),
                             std::max(requested.height, 1u)};
   if (!viewport_present_pass_) {
-    viewport_present_pass_.emplace(context_, shader_programs_,
-                                   fullscreen_root_, ShaderProgram::kPresent,
-                                   kOutputFormat);
+    viewport_present_pass_.emplace(context_, shader_programs_, fullscreen_root_,
+                                   ShaderProgram::kPresent, kOutputFormat);
   }
   const bool changed = size.width != viewport_.extent.width ||
                        size.height != viewport_.extent.height;
@@ -332,8 +346,8 @@ void D3d12Renderer::ResizeViewport(core::Extent2D size) {
   // PIXEL_SHADER_RESOURCE.
   viewport_image_ =
       MakeColorTarget(context_, size, kOutputFormat,
-                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kUiBackground,
-                 /*shader_visible=*/true, L"blue viewport output");
+                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kUiBackground,
+                      /*shader_visible=*/true, L"blue viewport output");
   targets_.Resize(size);
   BindTargets();
   viewport_ = {
@@ -342,6 +356,63 @@ void D3d12Renderer::ResizeViewport(core::Extent2D size) {
       .generation = viewport_.generation + 1};
   viewport_resized_at_ = frame_serial_;
   core::log::Info("Viewport output {} x {}", size.width, size.height);
+}
+
+void D3d12Renderer::EnsureScopeTargets() {
+  if (scope_picture_.valid()) {
+    return;
+  }
+  const core::Extent2D extent{kMaxScopeResolution, kMaxScopeResolution};
+  // Optimized for the scene pass's clear (of the view's corner only).
+  scope_picture_ =
+      MakeColorTarget(context_, extent, RenderTargets::kHdrFormat,
+                      D3D12_RESOURCE_STATE_COPY_DEST, RenderTargets::kHdrClear,
+                      /*shader_visible=*/false, L"blue scope picture");
+  // Black outside the corner the views render into, like the Vulkan
+  // backend (the lens filters across the corner's edge): copied from a
+  // zeroed buffer, since clearing to anything but the optimized value is a
+  // debug-layer warning.
+  const uint32_t row_pitch = static_cast<uint32_t>(AlignUp(
+      uint64_t{extent.width} * 8, kRowPitchAlignment));  // RGBA16F texels.
+  Buffer zeros(context_, uint64_t{row_pitch} * extent.height,
+               Buffer::Access::kUpload, L"blue scope picture zeros");
+  std::memset(zeros.mapped(), 0, zeros.size());
+  context_.SubmitImmediate([&](ID3D12GraphicsCommandList* cmd) {
+    const D3D12_TEXTURE_COPY_LOCATION destination{
+        .pResource = scope_picture_.resource(),
+        .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        .SubresourceIndex = 0,
+    };
+    const D3D12_TEXTURE_COPY_LOCATION source{
+        .pResource = zeros.resource(),
+        .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        .PlacedFootprint = {.Offset = 0,
+                            .Footprint = {.Format = RenderTargets::kHdrFormat,
+                                          .Width = extent.width,
+                                          .Height = extent.height,
+                                          .Depth = 1,
+                                          .RowPitch = row_pitch}},
+    };
+    cmd->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    BarrierBatch barriers(cmd);
+    scope_picture_.Transition(barriers, ScopeLensPass::kPictureState);
+  });
+  scope_depth_ = MakeDepthTarget(context_, extent, L"blue scope depth");
+  scope_lens_pass_.BindPicture(scope_picture_);
+  core::log::Info("Scope picture target {} x {}", extent.width, extent.height);
+}
+
+void D3d12Renderer::RecordScopeView(const FrameContext& scope_ctx) const {
+  depth_prepass_.Record(scope_ctx);
+  BeginScenePass(scope_ctx);
+  mesh_pass_.Draw(scope_ctx);
+  skybox_pass_.Draw(scope_ctx);
+  EndScenePass(scope_ctx);
+}
+
+void D3d12Renderer::DrawSights(const FrameContext& ctx) const {
+  reticle_pass_.Draw(ctx);
+  scope_lens_pass_.Draw(ctx);
 }
 
 void D3d12Renderer::DrawFrame(const SceneView& view, ImDrawData* ui) {
@@ -499,15 +570,70 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
 
   const FrameContext ctx{
       .cmd = cmd,
+      .frame_index = frame_index_,
       .view = view,
       .plan = plan,
       .targets = targets_,
+      .scene_hdr = targets_.hdr(),
+      .scene_depth = targets_.depth(),
+      .scene_extent = scene_extent,
       .frame = frame_globals_.Prepare(uniforms, upload_ring_),
       .draw_list = draw_list_.entries(),
       .world_bounds = world_bounds_,
       .cascades = cascades,
       .stats = stats_,
   };
+
+  // The scope's picture: the same scene from the scope's camera, culled by
+  // its own frustum, into the corner of the scope target its size needs.
+  std::optional<SceneView> scope_view;
+  std::optional<FrameContext> scope_ctx;
+  RenderStats scope_stats;
+  if (plan.scope) {
+    EnsureScopeTargets();
+  }
+  if (plan.scope_picture) {
+    const ScopeSight& scope = *view.scope;
+    const uint32_t size = std::clamp(scope.resolution, 1u, kMaxScopeResolution);
+    const core::Extent2D scope_extent{size, size};
+    scope_view.emplace(view);
+    scope_view->scope.reset();
+    scope_view->sight.reset();
+    scope_view->post.weapon_motion_blur_enabled = false;
+    Camera& camera = scope_view->camera;
+    camera.view = scope.view;
+    camera.position = scope.position;
+    camera.vertical_fov_radians =
+        2.0f * std::atan(std::max(scope.camera_tangent, 1.0e-5f));
+    camera.near_plane = kScopeNearPlane;
+    camera.projection = camera::ReversedInfinitePerspective(
+        camera.vertical_fov_radians, 1.0f, kScopeNearPlane);
+    camera.previous_view_projection = camera.projection * camera.view;
+    const camera::Frustum scope_frustum(camera.projection * camera.view);
+    scope_draw_list_.Build(*scope_view, world_bounds_, scope_frustum,
+                           draw_source_.resources(), scope_stats,
+                           /*scope_view=*/true);
+    FrameUniforms scope_uniforms =
+        MakeFrameUniforms(*scope_view, cascades, plan.shadows, scope_extent);
+    environment_.FillUniforms(scope_uniforms);
+    scope_ctx.emplace(FrameContext{
+        .cmd = cmd,
+        .frame_index = frame_index_,
+        .view = *scope_view,
+        .plan = plan,
+        .targets = targets_,
+        .scene_hdr = scope_picture_,
+        .scene_depth = scope_depth_,
+        .scene_extent = scope_extent,
+        .scene_hdr_read_state = ScopeLensPass::kPictureState,
+        .frame = frame_globals_.Prepare(scope_uniforms, upload_ring_),
+        .draw_list = scope_draw_list_.entries(),
+        .world_bounds = world_bounds_,
+        .cascades = cascades,
+        .stats = scope_stats,
+    });
+  }
+
   // Times `record` as `scope`.
   const auto timed = [&](GpuScope scope, const auto& record) {
     gpu_timer_.Begin(cmd, frame_index_, scope);
@@ -523,16 +649,41 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   } else {
     ssao_pass_.Record(ctx);  // At most a one-time clear to white.
   }
+  if (scope_ctx) {  // FramePlan::scope_picture.
+    timed(GpuScope::kScopeView, [&] { RecordScopeView(*scope_ctx); });
+  }
+  // The weapon motion blur rewrites the HDR image, so the sights are drawn
+  // after it: the reflex dot and the scope's picture must stay sharp, and
+  // they are tonemapped once with the rest of the image.
+  const std::optional<D3D12_RECT> motion_blur_area =
+      plan.motion_blur ? MotionBlurPass::FindArea(ctx) : std::nullopt;
   timed(GpuScope::kScene, [&] {
     BeginScenePass(ctx);
     mesh_pass_.Draw(ctx);
     skybox_pass_.Draw(ctx);
+    if (!motion_blur_area) {
+      DrawSights(ctx);
+    }
     EndScenePass(ctx);
   });
+  if (motion_blur_area) {
+    timed(GpuScope::kMotionBlur, [&] {
+      motion_blur_pass_.Record(ctx, *motion_blur_area);
+      if (view.sight || view.scope) {
+        ResumeScenePass(ctx);
+        DrawSights(ctx);
+        EndScenePass(ctx);
+      }
+    });
+  }
   if (plan.bloom) {
     timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });
   }
   timed(GpuScope::kTonemap, [&] { tonemap_pass_.Record(ctx); });
+  if (plan.overlay) {
+    timed(GpuScope::kOverlay, [&] { overlay_pass_.Record(ctx); });
+  }
+  stats_.scope_draw_calls = scope_stats.draw_calls;
 
   // The window output: the swapchain buffer, or the headless output image.
   ID3D12Resource* window_resource = nullptr;
@@ -604,8 +755,7 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
       output_image_.Transition(barriers, copy);
     }
   }
-  RecordReadbacks(cmd, ReadbackSource::kOutput, window_resource,
-                  window_extent);
+  RecordReadbacks(cmd, ReadbackSource::kOutput, window_resource, window_extent);
   if (swapchain_) {
     BarrierBatch barriers(cmd);
     swapchain_->Transition(barriers, D3D12_RESOURCE_STATE_PRESENT);
@@ -633,7 +783,8 @@ void D3d12Renderer::AllocateImGuiDescriptor(ImGui_ImplDX12_InitInfo* info,
                                             D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
                                             D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
   const auto* renderer = static_cast<const D3d12Renderer*>(info->UserData);
-  const Descriptor descriptor = renderer->context_.descriptors().AllocateSingle();
+  const Descriptor descriptor =
+      renderer->context_.descriptors().AllocateSingle();
   *cpu = descriptor.cpu;
   *gpu = descriptor.gpu;
 }

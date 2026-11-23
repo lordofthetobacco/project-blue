@@ -9,6 +9,7 @@
 #include <span>
 
 #include "core/extent.h"
+#include "render/d3d12/pipeline.h"
 #include "render/d3d12/root_signature.h"
 #include "render/d3d12/shader_programs.h"
 #include "render/shader_manifest.h"
@@ -32,10 +33,11 @@ class D3d12Context;
 // Borrows `context` and `root_signature`. Neither copyable nor movable.
 class FullscreenPass {
  public:
-  // With `additive`, the result is added to the target (ONE + ONE).
+  // `blend` says how the result is combined with the target.
   FullscreenPass(const D3d12Context& context, ShaderPrograms& programs,
                  const RootSignature& root_signature, ShaderProgram program,
-                 DXGI_FORMAT target_format, bool additive = false);
+                 DXGI_FORMAT target_format,
+                 BlendMode blend = BlendMode::kReplace);
 
   FullscreenPass(const FullscreenPass&) = delete;
   FullscreenPass& operator=(const FullscreenPass&) = delete;

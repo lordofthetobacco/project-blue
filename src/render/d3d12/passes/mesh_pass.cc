@@ -48,8 +48,8 @@ MeshPass::MeshPass(const D3d12Context& context, ShaderPrograms& programs,
       desc.rtv_formats[0] = RenderTargets::kHdrFormat;
       desc.rtv_count = 1;
       desc.dsv_format = RenderTargets::kDepthFormat;
-      desc.cull = IsDoubleSided(variant) ? D3D12_CULL_MODE_NONE
-                                         : D3D12_CULL_MODE_BACK;
+      desc.cull =
+          IsDoubleSided(variant) ? D3D12_CULL_MODE_NONE : D3D12_CULL_MODE_BACK;
       desc.depth_test = true;
       desc.depth_write = false;
       desc.depth_func = D3D12_COMPARISON_FUNC_EQUAL;

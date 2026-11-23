@@ -57,8 +57,8 @@ DescriptorHeaps::DescriptorHeaps(ID3D12Device* device)
                false, L"blue staging view heap"),
       shader_visible_(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                       kShaderVisibleCount, true, L"blue view heap"),
-      samplers_(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCount,
-                true, L"blue sampler heap"),
+      samplers_(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCount, true,
+                L"blue sampler heap"),
       view_increment_(device->GetDescriptorHandleIncrementSize(
           D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) {
   null_texture_srv_ = AllocateStaging();
@@ -124,8 +124,7 @@ void DescriptorHeaps::RetireSingle(const Descriptor& descriptor,
 }
 
 Descriptor DescriptorHeaps::SingleAt(D3D12_CPU_DESCRIPTOR_HANDLE cpu) const {
-  const size_t index =
-      (cpu.ptr - shader_visible_.cpu(0).ptr) / view_increment_;
+  const size_t index = (cpu.ptr - shader_visible_.cpu(0).ptr) / view_increment_;
   if (cpu.ptr < shader_visible_.cpu(0).ptr || index >= kSingleCount) {
     core::log::Fatal("Not a single shader-visible descriptor");
   }
@@ -150,9 +149,10 @@ void DescriptorHeaps::RetireTable(const Descriptor& descriptor,
 Descriptor DescriptorHeaps::AllocateTransient(uint32_t count) {
   const std::optional<uint64_t> offset = transient_.Allocate(count, 1);
   if (!offset) {
-    core::log::Fatal("Out of transient descriptors ({} of {} in use, {} "
-                     "asked for)",
-                     transient_.used(), transient_.capacity(), count);
+    core::log::Fatal(
+        "Out of transient descriptors ({} of {} in use, {} "
+        "asked for)",
+        transient_.used(), transient_.capacity(), count);
   }
   return ShaderVisible(kSingleCount + kTableSize * kTableCount +
                        static_cast<uint32_t>(*offset));
@@ -163,7 +163,8 @@ Descriptor DescriptorHeaps::AllocateSampler() {
     core::log::Fatal("Out of samplers ({})", kSamplerCount);
   }
   const uint32_t index = samplers_used_++;
-  return {.index = index, .cpu = samplers_.cpu(index), .gpu = samplers_.gpu(index)};
+  return {
+      .index = index, .cpu = samplers_.cpu(index), .gpu = samplers_.gpu(index)};
 }
 
 void DescriptorHeaps::BeginFrame(uint64_t frame_serial) {

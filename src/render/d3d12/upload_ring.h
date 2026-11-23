@@ -42,7 +42,8 @@ class UploadRing {
   // Returns `size` bytes for the frame being recorded.
   [[nodiscard]] UploadAllocation Allocate(uint64_t size);
   // Copies `bytes` into the ring and returns their GPU address.
-  [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS Push(std::span<const std::byte> bytes);
+  [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS Push(
+      std::span<const std::byte> bytes);
 
   // Starts recording frame `frame_serial` (the frames up to frame_serial -
   // kFramesInFlight have finished).

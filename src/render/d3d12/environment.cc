@@ -66,7 +66,9 @@ std::span<const std::byte> Bytes(const T& value) {
   return std::as_bytes(std::span(&value, 1));
 }
 
-uint32_t MipSize(uint32_t size, uint32_t mip) { return std::max(size >> mip, 1u); }
+uint32_t MipSize(uint32_t size, uint32_t mip) {
+  return std::max(size >> mip, 1u);
+}
 
 // A cube render target with a render target view per mip and face, its
 // staging SRV (TextureCube) and every subresource discarded (initialized),
@@ -126,11 +128,12 @@ Environment::Environment(const D3d12Context& context, ShaderPrograms& programs,
                       ShaderProgram::kEnvPrefilter, kCubeFormat),
       brdf_lut_pass_(context, programs, fullscreen_root,
                      ShaderProgram::kEnvBrdfLut, kLutFormat) {
-  brdf_lut_ = Image(context, {.extent = {kBrdfLutSize, kBrdfLutSize},
-                              .format = kLutFormat,
-                              .flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-                              .initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET,
-                              .name = L"blue brdf lut"});
+  brdf_lut_ =
+      Image(context, {.extent = {kBrdfLutSize, kBrdfLutSize},
+                      .format = kLutFormat,
+                      .flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                      .initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET,
+                      .name = L"blue brdf lut"});
   brdf_lut_.AddRtv(kLutFormat);
   brdf_lut_.CreateSrv(kLutFormat, /*shader_visible=*/false);
   for (uint32_t mip = 0; mip + 1 < source_cube_.mip_levels(); ++mip) {
@@ -168,13 +171,13 @@ void Environment::Set(const asset::ImageDataF& equirect, float intensity,
       lighting::ComputeIrradianceSh9(panorama, 256, sun_.clamp_luminance);
   const std::vector<std::byte> texels = ToRgba(panorama);
   const std::array<std::span<const std::byte>, 1> subresources = {texels};
-  const Image source = CreateSampledImage(
-      context_,
-      {.extent = {static_cast<uint32_t>(panorama.width),
-                  static_cast<uint32_t>(panorama.height)},
-       .format = kEquirectFormat,
-       .name = L"blue equirect"},
-      {.extent = 1, .bytes = 16}, subresources);
+  const Image source =
+      CreateSampledImage(context_,
+                         {.extent = {static_cast<uint32_t>(panorama.width),
+                                     static_cast<uint32_t>(panorama.height)},
+                          .format = kEquirectFormat,
+                          .name = L"blue equirect"},
+                         {.extent = 1, .bytes = 16}, subresources);
 
   const float clamp_luminance = sun_.clamp_luminance;
   const int32_t width = panorama.width;
@@ -204,7 +207,8 @@ void Environment::Set(const asset::ImageDataF& equirect, float intensity,
     }
     {
       BarrierBatch barriers(cmd);
-      sky_cube_.Transition(barriers, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      sky_cube_.Transition(barriers,
+                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     RecordSourceMips(cmd);
     RecordFiltering(cmd);
@@ -223,7 +227,8 @@ void Environment::Set(const asset::ImageDataF& equirect, float intensity,
 
 void Environment::RecordSourceMips(ID3D12GraphicsCommandList* cmd) {
   const uint32_t mips = source_cube_.mip_levels();
-  const D3D12_RESOURCE_STATES kRead = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  const D3D12_RESOURCE_STATES kRead =
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
   for (uint32_t mip = 1; mip < mips; ++mip) {
     {
       // The previous mip becomes readable; this one stays a render target.
@@ -280,7 +285,8 @@ void Environment::RecordFiltering(ID3D12GraphicsCommandList* cmd) {
     }
   }
   BarrierBatch barriers(cmd);
-  specular_cube_.Transition(barriers, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  specular_cube_.Transition(barriers,
+                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
 
 void Environment::GenerateBrdfLut() {
