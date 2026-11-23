@@ -36,7 +36,7 @@ struct GpuPointLight {
     float4 radiance;                // rgb: color * intensity
 };
 
-// Per-frame data, one buffer per frame in flight. Must match FrameUniforms
+// Per-frame data, one buffer per frame in flight and view. Must match FrameUniforms
 // in src/render/frame_uniforms.h (the C++ side asserts every offset; float4
 // and float4x4 members leave no padding, so the layouts are identical).
 struct FrameUniforms {
@@ -60,8 +60,11 @@ struct FrameUniforms {
                                                 // z: max prefiltered mip, w: 1 if bound
     uint4 pointLightCount;                      // x: valid entries of pointLights
     GpuPointLight pointLights[kMaxPointLights]; // Culled on the CPU, unshadowed.
+    metal::float4x4 previousViewProj;           // Last frame's viewProj (motion blur).
+    float4 motionBlur;                          // x: blur scale (0: off), y: max blur
+                                                // length (px), z: max radius (px)
 };
-static_assert(sizeof(FrameUniforms) == 1904,
+static_assert(sizeof(FrameUniforms) == 1984,
               "FrameUniforms must match src/render/frame_uniforms.h");
 
 // The frame's resources, gathered by the entry point (see the top of this

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <glm/vec4.hpp>
 
 #include "camera/frustum.h"
+#include "camera/projection.h"
 #include "core/log.h"
 #include "lighting/cascades.h"
 #include "material/material.h"
@@ -24,6 +26,7 @@
 #include "render/passes/scene_pass.h"
 #include "render/passes/ui_pass.h"
 #include "render/renderer_impl.h"
+#include "render/staging_upload.h"
 
 namespace blue::render {
 
@@ -32,6 +35,10 @@ namespace {
 // The editor viewport image: 8-bit RGBA with the sRGB encoding of the window
 // output (BGRA8Unorm_sRGB), so the UI shows it as the game window would.
 constexpr MTLPixelFormat kViewportFormat = MTLPixelFormatRGBA8Unorm_sRGB;
+
+// m, the scope camera's near plane: nothing of the world is that close to
+// the objective.
+constexpr float kScopeNearPlane = 0.05f;
 
 // Neutral grey dielectric: what kDefaultMaterial looks like.
 material::MaterialDesc DefaultMaterialDesc() {
@@ -67,6 +74,8 @@ RendererImpl::RendererImpl(const platform::Window& window,
       mesh_pass_(context_, shader_programs_, shader_dir_, materials_, meshes_),
       skybox_pass_(context_, shader_programs_, shader_dir_, environment_),
       reticle_pass_(context_, shader_programs_, shader_dir_),
+      scope_lens_pass_(context_, shader_programs_, shader_dir_),
+      motion_blur_pass_(context_, shader_programs_, shader_dir_, meshes_),
       bloom_pass_(context_, shader_programs_, shader_dir_),
       tonemap_pass_(context_, shader_programs_, shader_dir_),
       overlay_pass_(context_, shader_programs_, shader_dir_, meshes_),
@@ -86,6 +95,7 @@ RendererImpl::~RendererImpl() { context_.WaitIdle(); }
 void RendererImpl::BindTargets() {
   frame_globals_.BindAmbientOcclusion(targets_.ssao().texture());
   ssao_pass_.BindTargets(targets_, samplers_);
+  motion_blur_pass_.BindTargets(targets_, samplers_);
   bloom_pass_.BindTargets(targets_, samplers_);
   tonemap_pass_.BindTargets(targets_, samplers_);
   overlay_pass_.BindTargets(targets_, samplers_);
@@ -95,8 +105,11 @@ void RendererImpl::BindTargets() {
   }
 }
 
-MeshId RendererImpl::UploadMesh(const asset::MeshData& data) {
-  meshes_.emplace_back(context_, data);
+MeshId RendererImpl::UploadMesh(std::span<const asset::Vertex> vertices,
+                                std::span<const asset::Index> indices) {
+  const Mesh& mesh = meshes_.emplace_back(context_, vertices, indices);
+  mesh_bytes_ += mesh.size_bytes();
+  mesh_count_ += 1;
   return static_cast<MeshId>(meshes_.size() - 1);
 }
 
@@ -105,6 +118,8 @@ void RendererImpl::ReleaseMesh(MeshId id) {
   if (index >= meshes_.size() || !meshes_[index].resident()) {
     return;
   }
+  mesh_bytes_ -= meshes_[index].size_bytes();
+  mesh_count_ -= 1;
   // The moved-from mesh left in the slot is the tombstone (resident() false).
   retired_meshes_.push_back(
       {.object = std::move(meshes_[index]), .last_frame = frame_serial_});
@@ -132,6 +147,73 @@ void RendererImpl::DestroyRetired() {
   std::erase_if(retired_images_, [&](const Retired<Image>& retired) {
     return done(retired.last_frame);
   });
+}
+
+void RendererImpl::DestroyRetiredIfIdle() {
+  if (retired_meshes_.empty() && retired_images_.empty()) {
+    return;
+  }
+  for (const Frame& frame : frames_) {
+    if (frame.command_buffer != nil &&
+        frame.command_buffer.status != MTLCommandBufferStatusCompleted) {
+      return;
+    }
+  }
+  retired_meshes_.clear();
+  retired_images_.clear();
+}
+
+void RendererImpl::FlushReleases() {
+  if (retired_meshes_.empty() && retired_images_.empty()) {
+    return;
+  }
+  WaitForFramesInFlight();
+  retired_meshes_.clear();
+  retired_images_.clear();
+}
+
+MemoryStats RendererImpl::memory_stats() const {
+  MemoryStats stats;
+  const TextureStats textures = textures_.stats();
+  stats.texture_bytes = textures.bytes;
+  stats.texture_count = static_cast<uint32_t>(textures.count);
+  stats.mesh_bytes = mesh_bytes_;
+  stats.mesh_count = mesh_count_;
+  stats.render_target_bytes =
+      targets_.size_bytes() + viewport_image_.size_bytes() +
+      shadow_pass_.map_bytes() + scope_picture_.size_bytes() +
+      scope_depth_.size_bytes();
+  stats.environment_bytes = environment_.size_bytes();
+  // Usually empty, a handful of entries right after a release.
+  for (const Retired<Mesh>& retired : retired_meshes_) {
+    stats.retired_bytes += retired.object.size_bytes();
+  }
+  for (const Retired<Image>& retired : retired_images_) {
+    stats.retired_bytes += retired.object.size_bytes();
+  }
+  const MetalContext::StagingUsage staging = context_.staging_usage();
+  stats.staging_budget_bytes = 2 * StagingUploader::kChunkBytes;
+  stats.staging_peak_bytes = staging.peak;
+  stats.staging_current_bytes = staging.current;
+
+  // Metal's one pool of GPU memory: what the process has allocated on the
+  // device and what the system recommends as its limit.
+  const id<MTLDevice> device = context_.device();
+  const uint64_t allocated = device.currentAllocatedSize;
+  const uint64_t recommended = device.recommendedMaxWorkingSetSize;
+  stats.heap_count = 1;
+  stats.driver_budget = true;
+  stats.heaps[0] = {
+      .heap_size = recommended,
+      .device_local = true,
+      .block_bytes = allocated,
+      .allocation_bytes = stats.texture_bytes + stats.mesh_bytes +
+                          stats.render_target_bytes + stats.environment_bytes +
+                          stats.retired_bytes + stats.staging_current_bytes,
+      .usage = allocated,
+      .budget = recommended,
+  };
+  return stats;
 }
 
 void RendererImpl::SetVsync(bool enabled) {
@@ -283,6 +365,8 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   // Autoreleased Metal objects of the frame (descriptors, the drawable) are
   // freed at its end, not whenever the application's run loop drains.
   @autoreleasepool {
+    // Before any early return: skipped frames must not hold released memory.
+    DestroyRetiredIfIdle();
     const core::Extent2D window_size = window_.PixelSize();
     if (window_size.width == 0 || window_size.height == 0) {
       return;  // Minimized: nothing to present to.
@@ -334,6 +418,9 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
         .globals = frame_globals_,
         .view = view,
         .targets = targets_,
+        .scene_hdr = targets_.hdr(),
+        .scene_depth = targets_.depth(),
+        .scene_extent = extent,
         .output_extent = swapchain_.extent(),
         .world_bounds = world_bounds_,
         .camera_frustum = camera_frustum,
@@ -343,7 +430,63 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
         .stats = stats_,
         .timer = gpu_timer_,
     };
-    RecordCommands(ctx, ui, output);
+
+    // The scope's picture: the same scene from the scope's camera, culled by
+    // its own frustum, into the corner of the scope target its size needs.
+    std::optional<SceneView> scope_view;
+    std::optional<camera::Frustum> scope_frustum;
+    std::optional<FrameContext> scope_ctx;
+    RenderStats scope_stats;
+    if (view.scope) {
+      EnsureScopeTargets();
+    }
+    if (view.scope && view.scope->render_picture) {
+      const ScopeSight& scope = *view.scope;
+      const uint32_t size =
+          std::clamp(scope.resolution, 1u, kMaxScopeResolution);
+      const core::Extent2D scope_extent{size, size};
+      scope_view.emplace(view);
+      scope_view->scope.reset();
+      scope_view->sight.reset();
+      scope_view->post.weapon_motion_blur_enabled = false;
+      Camera& camera = scope_view->camera;
+      camera.view = scope.view;
+      camera.position = scope.position;
+      camera.vertical_fov_radians =
+          2.0f * std::atan(std::max(scope.camera_tangent, 1.0e-5f));
+      camera.near_plane = kScopeNearPlane;
+      camera.projection = camera::ReversedInfinitePerspective(
+          camera.vertical_fov_radians, 1.0f, kScopeNearPlane);
+      camera.previous_view_projection = camera.projection * camera.view;
+      scope_frustum.emplace(camera.projection * camera.view);
+      scope_draw_list_.Build(*scope_view, world_bounds_, *scope_frustum,
+                             materials_, meshes_, scope_stats,
+                             /*scope_view=*/true);
+      FrameUniforms scope_uniforms =
+          MakeFrameUniforms(*scope_view, cascades, shadows, scope_extent);
+      environment_.FillUniforms(scope_uniforms);
+      frame_globals_.Write(frame_index_, scope_uniforms, FrameView::kScope);
+      scope_ctx.emplace(FrameContext{
+          .cmd = frame.command_buffer,
+          .frame_index = frame_index_,
+          .globals = frame_globals_,
+          .frame_view = FrameView::kScope,
+          .view = *scope_view,
+          .targets = targets_,
+          .scene_hdr = scope_picture_,
+          .scene_depth = scope_depth_,
+          .scene_extent = scope_extent,
+          .world_bounds = world_bounds_,
+          .camera_frustum = *scope_frustum,
+          .cascades = cascades,
+          .shadows = shadows,
+          .draw_list = scope_draw_list_.entries(),
+          .stats = scope_stats,
+          .timer = gpu_timer_,
+      });
+    }
+    RecordCommands(ctx, scope_ctx ? &*scope_ctx : nullptr, ui, output);
+    stats_.scope_draw_calls = scope_stats.draw_calls;
     if (ctx.drawable != nil) {
       [ctx.cmd presentDrawable:ctx.drawable];
     }
@@ -362,7 +505,54 @@ void RendererImpl::ComputeWorldBounds(const SceneView& view) {
   }
 }
 
-void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
+void RendererImpl::EnsureScopeTargets() {
+  if (scope_picture_.texture() != nil) {
+    return;
+  }
+  const core::Extent2D extent{kMaxScopeResolution, kMaxScopeResolution};
+  scope_picture_ = Image(context_, {.extent = extent,
+                                    .format = RenderTargets::kHdrFormat,
+                                    .usage = MTLTextureUsageRenderTarget |
+                                             MTLTextureUsageShaderRead,
+                                    .label = "Scope picture"});
+  scope_depth_ = Image(context_, {.extent = extent,
+                                  .format = RenderTargets::kDepthFormat,
+                                  .usage = MTLTextureUsageRenderTarget,
+                                  .label = "Scope depth"});
+  // The lens may sample the picture before one was ever rendered (no light
+  // through the scope): give it a defined, black content.
+  MTLRenderPassDescriptor* clear =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  clear.colorAttachments[0].texture = scope_picture_.texture();
+  clear.colorAttachments[0].loadAction = MTLLoadActionClear;
+  clear.colorAttachments[0].storeAction = MTLStoreActionStore;
+  clear.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+  context_.SubmitImmediate([clear](id<MTLCommandBuffer> cmd) {
+    const id<MTLRenderCommandEncoder> encoder =
+        [cmd renderCommandEncoderWithDescriptor:clear];
+    encoder.label = @"Clear scope picture";
+    [encoder endEncoding];
+  });
+  scope_lens_pass_.BindPicture(scope_picture_.texture());
+  core::log::Info("Scope picture target {} x {}", extent.width, extent.height);
+}
+
+void RendererImpl::RecordScopeView(const FrameContext& scope_ctx) {
+  depth_prepass_.Record(scope_ctx);
+  const id<MTLRenderCommandEncoder> encoder = BeginScenePass(scope_ctx);
+  mesh_pass_.Draw(scope_ctx, encoder);
+  skybox_pass_.Draw(scope_ctx, encoder);
+  EndScenePass(encoder);
+}
+
+void RendererImpl::DrawSights(const FrameContext& ctx,
+                              id<MTLRenderCommandEncoder> encoder) const {
+  reticle_pass_.Draw(ctx, encoder);
+  scope_lens_pass_.Draw(ctx, encoder);
+}
+
+void RendererImpl::RecordCommands(FrameContext& ctx,
+                                  const FrameContext* scope_ctx, ImDrawData* ui,
                                   Output output) {
   // Times `record` as `scope`.
   const auto timed = [&](GpuScope scope, const auto& record) {
@@ -380,13 +570,34 @@ void RendererImpl::RecordCommands(FrameContext& ctx, ImDrawData* ui,
   } else {
     ssao_pass_.Record(ctx);  // At most a one-time clear to white.
   }
+  if (scope_ctx != nullptr) {
+    timed(GpuScope::kScopeView, [&] { RecordScopeView(*scope_ctx); });
+  }
+  // The weapon motion blur rewrites the HDR image, so the sights are drawn
+  // after it: the reflex dot and the scope's picture must stay sharp (the
+  // picture is not weapon motion), and they are tonemapped once with the
+  // rest of the image.
+  const std::optional<MTLScissorRect> motion_blur_area =
+      MotionBlurPass::FindArea(ctx);
   timed(GpuScope::kScene, [&] {
     const id<MTLRenderCommandEncoder> encoder = BeginScenePass(ctx);
     mesh_pass_.Draw(ctx, encoder);
     skybox_pass_.Draw(ctx, encoder);
-    reticle_pass_.Draw(ctx, encoder);
+    if (!motion_blur_area) {
+      DrawSights(ctx, encoder);
+    }
     EndScenePass(encoder);
   });
+  if (motion_blur_area) {
+    timed(GpuScope::kMotionBlur, [&] {
+      motion_blur_pass_.Record(ctx, *motion_blur_area);
+      if (ctx.view.sight || ctx.view.scope) {
+        const id<MTLRenderCommandEncoder> encoder = ResumeScenePass(ctx);
+        DrawSights(ctx, encoder);
+        EndScenePass(encoder);
+      }
+    });
+  }
   if (ctx.view.post.bloom_enabled) {
     timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });
   }
@@ -455,8 +666,9 @@ ReadbackStatus Renderer::TakeViewportReadback(uint64_t ticket,
   return impl_->TakeViewportReadback(ticket, pixels);
 }
 
-MeshId Renderer::UploadMesh(const asset::MeshData& data) {
-  return impl_->UploadMesh(data);
+MeshId Renderer::UploadMesh(std::span<const asset::Vertex> vertices,
+                            std::span<const asset::Index> indices) {
+  return impl_->UploadMesh(vertices, indices);
 }
 
 void Renderer::ReleaseMesh(MeshId id) { impl_->ReleaseMesh(id); }
@@ -466,6 +678,8 @@ void Renderer::ReleaseTextures(std::span<const TextureId> ids) {
 }
 
 void Renderer::ReleaseMaterial(MaterialId id) { impl_->materials_.Release(id); }
+
+void Renderer::FlushReleases() { impl_->FlushReleases(); }
 
 ImTextureID Renderer::ui_texture(TextureId id) const {
   // Non-owning: the texture stays alive until ReleaseTextures() of `id` has
@@ -502,6 +716,8 @@ size_t Renderer::material_count() const { return impl_->materials_.count(); }
 TextureStats Renderer::texture_stats() const {
   return impl_->textures_.stats();
 }
+
+MemoryStats Renderer::memory_stats() const { return impl_->memory_stats(); }
 
 void Renderer::SetEnvironment(const asset::ImageDataF& equirect,
                               float intensity, float rotation_radians) {

@@ -4,6 +4,7 @@
 #include "render/metal_types.h"
 
 #include <cstdint>
+#include <span>
 
 #include "asset/mesh_data.h"
 #include "render/buffer.h"
@@ -27,8 +28,10 @@ static_assert(sizeof(asset::Index) == sizeof(uint32_t),
 // Mesh resident in private GPU memory. Move-only. Not thread-safe.
 class Mesh {
  public:
-  // Uploads `data` to the GPU and blocks until the upload has finished.
-  Mesh(const MetalContext& context, const asset::MeshData& data);
+  // Uploads `vertices` and `indices` (borrowed for the call) to the GPU
+  // and blocks until the upload has finished.
+  Mesh(const MetalContext& context, std::span<const asset::Vertex> vertices,
+       std::span<const asset::Index> indices);
 
   Mesh(const Mesh&) = delete;
   Mesh& operator=(const Mesh&) = delete;
@@ -46,6 +49,10 @@ class Mesh {
                  uint32_t index_count) const;
 
   [[nodiscard]] uint32_t index_count() const { return index_count_; }
+  // GPU memory of the vertex and index buffers, in bytes.
+  [[nodiscard]] uint64_t size_bytes() const {
+    return vertex_buffer_.size() + index_buffer_.size();
+  }
   // False once the mesh was moved from (Renderer::ReleaseMesh() leaves such
   // a tombstone in its slot): nothing may be drawn from it.
   [[nodiscard]] bool resident() const {

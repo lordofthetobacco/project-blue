@@ -88,6 +88,19 @@ class World {
   bool SetInstanceTransform(const scene::SceneData& scene,
                             scene::InstanceId id);
 
+  // Removes instance `id` and its descendants from the running world until
+  // the next Build(): their placements draw nothing, their lights get zero
+  // intensity, Pick(), InstanceBounds() and SocketMatrix() skip them and
+  // AppendSelectedDraws() counts no draws for them. The scene data is not
+  // involved (the game uses this for picked-up items; rebuilding brings
+  // them back). One pass over the instances after `id` and the hidden
+  // placements' lights; no allocation. Returns false if `id` is not in the
+  // world; hiding a hidden instance is a no-op that returns true.
+  bool HideInstance(scene::InstanceId id);
+  // Returns true if instance `id` was hidden by HideInstance() (itself or
+  // through an ancestor) since the last Build().
+  [[nodiscard]] bool IsInstanceHidden(scene::InstanceId id) const;
+
   // Overrides the world matrix of instance `id`'s own prefab (dynamic
   // physics bodies; see WorldPhysics::SyncToWorld()). Its nested prefabs
   // follow. Returns false if `id` is not in the world.
@@ -110,7 +123,8 @@ class World {
   void AppendDraws(std::vector<render::DrawItem>& out) const;
   // Appends to `out` the indices (into the vector AppendDraws() appended to,
   // whose size was `first_draw` before) of the draws that belong to the
-  // instances in `selection` or their descendants.
+  // instances in `selection` or their descendants. Allocates nothing but
+  // `out`'s growth.
   void AppendSelectedDraws(std::span<const scene::InstanceId> selection,
                            uint32_t first_draw,
                            std::vector<uint32_t>& out) const;
@@ -160,6 +174,7 @@ class World {
     // Per mesh: submesh draws with overrides applied (views into
     // override_draws_), or empty to use the prefab's own.
     std::vector<std::span<const render::SubmeshDraw>> submeshes;
+    bool hidden = false;  // HideInstance(): drawn and lit no more
   };
 
   struct InstanceEntry {
@@ -168,6 +183,7 @@ class World {
     glm::mat4 world{1.0f};
     int first_placement = 0;  // its own prefab's placement, or -1
     int placement_count = 0;  // own + nested
+    bool hidden = false;      // HideInstance(), on itself or an ancestor
   };
 
   // Implementation in world.cc.
@@ -183,6 +199,9 @@ class World {
   // Refreshes the prefab lights of the placements in [first, first+count).
   void UpdateLights(size_t first, size_t count);
   [[nodiscard]] const InstanceEntry* FindEntry(scene::InstanceId id) const;
+  // Returns true if instance `id` is one of `roots` or below one of them.
+  [[nodiscard]] bool IsInSubtree(
+      scene::InstanceId id, std::span<const scene::InstanceId> roots) const;
 
   PrefabCache& cache_;
   std::vector<Placement> placements_;

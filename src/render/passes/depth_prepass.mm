@@ -82,15 +82,15 @@ void DepthPrepass::Record(const FrameContext& ctx) const {
   MTLRenderPassDescriptor* descriptor =
       [MTLRenderPassDescriptor renderPassDescriptor];
   MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
-  depth.texture = ctx.targets.depth().texture();
+  depth.texture = ctx.scene_depth.texture();
   depth.loadAction = MTLLoadActionClear;
   depth.storeAction = MTLStoreActionStore;
   depth.clearDepth = kDepthClearValue;
 
   const id<MTLRenderCommandEncoder> encoder =
       BeginRenderPass(ctx, descriptor, "depth prepass");
-  SetSceneViewport(encoder, ctx.targets.extent());
-  ctx.globals.Bind(encoder, ctx.frame_index);
+  SetSceneViewport(encoder, ctx.scene_extent);
+  ctx.globals.Bind(encoder, ctx.frame_index, ctx.frame_view);
 
   DrawListPipelines pipelines;
   for (size_t i = 0; i < kMaterialVariantCount; ++i) {

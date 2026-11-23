@@ -11,6 +11,32 @@ namespace {
 // Linear radiance where nothing (not even the sky) is drawn.
 constexpr MTLClearColor kClearColor{0.015, 0.018, 0.022, 1.0};
 
+// Opens an encoder on the context's HDR target, cleared or loaded per
+// `load_action`, with the scene depth loaded, and sets the viewport, the
+// scissor and the frame's globals.
+id<MTLRenderCommandEncoder> BeginHdrPass(const FrameContext& ctx,
+                                         MTLLoadAction load_action,
+                                         const char* label) {
+  MTLRenderPassDescriptor* descriptor =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  MTLRenderPassColorAttachmentDescriptor* color =
+      descriptor.colorAttachments[0];
+  color.texture = ctx.scene_hdr.texture();
+  color.loadAction = load_action;
+  color.storeAction = MTLStoreActionStore;
+  color.clearColor = kClearColor;
+  MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
+  depth.texture = ctx.scene_depth.texture();
+  depth.loadAction = MTLLoadActionLoad;  // Written by the depth pre-pass.
+  depth.storeAction = MTLStoreActionStore;
+
+  const id<MTLRenderCommandEncoder> encoder =
+      BeginRenderPass(ctx, descriptor, label);
+  SetSceneViewport(encoder, ctx.scene_extent);
+  ctx.globals.Bind(encoder, ctx.frame_index, ctx.frame_view);
+  return encoder;
+}
+
 }  // namespace
 
 void SetSceneViewport(id<MTLRenderCommandEncoder> encoder,
@@ -32,24 +58,11 @@ void SetSceneViewport(id<MTLRenderCommandEncoder> encoder,
 }
 
 id<MTLRenderCommandEncoder> BeginScenePass(const FrameContext& ctx) {
-  MTLRenderPassDescriptor* descriptor =
-      [MTLRenderPassDescriptor renderPassDescriptor];
-  MTLRenderPassColorAttachmentDescriptor* color =
-      descriptor.colorAttachments[0];
-  color.texture = ctx.targets.hdr().texture();
-  color.loadAction = MTLLoadActionClear;
-  color.storeAction = MTLStoreActionStore;
-  color.clearColor = kClearColor;
-  MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
-  depth.texture = ctx.targets.depth().texture();
-  depth.loadAction = MTLLoadActionLoad;  // Written by the depth pre-pass.
-  depth.storeAction = MTLStoreActionStore;
+  return BeginHdrPass(ctx, MTLLoadActionClear, "scene");
+}
 
-  const id<MTLRenderCommandEncoder> encoder =
-      BeginRenderPass(ctx, descriptor, "scene");
-  SetSceneViewport(encoder, ctx.targets.extent());
-  ctx.globals.Bind(encoder, ctx.frame_index);
-  return encoder;
+id<MTLRenderCommandEncoder> ResumeScenePass(const FrameContext& ctx) {
+  return BeginHdrPass(ctx, MTLLoadActionLoad, "scene (resumed)");
 }
 
 void EndScenePass(id<MTLRenderCommandEncoder> encoder) {

@@ -105,6 +105,30 @@ class SnapshotHistory {
     return kind;
   }
 
+  // Drops the oldest undo step; returns false when there is none.
+  bool DropOldest() {
+    if (undo_.empty()) {
+      return false;
+    }
+    undo_.pop_front();
+    return true;
+  }
+
+  // Calls `visit(const State&)` for every state the history holds: the undo
+  // steps oldest first, the redo steps, then the open edit's.
+  template <typename Visit>
+  void ForEachState(Visit&& visit) const {
+    for (const Step& step : undo_) {
+      visit(step.state);
+    }
+    for (const Step& step : redo_) {
+      visit(step.state);
+    }
+    if (open_) {
+      visit(open_->state);
+    }
+  }
+
   // Drops every step and any open edit.
   void Clear() {
     undo_.clear();

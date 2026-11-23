@@ -39,14 +39,14 @@ MTLVertexDescriptor* MeshVertexDescriptor() {
   return descriptor;
 }
 
-Mesh::Mesh(const MetalContext& context, const asset::MeshData& data)
-    : vertex_buffer_(CreateGpuBuffer(context,
-                                     std::as_bytes(std::span(data.vertices)),
-                                     "Mesh vertices")),
-      index_buffer_(CreateGpuBuffer(context,
-                                    std::as_bytes(std::span(data.indices)),
-                                    "Mesh indices")),
-      index_count_(static_cast<uint32_t>(data.indices.size())) {}
+Mesh::Mesh(const MetalContext& context,
+           std::span<const asset::Vertex> vertices,
+           std::span<const asset::Index> indices)
+    : vertex_buffer_(
+          CreateGpuBuffer(context, std::as_bytes(vertices), "Mesh vertices")),
+      index_buffer_(
+          CreateGpuBuffer(context, std::as_bytes(indices), "Mesh indices")),
+      index_count_(static_cast<uint32_t>(indices.size())) {}
 
 void Mesh::Bind(id<MTLRenderCommandEncoder> encoder) const {
   [encoder setVertexBuffer:vertex_buffer_.handle()

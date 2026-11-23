@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "render/motion_blur_math.h"
 #include "render/texture_types.h"
 
 namespace blue::render {
@@ -52,6 +53,16 @@ void RenderTargets::Resize(core::Extent2D extent) {
   ssao_ = MakeTarget(context_, half_extent_, kSsaoFormat, "SSAO target");
   selection_mask_ = MakeTarget(context_, extent, kSelectionMaskFormat,
                                "Selection mask target");
+
+  motion_tile_size_ = MotionBlurMaxRadius(extent.height);
+  const auto tile_size = static_cast<uint32_t>(motion_tile_size_);
+  velocity_ = MakeTarget(context_, extent, kVelocityFormat, "Velocity target");
+  motion_tiles_ = MakeTarget(context_,
+                             {(extent.width + tile_size - 1) / tile_size,
+                              (extent.height + tile_size - 1) / tile_size},
+                             kMotionTileFormat, "Motion tiles target");
+  motion_source_ =
+      MakeTarget(context_, extent, kHdrFormat, "Motion blur source");
 
   bloom_mip_views_.clear();
   const uint32_t levels =

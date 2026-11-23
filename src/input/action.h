@@ -46,6 +46,11 @@ enum class Action : uint8_t {
   kToggleFireMode,  // Player only: semi <-> auto.
   kEquipPistol,     // Player only: take out the pistol.
   kEquipRifle,      // Player only: take out the rifle.
+  kInteract,        // Player only: use what the view is on (pick it up).
+  kDropWeapon,      // Player only: throw away the weapon in hand.
+  kZeroUp,          // Player only: the scope's zero one click further.
+  kZeroDown,        // Player only: the scope's zero one click nearer.
+  kInspectWeapon,   // Player only: open / close the weapon inspect screen.
   kCount,
 };
 

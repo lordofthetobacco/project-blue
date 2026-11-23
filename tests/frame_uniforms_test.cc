@@ -5,11 +5,13 @@
 #include <vector>
 
 #include <glm/ext/matrix_transform.hpp>
+#include <glm/mat4x4.hpp>
 #include <glm/trigonometric.hpp>
 
 #include "camera/projection.h"
 #include "core/extent.h"
 #include "render/frame_uniforms.h"
+#include "render/motion_blur_math.h"
 
 namespace blue::render {
 namespace {
@@ -84,6 +86,26 @@ TEST_CASE("Beyond kMaxPointLights the lights dimmest at the camera go") {
 
 TEST_CASE("No point lights gives a zero count") {
   CHECK(Uniforms({}).point_light_count.x == 0);
+}
+
+TEST_CASE("Motion blur uniforms follow the camera, settings and frame") {
+  SceneView view = MakeView({});
+  view.camera.previous_view_projection = glm::mat4(3.0f);
+  view.post.weapon_motion_blur_strength = 2.0f;
+  view.frame_seconds = 1.0f / 60.0f;
+  const core::Extent2D extent{640, 480};
+  const FrameUniforms uniforms = MakeFrameUniforms(view, {}, false, extent);
+  CHECK(uniforms.previous_view_proj == glm::mat4(3.0f));
+  CHECK(uniforms.motion_blur.x == doctest::Approx(2.0f));
+  const auto radius = static_cast<float>(MotionBlurMaxRadius(480));
+  CHECK(uniforms.motion_blur.y == 2.0f * radius);
+  CHECK(uniforms.motion_blur.z == radius);
+
+  view.post.weapon_motion_blur_enabled = false;
+  CHECK(MakeFrameUniforms(view, {}, false, extent).motion_blur.x == 0.0f);
+  view.post.weapon_motion_blur_enabled = true;
+  view.frame_seconds = 0.0f;
+  CHECK(MakeFrameUniforms(view, {}, false, extent).motion_blur.x == 0.0f);
 }
 
 }  // namespace blue::render

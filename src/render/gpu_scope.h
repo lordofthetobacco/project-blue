@@ -13,7 +13,11 @@ enum class GpuScope {
   kShadow,        // The shadow cascades; absent in frames that skip them.
   kDepthPrepass,  // Scene depth of the camera view.
   kSsao,          // Ambient occlusion and its blur; absent when off.
+  kScopeView,     // A rifle scope's picture (depth and shading); absent
+                  // without one.
   kScene,         // The HDR scene pass: meshes, sky and the reflex sight.
+  kMotionBlur,    // Weapon motion blur (and the sight after it); absent when
+                  // skipped.
   kBloom,         // Downsample / upsample chain; absent when off.
   kTonemap,       // Bloom mix, exposure and tonemapping into the LDR image.
   kOverlay,       // Editor debug lines and selection outline on the LDR image.

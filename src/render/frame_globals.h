@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 
 #include "render/buffer.h"
 #include "render/frame_config.h"
@@ -15,10 +16,18 @@
 
 namespace blue::render {
 
+// The views a frame renders with their own uniforms: the camera's and a
+// rifle scope's (SceneView::scope).
+enum class FrameView : uint32_t {
+  kMain = 0,
+  kScope = 1,
+};
+inline constexpr size_t kFrameViewCount = 2;
+
 // The resources every scene shader sees (FrameResources in shaders/common.h),
 // set on an encoder by Bind() (indices in shaders/bindings.h):
 //   kBufferFrame (both stages):  FrameUniforms, one shared buffer per frame
-//                                in flight
+//                                in flight and view
 //   kTextureShadowMap:           cascaded shadow map (depth2d_array)
 //   kTextureEnvironment:         prefiltered environment cube, specular IBL
 //   kTextureBrdfLut:             BRDF lookup table (RG: scale, bias)
@@ -27,7 +36,9 @@ namespace blue::render {
 // The environment and occlusion textures start as 1 x 1 defaults, so shaders
 // can sample them before the passes that produce them exist: a black cube, a
 // zero LUT and white occlusion. The shadow map has no default: the renderer
-// binds ShadowPass's map before recording any frame.
+// binds ShadowPass's map before recording any frame. The scope view shares
+// every texture but the ambient occlusion, which stays the white default
+// (no SSAO in the scope picture).
 // Borrows `samplers`, which must outlive it. Neither copyable nor movable.
 // Not thread-safe.
 class FrameGlobals {
@@ -37,9 +48,10 @@ class FrameGlobals {
   FrameGlobals(const FrameGlobals&) = delete;
   FrameGlobals& operator=(const FrameGlobals&) = delete;
 
-  // Copies `uniforms` into the buffer of `frame`, whose previous use the GPU
-  // must have finished (its command buffer waited on).
-  void Write(size_t frame, const FrameUniforms& uniforms) const;
+  // Copies `uniforms` into the buffer of `frame` and `view`, whose previous
+  // use the GPU must have finished (its command buffer waited on).
+  void Write(size_t frame, const FrameUniforms& uniforms,
+             FrameView view = FrameView::kMain) const;
 
   // The Bind* calls choose what later Bind(encoder, ...) calls set; encoders
   // recorded before keep (and retain) what they were given, so these may be
@@ -50,14 +62,21 @@ class FrameGlobals {
                        id<MTLTexture> brdf_lut);
   void BindAmbientOcclusion(id<MTLTexture> ambient_occlusion);
 
-  // Sets frame `frame`'s uniform buffer, the textures and the samplers on
-  // `encoder`. Call once per encoder: the bindings persist across pipeline
-  // changes.
-  void Bind(id<MTLRenderCommandEncoder> encoder, size_t frame) const;
+  // Sets the uniform buffer of `frame` and `view`, the textures and the
+  // samplers on `encoder`. Call once per encoder: the bindings persist
+  // across pipeline changes. A pass passes FrameContext::frame_index and
+  // FrameContext::frame_view.
+  void Bind(id<MTLRenderCommandEncoder> encoder, size_t frame,
+            FrameView view = FrameView::kMain) const;
 
  private:
+  static size_t Index(size_t frame, FrameView view) {
+    return frame * kFrameViewCount + static_cast<size_t>(view);
+  }
+
   const Samplers& samplers_;
-  std::array<Buffer, kFramesInFlight> uniforms_;
+  // Indexed by Index().
+  std::array<Buffer, kFramesInFlight * kFrameViewCount> uniforms_;
   Image default_cube_;
   Image default_lut_;
   Image default_ambient_occlusion_;

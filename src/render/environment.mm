@@ -76,17 +76,15 @@ core::Extent2D MipExtent(uint32_t size, uint32_t mip) {
 std::vector<std::byte> ToRgba(const asset::ImageDataF& equirect) {
   const size_t texels = static_cast<size_t>(equirect.width) *
                         static_cast<size_t>(equirect.height);
-  std::vector<float> rgba(texels * 4);
+  constexpr size_t kTexelBytes = 4 * sizeof(float);
+  // Written in place: one copy of the panorama, not a float and a byte one.
+  std::vector<std::byte> bytes(texels * kTexelBytes);
   const float* source = equirect.pixels.data();
-  float* target = rgba.data();
-  for (size_t i = 0; i < texels; ++i, source += 3, target += 4) {
-    target[0] = source[0];
-    target[1] = source[1];
-    target[2] = source[2];
-    target[3] = 1.0f;
+  std::byte* target = bytes.data();
+  for (size_t i = 0; i < texels; ++i, source += 3, target += kTexelBytes) {
+    const std::array<float, 4> texel = {source[0], source[1], source[2], 1.0f};
+    std::memcpy(target, texel.data(), kTexelBytes);
   }
-  std::vector<std::byte> bytes(rgba.size() * sizeof(float));
-  std::memcpy(bytes.data(), rgba.data(), bytes.size());
   return bytes;
 }
 

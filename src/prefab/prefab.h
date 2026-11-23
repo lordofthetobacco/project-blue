@@ -30,9 +30,10 @@
 // Small metadata lives in ordinary vectors and strings. Bulk data (vertices,
 // indices, texture mips, cooked collision) is viewed through spans into
 // immutable byte blocks owned by Prefab::storage. A loaded prefab has a single
-// block, the file itself, so nothing is copied or parsed per element; a cooked
-// prefab has one block per array the cook stored. Copying a Prefab copies the
-// metadata and shares the blocks, which is cheap (editor undo snapshots).
+// block, the file itself mapped read-only (see LoadPrefab), so nothing is
+// copied or parsed per element and the bulk costs no private memory; a cooked
+// prefab has one heap block per array the cook stored. Copying a Prefab copies
+// the metadata and shares the blocks, which is cheap (editor undo snapshots).
 //
 // Filling a prefab (cook, editor):
 //
@@ -48,6 +49,24 @@ namespace blue::prefab {
 // Alignment of every block BulkStorage hands out and of every bulk array in a
 // .pbo file, enough for any vertex attribute, index or SIMD copy.
 inline constexpr size_t kBulkAlignment = 16;
+
+// Where the bytes of a BulkStorage block live.
+enum class BlockKind : uint8_t {
+  kHeap,    // owned heap memory (cooked or edited data): private commit
+  kMapped,  // a read-only file mapping (a loaded .pbo): backed by the file
+};
+
+// One block of a BulkStorage: `size` immutable bytes at `data`, kept alive
+// by the shared pointer.
+struct BulkBlock {
+  std::shared_ptr<const std::byte> data;
+  size_t size = 0;
+  BlockKind kind = BlockKind::kHeap;
+
+  [[nodiscard]] std::span<const std::byte> bytes() const {
+    return {data.get(), size};
+  }
+};
 
 // Shared immutable byte blocks backing the spans of a Prefab. Copying shares
 // the blocks (reference counted): a block is freed when the last storage
@@ -71,6 +90,11 @@ class BulkStorage {
   // it. Its data is aligned to kBulkAlignment (operator new guarantees it).
   std::span<const std::byte> Adopt(std::vector<std::byte> bytes);
 
+  // Takes a block owned elsewhere (e.g. a file mapping kept alive by
+  // `block.data`'s control block) and returns a view of all of it. Its data
+  // must be aligned to kBulkAlignment and never change while referenced.
+  std::span<const std::byte> AdoptBlock(BulkBlock block);
+
   // Copies `values` into a new block and returns a typed view of it.
   template <typename T>
   std::span<const T> StoreArray(std::span<const T> values) {
@@ -80,13 +104,21 @@ class BulkStorage {
     return {reinterpret_cast<const T*>(stored.data()), values.size()};
   }
 
+  // Drops every block that none of `views` points into (views may be empty
+  // or point elsewhere) and returns the bytes released from this storage.
+  // Copies of the storage keep their blocks.
+  size_t DropUnviewed(std::span<const std::span<const std::byte>> views);
+
+  [[nodiscard]] std::span<const BulkBlock> blocks() const { return blocks_; }
   // Returns the number of blocks held.
   [[nodiscard]] size_t block_count() const { return blocks_.size(); }
   // Returns the total size of the blocks held, in bytes.
   [[nodiscard]] size_t byte_size() const;
+  // Returns the size of the blocks of `kind`, in bytes.
+  [[nodiscard]] size_t byte_size(BlockKind kind) const;
 
  private:
-  std::vector<std::shared_ptr<const std::vector<std::byte>>> blocks_;
+  std::vector<BulkBlock> blocks_;
 };
 
 // GPU formats of cooked textures. BC formats use 4x4 blocks of 16 bytes;
@@ -244,6 +276,21 @@ struct Physics {
   std::span<const std::byte> cooked_shape;
 };
 
+// A `key = value` label on a prefab, e.g. "weapon" = "glock17" marks a weapon
+// prefab (see weapon/weapon_def.h). Keys are 1 to kMaxTagKeyLength
+// characters of [a-z0-9_.] and unique within a prefab; values are free text
+// of at most kMaxTagValueLength bytes (may be empty).
+struct Tag {
+  std::string key;
+  std::string value;
+
+  friend bool operator==(const Tag&, const Tag&) = default;
+};
+
+inline constexpr size_t kMaxTagKeyLength = 64;
+inline constexpr size_t kMaxTagValueLength = 256;
+inline constexpr size_t kMaxTagCount = 64;
+
 // What the editor needs to reopen and re-import a prefab. Paths are resolved
 // in memory and stored relative to the .pbo, like ChildPrefab::path.
 // `import_settings` is opaque text owned by the cook (its options);
@@ -269,10 +316,33 @@ struct Prefab {
   std::vector<PointLight> lights;
   std::vector<ChildPrefab> children;
   Physics physics;
+  // Ordered as authored; ValidatePrefab() checks keys, lengths, uniqueness
+  // and at most kMaxTagCount entries.
+  std::vector<Tag> tags;
   EditInfo edit;
   asset::Bounds bounds;  // all meshes at rest, in prefab space
   BulkStorage storage;
 };
+
+// Appends a view of every bulk array of `prefab` (vertex and index arrays,
+// texture mips, the cooked shape) to `views`.
+void CollectBulkViews(const Prefab& prefab,
+                      std::vector<std::span<const std::byte>>& views);
+
+// Drops the blocks of prefab.storage that no bulk array of `prefab` views any
+// more (superseded by edits, e.g. a replaced texture) and returns the bytes
+// released. Other copies of the prefab keep their blocks.
+size_t CompactStorage(Prefab& prefab);
+
+// Points every bulk array of `prefab` at the array in the same place of
+// `source` and makes `prefab` share source.storage instead of its own: e.g.
+// `source` is `prefab` saved and loaded again, so its data is a mapped file
+// rather than heap blocks. Returns false and changes nothing unless both have
+// the same meshes, textures, mips and cooked shape of equal byte sizes.
+// Contents are not compared (that would read every page of the file): the
+// caller guarantees they are equal. Metadata (names, paths, parameters) is
+// left alone.
+bool RebaseBulk(Prefab& prefab, const Prefab& source);
 
 // Returns a description of the first problem that makes `prefab` unsavable,
 // or nullopt if it is valid: an index out of range, an invalid hierarchy or
@@ -295,6 +365,23 @@ inline constexpr size_t kMaxSettingsLength = 1024 * 1024;
 
 // Returns the index of the first material called `name`, or -1.
 [[nodiscard]] int FindMaterial(const Prefab& prefab, std::string_view name);
+
+// Returns true if `key` is a valid tag key: 1 to kMaxTagKeyLength
+// characters, each a lower-case ASCII letter, a digit, '_' or '.'.
+[[nodiscard]] bool IsValidTagKey(std::string_view key);
+
+// Returns the value of tag `key`, or nullopt if the prefab has no such tag.
+// The view is valid until `prefab.tags` changes.
+[[nodiscard]] std::optional<std::string_view> FindTag(const Prefab& prefab,
+                                                      std::string_view key);
+
+// Sets tag `key` to `value`: replaces the value of an existing tag in place,
+// otherwise appends the tag. Does not validate (ValidatePrefab() does).
+void SetTag(Prefab& prefab, std::string_view key, std::string_view value);
+
+// Removes tag `key`, keeping the order of the others. Returns false if the
+// prefab had no such tag.
+bool RemoveTag(Prefab& prefab, std::string_view key);
 
 }  // namespace blue::prefab
 

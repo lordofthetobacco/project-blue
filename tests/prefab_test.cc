@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "asset/mesh_data.h"
@@ -50,6 +51,41 @@ TEST_CASE("BulkStorage stores aligned blocks that copies share") {
   original.reset();
   CHECK(copy.block_count() == 2);
   CHECK(stored[5] == bytes[5]);
+}
+
+TEST_CASE("CompactStorage drops blocks no array views any more") {
+  Prefab prefab = testing::MakeSamplePrefab();
+  const size_t blocks = prefab.storage.block_count();
+  CHECK(prefab.storage.byte_size(BlockKind::kHeap) ==
+        prefab.storage.byte_size());
+  CHECK(CompactStorage(prefab) == 0);
+  CHECK(prefab.storage.block_count() == blocks);
+
+  // Replacing a texture leaves its old block behind until compacted; a copy
+  // taken before (an undo snapshot) keeps it alive.
+  const Prefab before = prefab;
+  const Texture old = prefab.textures[1];
+  size_t old_bytes = 0;
+  for (const TextureMip& mip : old.mips) {
+    old_bytes += mip.data.size();
+  }
+  prefab.textures[1] = testing::MakePatternTexture(
+      prefab, "normal2", TextureFormat::kBc5Unorm, 8, 8, 7);
+  CHECK(prefab.storage.block_count() ==
+        blocks + static_cast<size_t>(prefab.textures[1].mip_count()));
+  CHECK(CompactStorage(prefab) == old_bytes);
+  CHECK(prefab.storage.block_count() == blocks);
+  CHECK_FALSE(ValidatePrefab(prefab).has_value());
+  CHECK(before.storage.block_count() == blocks);
+  CHECK(before.textures[1].mips[0].data[3] == old.mips[0].data[3]);
+
+  // Removing every array releases everything.
+  prefab.meshes.clear();
+  prefab.textures.clear();
+  prefab.materials[0].textures = {-1, -1, -1, -1};
+  prefab.physics = {};
+  CompactStorage(prefab);
+  CHECK(prefab.storage.block_count() == 0);
 }
 
 TEST_CASE("Texture format sizes") {
@@ -172,6 +208,48 @@ TEST_CASE("ValidatePrefab reports broken references and values") {
     prefab.sockets[0].name.assign(kMaxStringLength + 1, 'x');
     CHECK_FALSE(Problem(prefab).empty());
   }
+}
+
+TEST_CASE("Tag keys, lookups and edits") {
+  CHECK(IsValidTagKey("weapon"));
+  CHECK(IsValidTagKey("a.b_c9"));
+  CHECK_FALSE(IsValidTagKey(""));
+  CHECK_FALSE(IsValidTagKey("Weapon"));
+  CHECK_FALSE(IsValidTagKey("two words"));
+  CHECK_FALSE(IsValidTagKey("k=v"));
+  CHECK(IsValidTagKey(std::string(kMaxTagKeyLength, 'k')));
+  CHECK_FALSE(IsValidTagKey(std::string(kMaxTagKeyLength + 1, 'k')));
+
+  Prefab prefab;
+  CHECK_FALSE(FindTag(prefab, "weapon").has_value());
+  SetTag(prefab, "weapon", "m16");
+  SetTag(prefab, "kind", "rifle");
+  SetTag(prefab, "weapon", "glock17");  // Replaced in place.
+  REQUIRE(prefab.tags.size() == 2);
+  CHECK(prefab.tags[0].key == "weapon");
+  CHECK(FindTag(prefab, "weapon") ==
+        std::optional<std::string_view>("glock17"));
+  CHECK(RemoveTag(prefab, "weapon"));
+  CHECK_FALSE(RemoveTag(prefab, "weapon"));
+  REQUIRE(prefab.tags.size() == 1);
+  CHECK(prefab.tags[0].key == "kind");
+}
+
+TEST_CASE("ValidatePrefab checks tags") {
+  Prefab prefab;
+  prefab.tags = {{.key = "weapon", .value = "glock17"}};
+  CHECK_FALSE(ValidatePrefab(prefab).has_value());
+  SUBCASE("bad key") { prefab.tags[0].key = "Weapon"; }
+  SUBCASE("duplicate key") { prefab.tags.push_back(prefab.tags[0]); }
+  SUBCASE("long value") {
+    prefab.tags[0].value = std::string(kMaxTagValueLength + 1, 'v');
+  }
+  SUBCASE("too many") {
+    for (size_t i = 0; i < kMaxTagCount; ++i) {
+      prefab.tags.push_back({.key = "k" + std::to_string(i)});
+    }
+  }
+  CHECK(ValidatePrefab(prefab).has_value());
 }
 
 }  // namespace blue::prefab

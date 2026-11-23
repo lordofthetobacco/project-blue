@@ -81,7 +81,15 @@ struct ShadowOverlayInfo {
 // Plain data the overlay shows about the weapon in hand; the views must
 // outlive the PerfOverlay::Build() call.
 struct WeaponOverlayInfo {
+  // No weapon in hand: only the bullet counts below are meaningful.
+  bool hands_empty = false;
   std::string_view name;  // The weapon in hand, e.g. "Glock 17".
+  // A part-built weapon's stats, e.g. "0.91 kg  ergo 91  4.4 MOA  50 m
+  // recoil 302/252  1100 rpm"; empty for a single-piece weapon.
+  std::string_view stats;
+  // "NOT FUNCTIONAL: missing <slots>" for a weapon missing vital parts;
+  // empty otherwise.
+  std::string_view not_functional;
   // Where a weapon switch in progress is heading; empty when not switching.
   std::string_view switching_to;
   int rounds_in_magazine = 0;
@@ -89,8 +97,14 @@ struct WeaponOverlayInfo {
   bool round_chambered = false;
   bool bolt_locked_back = false;
   bool reloading = false;
-  float reload_fraction = 0.0f;          // [0, 1]
-  std::string_view fire_mode;            // e.g. "SEMI"
+  float reload_fraction = 0.0f;  // [0, 1]
+  std::string_view fire_mode;    // e.g. "SEMI", "AUTO", "DA"
+  // The chosen scope magnification of a scoped weapon in hand (shown as
+  // "scope 6.0x"); 0 otherwise.
+  float scope_magnification = 0.0f;
+  // The sights' zero in metres (shown as "zero 200 m"); 0 for a weapon
+  // whose zero cannot be set.
+  float scope_zero = 0.0f;
   std::span<const int> spare_magazines;  // Round count of each spare.
   int projectiles = 0;                   // Bullets in flight.
   int impacts = 0;                       // Hits since the last scene reload.
@@ -115,6 +129,10 @@ struct SceneOverlayInfo {
   HitLogOverlayInfo hit_log;
   // Draws a dot at the screen center, also while the stats window is hidden.
   bool show_crosshair = false;
+  // Opacity in [0, 1] of the interaction dot at the screen center (the
+  // player looks at something they can use); 0 hides it. Also drawn while
+  // the stats window is hidden.
+  float interaction_dot_opacity = 0.0f;
   size_t entity_count = 0;
   uint32_t draw_calls = 0;
   uint32_t culled_draws = 0;  // Skipped by frustum culling in the main pass.
@@ -130,6 +148,9 @@ struct SceneOverlayInfo {
   std::string_view shader_error;
   // One line listing the current key bindings.
   std::string_view help;
+  // The weapon inspect screen is open: the stats, settings and hit log
+  // windows stay hidden so its panels have the screen.
+  bool hide_windows = false;
 };
 
 // What one Build() call produced.

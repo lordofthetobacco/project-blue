@@ -118,11 +118,12 @@ struct MipChainUpload {
 };
 
 // Creates sampled images from ready mip chains, block-compressed formats
-// (BC5, BC7) included: every level of every image goes through one staging
-// buffer, one blit encoder and one submission, with no mip generation; blocks
-// until the copies finished. Level sizes are the caller's contract (see
-// TextureCache::Upload(), which validates them); a level shorter than its
-// copy is fatal. ShaderRead is added to the usage. Returns the images in the
+// (BC5, BC7) included, with no mip generation: the levels stream through
+// bounded staging memory (StagingUploader: submissions of at most 16 MiB
+// each, never a staging buffer of the whole batch); blocks until the copies
+// finished. Level sizes are the caller's contract (see
+// TextureCache::Upload(), which validates them); a level of the wrong size
+// is fatal. ShaderRead is added to the usage. Returns the images in the
 // order of `uploads`.
 [[nodiscard]] std::vector<Image> CreateImagesFromMipChains(
     const MetalContext& context, std::span<const MipChainUpload> uploads);

@@ -19,6 +19,9 @@ enum BufferIndex {
   kBufferDraw = 2,      // Per-draw constants (model matrix), set as bytes.
   kBufferPass = 3,      // Per-pass constants, at most kMaxPassConstantBytes.
   kBufferMaterial = 4,  // MaterialParams, set as bytes per material.
+  // ScopeLensUniforms, one buffer per frame in flight (too big for
+  // kBufferPass).
+  kBufferScopeLens = 5,
 };
 
 // The size limit of a kBufferPass block.
@@ -39,6 +42,8 @@ enum TextureIndex {
   kTextureSky = 9,  // texturecube, the skybox.
   // Inputs of a full-screen pass: kTextureInput0 + n, n < kMaxInputTextures.
   kTextureInput0 = 10,
+  // texture2d, a rifle scope's picture (kTextureInput0 + kMaxInputTextures).
+  kTextureScopePicture = 14,
 };
 
 enum { kMaterialTextureCount = 5, kMaxInputTextures = 4 };

@@ -1,5 +1,7 @@
 #include "render/metal_context.h"
 
+#include <algorithm>
+
 #include "core/log.h"
 #include "platform/window.h"
 #include "render/metal_check.h"
@@ -55,6 +57,15 @@ void MetalContext::WaitIdle() const {
   // Lets the completed command buffer (and what it references, such as a
   // drawable) go.
   last_committed_ = nil;
+}
+
+void MetalContext::AddStagingBytes(uint64_t bytes) const {
+  staging_usage_.current += bytes;
+  staging_usage_.peak = std::max(staging_usage_.peak, staging_usage_.current);
+}
+
+void MetalContext::RemoveStagingBytes(uint64_t bytes) const {
+  staging_usage_.current -= std::min(bytes, staging_usage_.current);
 }
 
 }  // namespace blue::render

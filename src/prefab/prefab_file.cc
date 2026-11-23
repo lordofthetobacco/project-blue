@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -28,6 +29,7 @@
 #include "core/path.h"
 #include "material/material.h"
 #include "platform/file_system.h"
+#include "platform/mapped_file.h"
 #include "scene/binary_stream.h"
 
 namespace blue::prefab {
@@ -69,6 +71,7 @@ constexpr uint32_t kLightChunk = MakeFourcc('L', 'G', 'H', 'T');
 constexpr uint32_t kChildChunk = MakeFourcc('C', 'H', 'L', 'D');
 constexpr uint32_t kPhysicsChunk = MakeFourcc('P', 'H', 'Y', 'S');
 constexpr uint32_t kEditChunk = MakeFourcc('E', 'D', 'I', 'T');
+constexpr uint32_t kTagChunk = MakeFourcc('T', 'A', 'G', 'S');
 constexpr uint32_t kBulkChunk = MakeFourcc('B', 'U', 'L', 'K');
 
 constexpr uint32_t kDoubleSidedFlag = 1U << 0;
@@ -93,6 +96,7 @@ constexpr size_t kMinEventBytes = kStringBytes + 4;
 constexpr size_t kMinSocketBytes = kStringBytes + 4 + kTransformBytes;
 constexpr size_t kMinLightBytes = kStringBytes + 4 + 8 * 4;
 constexpr size_t kMinChildBytes = kStringBytes + 4 + kTransformBytes;
+constexpr size_t kMinTagBytes = 2 * kStringBytes;
 
 // Returns `value` rounded up to a multiple of kBulkAlignment.
 constexpr size_t AlignUp(size_t value) {
@@ -404,6 +408,16 @@ std::vector<std::byte> EncodePhysics(const Physics& physics, BulkLayout& bulk) {
   writer.WriteF32(physics.friction);
   writer.WriteF32(physics.restitution);
   bulk.WriteRef(writer, physics.cooked_shape);
+  return writer.bytes();
+}
+
+std::vector<std::byte> EncodeTags(const Prefab& prefab) {
+  BinaryWriter writer;
+  writer.WriteU32(static_cast<uint32_t>(prefab.tags.size()));
+  for (const Tag& tag : prefab.tags) {
+    writer.WriteString(tag.key);
+    writer.WriteString(tag.value);
+  }
   return writer.bytes();
 }
 
@@ -799,6 +813,19 @@ Status DecodePhysics(ChunkDecoder decoder, Prefab& prefab) {
   return decoder.Finish();
 }
 
+Status DecodeTags(ChunkDecoder decoder, Prefab& prefab) {
+  const std::optional<uint32_t> count = ReadCount(decoder, kMinTagBytes);
+  if (!count) {
+    return Corrupt();
+  }
+  prefab.tags.resize(*count);
+  for (Tag& tag : prefab.tags) {
+    tag.key = decoder.ReadString();
+    tag.value = decoder.ReadString();
+  }
+  return decoder.Finish();
+}
+
 Status DecodeEdit(ChunkDecoder decoder, std::string_view base_dir,
                   Prefab& prefab) {
   EditInfo& edit = prefab.edit;
@@ -923,6 +950,8 @@ Status DecodeChunk(uint32_t fourcc, std::span<const std::byte> body,
       return DecodePhysics(decoder, prefab);
     case kEditChunk:
       return DecodeEdit(decoder, base_dir, prefab);
+    case kTagChunk:
+      return DecodeTags(decoder, prefab);
     default:
       return Status::Ok();
   }
@@ -976,6 +1005,11 @@ BytesResult EncodePrefab(const Prefab& prefab, std::string_view base_dir) {
   chunks.emplace_back(kChildChunk, EncodeChildren(prefab, base_dir));
   chunks.emplace_back(kPhysicsChunk, EncodePhysics(prefab.physics, bulk));
   chunks.emplace_back(kEditChunk, EncodeEdit(prefab.edit, base_dir));
+  // Only tagged prefabs get the chunk: an untagged prefab encodes exactly as
+  // before tags existed.
+  if (!prefab.tags.empty()) {
+    chunks.emplace_back(kTagChunk, EncodeTags(prefab));
+  }
   const bool has_bulk = bulk.size() > 0;
   const size_t chunk_count = chunks.size() + (has_bulk ? 1 : 0);
 
@@ -1039,12 +1073,13 @@ BytesResult EncodePrefab(const Prefab& prefab, std::string_view base_dir) {
   return BytesResult::Ok(std::move(file));
 }
 
-PrefabResult DecodePrefab(std::vector<std::byte> file,
-                          std::string_view base_dir,
-                          const LoadOptions& options) {
-  Prefab prefab;
-  // The prefab's spans view this block, so parse from the adopted copy.
-  const std::span<const std::byte> data = prefab.storage.Adopt(std::move(file));
+namespace {
+
+// Parses the file bytes `data`, which `prefab`'s storage already holds as
+// its only block, into `prefab`.
+PrefabResult DecodeStoredFile(Prefab prefab, std::span<const std::byte> data,
+                              std::string_view base_dir,
+                              const LoadOptions& options) {
   auto toc = ReadToc(data);
   if (!toc.ok()) {
     return PrefabResult::Error(toc.error());
@@ -1092,6 +1127,17 @@ PrefabResult DecodePrefab(std::vector<std::byte> file,
   return PrefabResult::Ok(std::move(prefab));
 }
 
+}  // namespace
+
+PrefabResult DecodePrefab(std::vector<std::byte> file,
+                          std::string_view base_dir,
+                          const LoadOptions& options) {
+  Prefab prefab;
+  // The prefab's spans view this block, so parse from the adopted copy.
+  const std::span<const std::byte> data = prefab.storage.Adopt(std::move(file));
+  return DecodeStoredFile(std::move(prefab), data, base_dir, options);
+}
+
 core::Result<void, PrefabError> SavePrefab(const Prefab& prefab,
                                            const std::string& path) {
   using SaveResult = core::Result<void, PrefabError>;
@@ -1113,24 +1159,45 @@ core::Result<void, PrefabError> SavePrefab(const Prefab& prefab,
 
 PrefabResult LoadPrefab(const std::string& path, const LoadOptions& options) {
   const auto start = std::chrono::steady_clock::now();
-  auto file = platform::ReadFile(path, kMaxPrefabFileSize);
-  if (!file.ok()) {
+  Prefab prefab;
+  std::span<const std::byte> data;
+  const char* how = "mapped";
+  auto mapped = platform::MappedFile::Open(path, kMaxPrefabFileSize);
+  if (mapped.ok()) {
+    // The block's control block owns the mapping: it is unmapped when the
+    // last prefab copy viewing it is gone.
+    std::shared_ptr<const platform::MappedFile> mapping =
+        std::move(mapped).value();
+    const std::span<const std::byte> bytes = mapping->bytes();
+    data = prefab.storage.AdoptBlock(
+        {.data = std::shared_ptr<const std::byte>(mapping, bytes.data()),
+         .size = bytes.size(),
+         .kind = BlockKind::kMapped});
+  } else if (mapped.error() == platform::FileError::kReadFailed) {
+    // Mapping is unsupported here (e.g. some network shares): read instead.
+    auto file = platform::ReadFile(path, kMaxPrefabFileSize);
+    if (!file.ok()) {
+      return PrefabResult::Error(PrefabError::kCannotOpen);
+    }
+    data = prefab.storage.Adopt(std::move(file).value());
+    how = "read";
+  } else {
     return PrefabResult::Error(PrefabError::kCannotOpen);
   }
-  const double read_ms = MillisecondsSince(start);
-  const size_t size = file.value().size();
+  const double open_ms = MillisecondsSince(start);
+  const size_t size = data.size();
   const std::string base_dir = core::ParentPath(platform::AbsolutePath(path));
-  PrefabResult prefab =
-      DecodePrefab(std::move(file).value(), base_dir, options);
-  if (!prefab.ok()) {
-    return prefab;
+  PrefabResult loaded =
+      DecodeStoredFile(std::move(prefab), data, base_dir, options);
+  if (!loaded.ok()) {
+    return loaded;
   }
   core::log::Info(
-      "Loaded prefab {} ({:.2f} MB) in {:.1f} ms (read {:.1f} ms, decode "
+      "Loaded prefab {} ({:.2f} MB, {}) in {:.1f} ms (open {:.1f} ms, decode "
       "{:.1f} ms)",
-      path, static_cast<double>(size) / (1024.0 * 1024.0),
-      MillisecondsSince(start), read_ms, MillisecondsSince(start) - read_ms);
-  return prefab;
+      path, static_cast<double>(size) / (1024.0 * 1024.0), how,
+      MillisecondsSince(start), open_ms, MillisecondsSince(start) - open_ms);
+  return loaded;
 }
 
 }  // namespace blue::prefab

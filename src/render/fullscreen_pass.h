@@ -48,6 +48,11 @@ struct FullscreenTarget {
   // Load keeps what is there (e.g. for additive blending); DontCare when
   // the triangle overwrites every pixel anyway.
   MTLLoadAction load_action = MTLLoadActionDontCare;
+  // The pixels to draw (the scissor), inside `extent`; pixels outside keep
+  // their contents (use MTLLoadActionLoad with it). An empty rectangle
+  // draws the whole target. The viewport, hence varyings.uv, always spans
+  // the whole target.
+  MTLScissorRect area{};
 };
 
 // A pass that runs one fragment shader over a whole target: tonemapping,

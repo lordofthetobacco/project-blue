@@ -52,12 +52,21 @@ struct FrameUniforms {
   // x: number of valid point_lights, [0, kMaxPointLights].
   glm::uvec4 point_light_count;
   std::array<GpuPointLight, kMaxPointLights> point_lights;
+  // Camera::previous_view_projection, for the motion vectors of the weapon
+  // motion blur (render/motion_blur_math.h).
+  glm::mat4 previous_view_proj;
+  // x: blur scale (MotionBlurScale(); 0 when the blur is off), y: longest
+  // blur vector in pixels (twice z), z: largest blur radius in pixels
+  // (MotionBlurMaxRadius(), the tile size of RenderTargets::motion_tiles()),
+  // w: unused.
+  glm::vec4 motion_blur;
 };
 
 // Returns the uniforms of `view` for a render target of `extent`.
 // `cascades` are only read when `shadows` is true. The environment fields
-// stay zero (no environment yet). Point lights whose range sphere lies
-// outside the camera frustum are dropped; when more than kMaxPointLights
+// stay zero (no environment yet). The motion blur scale is 0 when
+// view.post disables the weapon motion blur. Point lights whose range sphere
+// lies outside the camera frustum are dropped; when more than kMaxPointLights
 // remain, the ones that light the camera position the least are dropped.
 // Allocates nothing.
 [[nodiscard]] FrameUniforms MakeFrameUniforms(

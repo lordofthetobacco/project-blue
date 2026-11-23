@@ -3,6 +3,7 @@
 
 #include "render/metal_types.h"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -30,6 +31,18 @@ class MetalContext {
   [[nodiscard]] id<MTLCommandQueue> queue() const { return queue_; }
   [[nodiscard]] std::string_view device_name() const { return device_name_; }
 
+  // Upload staging memory allocated right now and its high-water mark, in
+  // bytes (see StagingUploader).
+  struct StagingUsage {
+    uint64_t current = 0;
+    uint64_t peak = 0;
+  };
+  [[nodiscard]] StagingUsage staging_usage() const { return staging_usage_; }
+  // Bookkeeping for StagingUploader: `bytes` of staging memory were created
+  // (Add) or destroyed (Remove).
+  void AddStagingBytes(uint64_t bytes) const;
+  void RemoveStagingBytes(uint64_t bytes) const;
+
   // Records commands into a new command buffer with `record` and blocks until
   // the GPU has executed them; a GPU error is fatal. Intended for setup work
   // such as resource uploads, not per-frame use.
@@ -52,6 +65,8 @@ class MetalContext {
   // const context (every GPU object does) must be able to use; it is not
   // part of the context's observable state.
   mutable id<MTLCommandBuffer> last_committed_ = nil;
+  // Statistics only; uploads update them through a const context.
+  mutable StagingUsage staging_usage_;
 };
 
 }  // namespace blue::render

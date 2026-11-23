@@ -25,13 +25,22 @@ struct SamplesOptions {
 //                 duplicate merged node dropped, one clip "fire" with events
 //                 "shot" (0.333 s) and "slide_lock" (0.4 s), sockets muzzle /
 //                 sight / grip;
+//   weapons/glock17/parts/*.pbo   the Glock 17 as part prefabs and the
+//                 placeholder parts (see sample_parts.h);
+//   weapons/catalog/base.cfg      the parts catalogue, written like
+//                 range.mscn (an edited copy is kept, the fresh one goes to
+//                 base.generated.cfg);
 //   house.pbo     merged static mesh, static triangle-mesh collider;
 //   ground.pbo    48 x 724 m plane with the Ground037 material, static box;
 //   target.pbo    0.5 x 1.0 x 0.05 m steel plate, static box;
 //   crate.pbo     1 m cube, dynamic 10 kg box;
 //   sphere.pbo    1 m sphere, static sphere, grey material "sphere";
 //   materials.pbo the ten preview materials, ground and steel (no meshes);
-//   range.mscn    the default range scene, plus env/<hdri> it refers to.
+//   range.mscn    the default range scene, plus env/<hdri> it refers to;
+//                 a range.mscn edited since it was generated is kept and
+//                 the fresh scene written as range.generated.mscn instead
+//                 (cook::WriteGeneratedFile(), sidecar
+//                 range.mscn.fingerprint).
 // Socket conventions: every socket hangs off the prefab root (node -1) in
 // prefab space (metres); "sight" is placed at the sight's eye point and its
 // rotation maps +Z onto the sight axis. Returns false (after logging what

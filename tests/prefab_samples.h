@@ -56,9 +56,9 @@ inline prefab::Texture MakePatternTexture(prefab::Prefab& prefab,
 
 // Returns a valid prefab that uses every chunk type: two nodes, a cube mesh
 // with two submeshes, two materials, two textures (BC7 sRGB, BC5), a looping
-// clip with events, a socket, a light, a child prefab, a cooked physics shape
-// and edit info. Paths are relative so the prefab can be encoded with an
-// empty base directory.
+// clip with events, a socket, a light, a child prefab, a cooked physics
+// shape, two tags and edit info. Paths are relative so the prefab can be
+// encoded with an empty base directory.
 inline prefab::Prefab MakeSamplePrefab() {
   prefab::Prefab prefab;
   prefab.hierarchy.nodes = {
@@ -140,6 +140,8 @@ inline prefab::Prefab MakeSamplePrefab() {
   prefab.physics.restitution = 0.1f;
   prefab.physics.cooked_shape = prefab.storage.Adopt(PatternBytes(77, 9));
 
+  prefab.tags = {{.key = "category", .value = "test"},
+                 {.key = "note.v2", .value = "free text = ok"}};
   prefab.edit.source_model = "sources/glock.gltf";
   prefab.edit.import_settings = "scale=1\nmerge_static=0\n";
   prefab.edit.texture_sources = {{"sources/albedo.png"},

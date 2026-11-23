@@ -39,6 +39,11 @@ class WorldPhysics {
   // of `world`, which must have been built from `scene`.
   PhysicsBuildSummary Build(const scene::SceneData& scene, const World& world);
 
+  // Removes the bodies of the instances `world` hides (World::HideInstance)
+  // and returns how many were removed. One pass over the bodies, no
+  // allocation; the entries stay (marked removed) until the next Build().
+  int RemoveHiddenBodies(const World& world);
+
   // Writes the interpolated poses of the dynamic bodies into `world` (as the
   // world matrix of their instance's prefab, keeping its scale). Bodies of
   // nested prefabs are not synced (they stay with their parent).
@@ -58,7 +63,8 @@ class WorldPhysics {
     size_t placement = 0;
     glm::vec3 scale{1.0f};
     bool dynamic = false;
-    bool root = false;  // the instance's own prefab
+    bool root = false;     // the instance's own prefab
+    bool removed = false;  // by RemoveHiddenBodies(): `body` is stale
   };
 
   physics::PhysicsWorld& physics_;

@@ -12,8 +12,12 @@ const char* GpuScopeName(GpuScope scope) {
       return "depth";
     case GpuScope::kSsao:
       return "ssao";
+    case GpuScope::kScopeView:
+      return "scope";
     case GpuScope::kScene:
       return "scene";
+    case GpuScope::kMotionBlur:
+      return "motion";
     case GpuScope::kBloom:
       return "bloom";
     case GpuScope::kTonemap:

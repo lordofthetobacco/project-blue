@@ -115,6 +115,9 @@ void FullscreenPass::Draw(id<MTLRenderCommandEncoder> encoder,
                            .znear = 0.0,
                            .zfar = 1.0,
                        }];
+  if (target.area.width > 0 && target.area.height > 0) {
+    [encoder setScissorRect:target.area];
+  }
   pipeline_->Bind(encoder);
 
   const InputSet& set = sets_[set_index];

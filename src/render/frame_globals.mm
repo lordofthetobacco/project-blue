@@ -56,8 +56,10 @@ FrameGlobals::FrameGlobals(const MetalContext& context,
   BindAmbientOcclusion(default_ambient_occlusion_.texture());
 }
 
-void FrameGlobals::Write(size_t frame, const FrameUniforms& uniforms) const {
-  std::memcpy(uniforms_[frame].mapped(), &uniforms, sizeof(uniforms));
+void FrameGlobals::Write(size_t frame, const FrameUniforms& uniforms,
+                         FrameView view) const {
+  std::memcpy(uniforms_[Index(frame, view)].mapped(), &uniforms,
+              sizeof(uniforms));
 }
 
 void FrameGlobals::BindShadowMap(id<MTLTexture> shadow_map) {
@@ -74,15 +76,18 @@ void FrameGlobals::BindAmbientOcclusion(id<MTLTexture> ambient_occlusion) {
   ambient_occlusion_ = ambient_occlusion;
 }
 
-void FrameGlobals::Bind(id<MTLRenderCommandEncoder> encoder,
-                        size_t frame) const {
-  const id<MTLBuffer> buffer = uniforms_[frame].handle();
+void FrameGlobals::Bind(id<MTLRenderCommandEncoder> encoder, size_t frame,
+                        FrameView view) const {
+  const id<MTLBuffer> buffer = uniforms_[Index(frame, view)].handle();
   [encoder setVertexBuffer:buffer offset:0 atIndex:kBufferFrame];
   [encoder setFragmentBuffer:buffer offset:0 atIndex:kBufferFrame];
   [encoder setFragmentTexture:shadow_map_ atIndex:kTextureShadowMap];
   [encoder setFragmentTexture:environment_ atIndex:kTextureEnvironment];
   [encoder setFragmentTexture:brdf_lut_ atIndex:kTextureBrdfLut];
-  [encoder setFragmentTexture:ambient_occlusion_
+  // The scope picture has no SSAO of its own.
+  [encoder setFragmentTexture:view == FrameView::kMain
+                                  ? ambient_occlusion_
+                                  : default_ambient_occlusion_.texture()
                       atIndex:kTextureAmbientOcclusion];
   [encoder setFragmentSamplerState:samplers_.shadow() atIndex:kSamplerShadow];
   [encoder setFragmentSamplerState:samplers_.linear_clamp()

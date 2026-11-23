@@ -44,6 +44,8 @@ class ShadowPass {
   // The 2D-array texture of all cascades, sampled with
   // Samplers::shadow() (FrameGlobals::BindShadowMap()).
   [[nodiscard]] id<MTLTexture> map() const { return map_.texture(); }
+  // GPU memory of the cascade map, in bytes.
+  [[nodiscard]] uint64_t map_bytes() const { return map_.size_bytes(); }
 
  private:
   id<MTLDevice> device_ = nil;

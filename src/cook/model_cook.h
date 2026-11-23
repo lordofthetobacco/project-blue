@@ -81,6 +81,11 @@ struct ModelCookOptions {
 // children empty. Fails with kFileNotFound, kParseFailed, kNoMeshes,
 // kTooLarge (vertex count over the index range) or kTextureLoadFailed when a
 // referenced texture cannot be decoded. Logs timings.
+// Memory: the file is parsed once; its embedded images are kept encoded and
+// each is freed after its last use. Textures are decoded and cooked a few at
+// a time on separate threads within a fixed working-set budget (512 MiB), so
+// peak memory does not grow with the number of textures. Output is the same
+// for any thread timing.
 [[nodiscard]] core::Result<prefab::Prefab, CookError> CookModel(
     const std::string& path, const ModelCookOptions& options = {});
 

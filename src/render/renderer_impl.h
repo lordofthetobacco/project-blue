@@ -25,15 +25,18 @@
 #include "render/gpu_timer.h"
 #include "render/image.h"
 #include "render/material_system.h"
+#include "render/memory_stats.h"
 #include "render/mesh.h"
 #include "render/metal_context.h"
 #include "render/passes/bloom_pass.h"
 #include "render/passes/depth_prepass.h"
 #include "render/passes/frame_context.h"
 #include "render/passes/mesh_pass.h"
+#include "render/passes/motion_blur_pass.h"
 #include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/reticle_pass.h"
+#include "render/passes/scope_lens_pass.h"
 #include "render/passes/shadow_pass.h"
 #include "render/passes/skybox_pass.h"
 #include "render/passes/ssao_pass.h"
@@ -64,9 +67,24 @@
 //   depth pre-pass       DepthPrepass      draw list -> depth
 //   ssao                 SsaoPass          depth -> ssao, half res:
 //                                          occlusion + two blur encoders
+//   scope picture        RecordScopeView() SceneView::scope only: the same
+//                                          DepthPrepass, MeshPass and
+//                                          SkyboxPass from the scope's
+//                                          camera into the scope picture
+//                                          (shadow map and IBL shared, no
+//                                          SSAO, the held weapon left out)
 //   scene (HDR)          BeginScenePass()  one encoder shared by MeshPass
-//                                          (depth Equal), SkyboxPass and
-//                                          ReticlePass -> EndScenePass()
+//                                          (depth Equal), SkyboxPass,
+//                                          ReticlePass and ScopeLensPass ->
+//                                          EndScenePass()
+//   motion blur          MotionBlurPass    weapon items -> velocity -> tile
+//                                          max; hdr blurred in place (via a
+//                                          copy); then ResumeScenePass() ->
+//                                          ReticlePass, ScopeLensPass ->
+//                                          EndScenePass(). Only in frames
+//                                          with weapon motion blur, where
+//                                          the sights move here from the
+//                                          scene pass.
 //   bloom                BloomPass         hdr -> bloom mips, an encoder per
 //                                          down- and up-sample step
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
@@ -148,9 +166,12 @@ struct RendererImpl {
   RendererImpl(const RendererImpl&) = delete;
   RendererImpl& operator=(const RendererImpl&) = delete;
 
-  MeshId UploadMesh(const asset::MeshData& data);
+  MeshId UploadMesh(std::span<const asset::Vertex> vertices,
+                    std::span<const asset::Index> indices);
   void ReleaseMesh(MeshId id);
   void ReleaseTextures(std::span<const TextureId> ids);
+  void FlushReleases();
+  [[nodiscard]] MemoryStats memory_stats() const;
   void SetVsync(bool enabled);
   ViewportImage PrepareViewport(core::Extent2D size);
   uint64_t RequestViewportReadback();
@@ -161,6 +182,10 @@ struct RendererImpl {
   // Destroys the retired meshes and images no frame in flight can use any
   // more. Call after the current frame slot's command buffer was waited on.
   void DestroyRetired();
+  // Destroys every retired mesh and image if no frame is in flight any more
+  // (every slot's command buffer completed; does not wait). Keeps releases
+  // moving while frames are skipped (minimized window, no swapchain).
+  void DestroyRetiredIfIdle();
   [[nodiscard]] bool RebuildSwapchain();
   // Blocks until `frame`'s last command buffer, if any, has completed; a GPU
   // error in it is fatal.
@@ -180,8 +205,20 @@ struct RendererImpl {
   // the swapchain dirty, when none was available.
   [[nodiscard]] bool AcquireDrawable(FrameContext& ctx);
   // Records every pass of the frame described by `ctx` (see the top of this
-  // file); acquires the drawable on the way.
-  void RecordCommands(FrameContext& ctx, ImDrawData* ui, Output output);
+  // file); `scope_ctx` is the scope picture's, or null. Acquires the
+  // drawable on the way.
+  void RecordCommands(FrameContext& ctx, const FrameContext* scope_ctx,
+                      ImDrawData* ui, Output output);
+  // Creates the scope picture and its depth (kMaxScopeResolution square) the
+  // first time a frame has a scope; they live as long as the renderer.
+  void EnsureScopeTargets();
+  // Records the scope picture: depth pre-pass, meshes and sky of
+  // `scope_ctx`.
+  void RecordScopeView(const FrameContext& scope_ctx);
+  // Draws the sights (reflex dot, scope eyepiece) of `ctx` on `encoder`, the
+  // scene pass's.
+  void DrawSights(const FrameContext& ctx,
+                  id<MTLRenderCommandEncoder> encoder) const;
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
   // Records the copy of the viewport image, after it was rendered, for every
@@ -207,12 +244,20 @@ struct RendererImpl {
   Environment environment_;
   // Declared before the passes that borrow it.
   std::vector<Mesh> meshes_;
+  // GPU memory of the resident meshes in meshes_ and their count.
+  uint64_t mesh_bytes_ = 0;
+  uint32_t mesh_count_ = 0;
   // Released GPU objects waiting until no frame in flight uses them
   // (ReleaseMesh(), ReleaseTextures(), replaced viewport images); declared
   // after the context so they are destroyed before it.
   std::vector<Retired<Mesh>> retired_meshes_;
   std::vector<Retired<Image>> retired_images_;
   DrawList draw_list_;
+  // The scope view's culled draw list and its picture and depth
+  // (EnsureScopeTargets(); empty until a frame has a scope).
+  DrawList scope_draw_list_;
+  Image scope_picture_;
+  Image scope_depth_;
 
   ShadowPass shadow_pass_;
   DepthPrepass depth_prepass_;
@@ -220,6 +265,8 @@ struct RendererImpl {
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
   ReticlePass reticle_pass_;
+  ScopeLensPass scope_lens_pass_;
+  MotionBlurPass motion_blur_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   OverlayPass overlay_pass_;

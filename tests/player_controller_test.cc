@@ -382,6 +382,33 @@ TEST_CASE("Aimed mouse look turns slower by the FOV tangent ratio") {
   CHECK(f.player().look_delta().y == 0.0f);
 }
 
+TEST_CASE("A look scale slows the look on top of the aim zoom") {
+  Fixture f;
+  f.settings().fov_degrees = 70.0f;
+  f.settings().mouse_sensitivity = 0.001f;
+  f.Tick(StillHeld({Action::kAim}), 60);  // Fully aimed.
+  const float aimed_fov = f.player().view().vertical_fov_degrees;
+  const float aim_ratio = std::tan(glm::radians(aimed_fov) * 0.5f) /
+                          std::tan(glm::radians(70.0f) * 0.5f);
+  CHECK(f.player().look_scale() == 1.0f);
+  f.player().SetLookScale(0.25f);  // A 4x scope.
+
+  input::InputFrame frame = StillHeld({Action::kAim});
+  frame.look = true;
+  frame.mouse_delta = {-10.0f, 0.0f};
+  f.player().Update(frame, f.settings(), kStep);
+  CHECK(f.player().look_delta().x ==
+        doctest::Approx(0.01f * aim_ratio * 0.25f).epsilon(0.01));
+  // The view itself keeps the plain aim zoom.
+  f.world().Update(kStep);
+  f.player().UpdateView(f.settings(), kStep);
+  CHECK(f.player().view().vertical_fov_degrees ==
+        doctest::Approx(aimed_fov).epsilon(0.01));
+
+  f.player().SetLookScale(-1.0f);  // Nonsense counts as 1.
+  CHECK(f.player().look_scale() == 1.0f);
+}
+
 TEST_CASE("Look delta reports the mouse turn of the frame only") {
   Fixture f;
   f.settings().mouse_sensitivity = 0.01f;

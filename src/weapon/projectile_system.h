@@ -36,6 +36,21 @@ struct Impact {
   int shot_number = 0;       // of the bullet, as given to Spawn
 };
 
+// One integration step of a bullet: how far it moves and its velocity
+// afterwards.
+struct BallisticStep {
+  glm::vec3 displacement{0.0f};  // m
+  glm::vec3 velocity{0.0f};      // m/s at the end of the step
+};
+
+// Advances a bullet moving with `velocity` by `h` seconds under `gravity`
+// and quadratic `drag` (a = g - drag * |v| * v) with the midpoint method,
+// exact without drag: ProjectileSystem's integration step, shared with the
+// zeroing (weapon/zeroing.h) so a computed zero matches the bullets flown.
+[[nodiscard]] BallisticStep IntegrateBallisticStep(glm::vec3 velocity,
+                                                   glm::vec3 gravity,
+                                                   float drag, float h);
+
 // Limits and integration settings of a ProjectileSystem.
 struct ProjectileTuning {
   int capacity = 256;            // bullets in flight; the oldest is dropped

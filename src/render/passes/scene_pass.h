@@ -7,8 +7,10 @@
 #include "render/passes/frame_context.h"
 
 // The HDR scene pass: one render encoder on the HDR color target and the
-// scene depth, inside which MeshPass, SkyboxPass and ReticlePass record
-// their draws.
+// scene depth (FrameContext::scene_hdr / scene_depth, over scene_extent from
+// the top-left corner: the main view's targets or a scope's picture), inside
+// which MeshPass, SkyboxPass, ReticlePass and ScopeLensPass record their
+// draws.
 
 namespace blue::render {
 
@@ -22,12 +24,19 @@ void SetSceneViewport(id<MTLRenderCommandEncoder> encoder,
 // pre-pass result loaded as the depth attachment (and stored, for the
 // passes after the scene that test against it); pipelines used inside
 // must not write depth. Sets the viewport and scissor (SetSceneViewport())
-// and the frame's globals (FrameGlobals::Bind()). The caller records into
-// the returned encoder and closes it with EndScenePass().
+// and the globals of the context's frame and view (FrameGlobals::Bind()).
+// The caller records into the returned encoder and closes it with
+// EndScenePass().
 [[nodiscard]] id<MTLRenderCommandEncoder> BeginScenePass(
     const FrameContext& ctx);
 
-// Ends the scene encoder opened by BeginScenePass().
+// Same, but keeps the HDR target's contents: for draws that must come after
+// a pass that rewrites the image (the reflex sight after the weapon motion
+// blur). End with EndScenePass().
+[[nodiscard]] id<MTLRenderCommandEncoder> ResumeScenePass(
+    const FrameContext& ctx);
+
+// Ends the scene encoder opened by BeginScenePass() or ResumeScenePass().
 void EndScenePass(id<MTLRenderCommandEncoder> encoder);
 
 }  // namespace blue::render

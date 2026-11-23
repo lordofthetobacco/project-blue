@@ -28,6 +28,7 @@ add_library(blue_editor_core STATIC
     document.cc
     editor_options.cc
     editor_settings.cc
+    memory_report.cc
     selection.cc
     ${blue_editor_core_mode_sources}
 )

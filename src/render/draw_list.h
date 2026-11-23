@@ -35,10 +35,13 @@ class DrawList {
   // Rebuilds the list from the items of `view` whose `world_bounds` (parallel
   // to view.draws) intersect `frustum`; counts the others in
   // stats.culled_draws. Items whose mesh is unknown or released are
-  // skipped; unknown or released materials draw as kDefaultMaterial.
+  // skipped; unknown or released materials draw as kDefaultMaterial. For a
+  // scope's picture (`scope_view`) the items hidden_in_scope are skipped
+  // too (not counted as culled).
   void Build(const SceneView& view, std::span<const camera::Aabb> world_bounds,
              const camera::Frustum& frustum, const MaterialSystem& materials,
-             const std::vector<Mesh>& meshes, RenderStats& stats);
+             const std::vector<Mesh>& meshes, RenderStats& stats,
+             bool scope_view = false);
 
   [[nodiscard]] std::span<const DrawEntry> entries() const { return entries_; }
 

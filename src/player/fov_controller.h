@@ -3,6 +3,19 @@
 
 namespace blue::player {
 
+// Returns the vertical field of view, in degrees, that magnifies a view of
+// `base_degrees` by `magnification`: 2 atan(tan(base / 2) / magnification),
+// so the picture's linear size grows by exactly that factor. A
+// magnification below 1 counts as 1.
+[[nodiscard]] float MagnifiedFovDegrees(float base_degrees,
+                                        float magnification);
+
+// Returns the factor on the look sensitivity that keeps the on-screen speed
+// of a mouse count the same at `fov_degrees` as at `base_fov_degrees`:
+// tan(fov / 2) / tan(base / 2). 1 when the base is not a usable angle.
+[[nodiscard]] float ZoomSensitivityScale(float fov_degrees,
+                                         float base_fov_degrees);
+
 struct FovInput {
   float base_degrees = 70.0f;
   float sprint_boost_degrees = 0.0f;  // added to the target while sprinting
