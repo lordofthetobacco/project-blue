@@ -12,6 +12,8 @@
 #include <glm/mat3x3.hpp>
 #include <glm/vec4.hpp>
 
+#include "weapon/zeroing.h"
+
 namespace blue::weapon {
 namespace {
 
@@ -25,6 +27,9 @@ constexpr uint32_t kDefaultSeed = 0x9e3779b9u;
 // Share of the reload pose's tilt held at the start and end of a reload; the
 // rest swells in towards the middle, around the magazine change.
 constexpr float kReloadTiltBase = 0.7f;
+// The inspect pose shows the weapon side-on, muzzle to the right: the aimed
+// orientation turned this far about the camera's up axis.
+constexpr float kInspectBaseYaw = -glm::half_pi<float>();
 
 // Moves `value` towards `target` by the share of the way an exponential
 // approach at `rate` (1/s) covers in `dt`, snapping when close. Monotonic and
@@ -78,27 +83,6 @@ glm::mat4 CameraToWorld(glm::vec3 position, camera::LookAngles look,
   return transform;
 }
 
-// Returns tan of the angle above the line of sight at which a drag-free bullet
-// leaving `height` metres below the line and `range` metres short of the
-// zero crosses the line at the zero; `speed` m/s, `gravity` m/s^2. Solves
-// -h + L t - k (1 + t^2) = 0 with k = g L^2 / (2 v^2), smaller root.
-float ZeroTangent(float height, float range, float speed, float gravity) {
-  if (!(range > 0.0f)) {
-    return 0.0f;
-  }
-  const float k =
-      speed > 0.0f ? 0.5f * gravity * range * range / (speed * speed) : 0.0f;
-  if (k <= 1.0e-9f) {
-    return height / range;
-  }
-  const float discriminant = range * range - 4.0f * k * (height + k);
-  if (discriminant < 0.0f) {
-    return range / (2.0f * k);  // out of reach: the 45 degree-ish maximum
-  }
-  // Stable form of the smaller root (L - sqrt(D)) / 2k: no cancellation.
-  return 2.0f * (height + k) / (range + std::sqrt(discriminant));
-}
-
 }  // namespace
 
 Viewmodel::Viewmodel(const WeaponGeometry& geometry,
@@ -122,18 +106,28 @@ Viewmodel::Viewmodel(const WeaponGeometry& geometry,
                                glm::vec3(0.0f, 0.0f, -1.0f));
   aligned_ = glm::quat_cast(camera_frame * glm::transpose(model_frame));
 
+  sight_forward_ = forward;
+  sight_up_ = up;
+  inspect_center_ = 0.5f * (geometry_.grip + geometry_.muzzle);
+  inspect_radius_ = 0.5f * glm::length(geometry_.muzzle - geometry_.grip);
+  SetZeroDistance(tuning_.zero_distance);
+  Update(ViewmodelInput{});
+}
+
+void Viewmodel::SetZeroDistance(float distance) {
+  tuning_.zero_distance = distance;
   // Where the muzzle sits relative to the sight line when aimed.
   const glm::vec3 muzzle =
       aligned_ *
       ((geometry_.muzzle - geometry_.sight_eye_point) * geometry_.scale);
-  const float height = -muzzle.y;
-  const float ahead = tuning_.eye_relief - muzzle.z;
-  zero_angle_ =
-      std::atan(ZeroTangent(height, tuning_.zero_distance - ahead,
-                            tuning_.muzzle_velocity, tuning_.gravity));
-  bore_direction_model_ =
-      std::cos(zero_angle_) * forward + std::sin(zero_angle_) * up;
-  Update(ViewmodelInput{});
+  zero_angle_ = ZeroAngle({.muzzle_below = -muzzle.y,
+                           .muzzle_ahead = tuning_.eye_relief - muzzle.z,
+                           .muzzle_velocity = tuning_.muzzle_velocity,
+                           .drag = tuning_.bullet_drag,
+                           .gravity = tuning_.gravity},
+                          distance);
+  bore_direction_model_ = std::cos(zero_angle_) * sight_forward_ +
+                          std::sin(zero_angle_) * sight_up_;
 }
 
 void Viewmodel::Update(const ViewmodelInput& input) {
@@ -148,6 +142,18 @@ void Viewmodel::Update(const ViewmodelInput& input) {
       Approach(sprint_, input.sprinting ? 1.0f : 0.0f, tuning_.pose_rate, dt);
   reload_ =
       Approach(reload_, input.reloading ? 1.0f : 0.0f, tuning_.pose_rate, dt);
+  const float inspect_rate =
+      kBlendTimeConstants / std::max(tuning_.inspect_time, 1.0e-3f);
+  inspect_.blend = Approach(inspect_.blend, input.inspecting ? 1.0f : 0.0f,
+                            inspect_rate, dt);
+  if (input.inspecting) {
+    inspect_.angles += input.inspect_turn;
+    inspect_.angles.y =
+        std::clamp(inspect_.angles.y, -tuning_.inspect_max_pitch,
+                   tuning_.inspect_max_pitch);
+  } else if (inspect_.blend == 0.0f) {
+    inspect_.angles = glm::vec2(0.0f);
+  }
   const float aim_weight = Smooth(aim_);
   const float motion_scale =
       1.0f + (tuning_.aim_motion_scale - 1.0f) * aim_weight;
@@ -207,16 +213,42 @@ void Viewmodel::Update(const ViewmodelInput& input) {
                                         sway_.x * motion_scale, 0.0f);
   const glm::vec3 eye_side =
       pose.sight_offset + bob + glm::vec3(0.0f, 0.0f, recoil_back_);
-  const glm::quat pose_rotation = PoseRotation(rotation);
-  const glm::quat camera_rotation = pose_rotation * aligned_;
+  const glm::quat hand_rotation = PoseRotation(rotation) * aligned_;
+  // Model origin in camera space: the eye point sits at `eye_side`.
+  const glm::vec3 hand_origin =
+      eye_side - hand_rotation * (geometry_.scale * geometry_.sight_eye_point);
+
+  // The inspect pose: the weapon's centre ahead of the eye, side-on and
+  // turned by the drag; blended in from the hand pose.
+  const float inspect_weight = inspect_fraction();
+  glm::quat camera_rotation = hand_rotation;
+  glm::vec3 origin = hand_origin;
+  if (inspect_weight > 0.0f) {
+    const float distance = std::max(tuning_.inspect_min_distance,
+                                    tuning_.inspect_distance_per_radius *
+                                        inspect_radius_ * geometry_.scale);
+    const glm::vec3 center(tuning_.inspect_offset * distance, -distance);
+    const glm::quat inspect_rotation =
+        glm::angleAxis(-inspect_.angles.y, glm::vec3(1.0f, 0.0f, 0.0f)) *
+        glm::angleAxis(kInspectBaseYaw + inspect_.angles.x,
+                       glm::vec3(0.0f, 1.0f, 0.0f)) *
+        aligned_;
+    const glm::vec3 inspect_origin =
+        center - inspect_rotation * (geometry_.scale * inspect_center_);
+    camera_rotation =
+        glm::slerp(hand_rotation, inspect_rotation, inspect_weight);
+    origin = glm::mix(hand_origin, inspect_origin, inspect_weight);
+  }
+  // `aligned_` maps the sight frame onto the camera axes; this is the turn
+  // of the sight frame away from them.
+  const glm::quat pose_rotation = camera_rotation * glm::inverse(aligned_);
 
   const glm::mat4 camera_to_world =
       CameraToWorld(input.eye_position, input.look, input.roll);
   const glm::mat4 model_to_camera =
-      glm::translate(glm::mat4(1.0f), eye_side) *
+      glm::translate(glm::mat4(1.0f), origin) *
       glm::mat4_cast(camera_rotation) *
-      glm::scale(glm::mat4(1.0f), glm::vec3(geometry_.scale)) *
-      glm::translate(glm::mat4(1.0f), -geometry_.sight_eye_point);
+      glm::scale(glm::mat4(1.0f), glm::vec3(geometry_.scale));
   model_ = camera_to_world * model_to_camera;
   muzzle_position_ = glm::vec3(model_ * glm::vec4(geometry_.muzzle, 1.0f));
   grip_position_ = glm::vec3(model_ * glm::vec4(geometry_.grip, 1.0f));
@@ -227,6 +259,7 @@ void Viewmodel::Update(const ViewmodelInput& input) {
   // `aligned_` maps the sight frame onto the camera axes, so the posed lens
   // axes are the pose rotation applied to them.
   lens_center_ = glm::vec3(model_ * glm::vec4(geometry_.optic_lens, 1.0f));
+  eyepiece_center_ = glm::vec3(model_ * glm::vec4(geometry_.eyepiece, 1.0f));
   lens_right_ = glm::normalize(camera_to_world_rotation *
                                (pose_rotation * glm::vec3(1.0f, 0.0f, 0.0f)));
   lens_up_ = glm::normalize(camera_to_world_rotation *
@@ -248,7 +281,22 @@ void Viewmodel::Reset() {
   recoil_pitch_ = 0.0f;
   recoil_pitch_velocity_ = 0.0f;
   look_kick_ = glm::vec2(0.0f);
+  inspect_ = InspectState{};
 }
+
+void Viewmodel::SetInspectBounds(glm::vec3 center, float radius) {
+  inspect_center_ = center;
+  inspect_radius_ = std::max(radius, 0.0f);
+}
+
+void Viewmodel::set_inspect_state(const InspectState& state) {
+  inspect_.blend = std::clamp(state.blend, 0.0f, 1.0f);
+  inspect_.angles = state.angles;
+  inspect_.angles.y = std::clamp(inspect_.angles.y, -tuning_.inspect_max_pitch,
+                                 tuning_.inspect_max_pitch);
+}
+
+float Viewmodel::inspect_fraction() const { return Smooth(inspect_.blend); }
 
 glm::mat4 Viewmodel::lens_matrix() const {
   const float radius = lens_radius();

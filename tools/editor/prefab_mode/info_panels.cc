@@ -8,6 +8,7 @@
 #include "core/path.h"
 #include "editor/document.h"
 #include "editor/editor_context.h"
+#include "editor/memory_report.h"
 #include "editor/prefab_mode/prefab_edit.h"
 #include "editor/prefab_mode/prefab_mode_state.h"
 #include "editor/prefab_mode/prefab_panels.h"
@@ -104,10 +105,21 @@ void PrefabInfoPanel::Draw(EditorContext& context) {
     row("Texture data", std::format("{:.1f} KiB", Kib(summary.texture_bytes)));
     row("Collision data",
         std::format("{:.1f} KiB", Kib(summary.collision_bytes)));
-    row("Memory held (incl. undo)",
-        std::format("{:.1f} KiB", Kib(summary.storage_bytes)));
+    const MemoryReport memory = context.memory_report();
+    row("Bulk in RAM (heap / mapped)",
+        std::format("{} / {}", FormatBytes(memory.document.heap),
+                    FormatBytes(memory.document.mapped)));
+    row("Undo history keeps (heap / mapped)",
+        std::format("{} / {} (budget {})", FormatBytes(memory.history.heap),
+                    FormatBytes(memory.history.mapped),
+                    FormatBytes(memory.history_budget)));
     row("GPU memory (all cached prefabs)",
-        std::format("{:.1f} KiB", Kib(context.prefab_cache().gpu_bytes())));
+        FormatBytes(memory.prefab_cache_gpu_bytes));
+    if (memory.process.available) {
+      row("Editor process (private / working set)",
+          std::format("{} / {}", FormatBytes(memory.process.private_bytes),
+                      FormatBytes(memory.process.working_set)));
+    }
     const glm::vec3 size = prefab.bounds.size();
     row("Bounds",
         std::format("{:.3f} x {:.3f} x {:.3f} m", size.x, size.y, size.z));

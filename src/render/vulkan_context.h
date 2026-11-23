@@ -48,6 +48,21 @@ class VulkanContext {
   // Whether anisotropic filtering is enabled (the samplerAnisotropy feature
   // is optional); the limit is properties().limits.maxSamplerAnisotropy.
   [[nodiscard]] bool sampler_anisotropy() const { return sampler_anisotropy_; }
+  // Whether VK_EXT_memory_budget is enabled (it is optional): the allocator
+  // then reports the driver's per-process heap usage and budget.
+  [[nodiscard]] bool memory_budget() const { return memory_budget_; }
+
+  // Upload staging memory allocated right now and its high-water mark, in
+  // bytes (see StagingUploader).
+  struct StagingUsage {
+    VkDeviceSize current = 0;
+    VkDeviceSize peak = 0;
+  };
+  [[nodiscard]] StagingUsage staging_usage() const { return staging_usage_; }
+  // Bookkeeping for StagingUploader: `bytes` of staging memory were created
+  // (Add) or destroyed (Remove).
+  void AddStagingBytes(VkDeviceSize bytes) const;
+  void RemoveStagingBytes(VkDeviceSize bytes) const;
 
   // Records commands with `record` and blocks until the GPU has executed
   // them. Intended for setup work such as resource uploads, not per-frame use.
@@ -73,6 +88,9 @@ class VulkanContext {
   uint32_t queue_family_ = 0;
   uint32_t timestamp_valid_bits_ = 0;
   bool sampler_anisotropy_ = false;
+  bool memory_budget_ = false;
+  // Statistics only; uploads update them through a const context.
+  mutable StagingUsage staging_usage_;
   VmaAllocator allocator_ = VK_NULL_HANDLE;
   VkCommandPool immediate_pool_ = VK_NULL_HANDLE;
 };

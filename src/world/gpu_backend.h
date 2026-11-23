@@ -43,6 +43,10 @@ class GpuBackend {
   virtual void ReleaseMesh(render::MeshId id) = 0;
   virtual void ReleaseTextures(std::span<const render::TextureId> ids) = 0;
   virtual void ReleaseMaterial(render::MaterialId id) = 0;
+  // Destroys released resources now instead of after the frames in flight
+  // (waits for them), so their memory is free before a large upload. Call
+  // between frames; not per frame. The default does nothing.
+  virtual void FlushReleases() {}
 };
 
 // The GpuBackend of a real renderer. Borrows `renderer`, which must outlive
@@ -64,6 +68,7 @@ class RendererBackend final : public GpuBackend {
   void ReleaseMesh(render::MeshId id) override;
   void ReleaseTextures(std::span<const render::TextureId> ids) override;
   void ReleaseMaterial(render::MaterialId id) override;
+  void FlushReleases() override;
 
  private:
   render::Renderer& renderer_;

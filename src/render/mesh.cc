@@ -4,14 +4,14 @@
 
 namespace blue::render {
 
-Mesh::Mesh(const VulkanContext& context, const asset::MeshData& data)
-    : vertex_buffer_(CreateGpuBuffer(context,
-                                     std::as_bytes(std::span(data.vertices)),
+Mesh::Mesh(const VulkanContext& context,
+           std::span<const asset::Vertex> vertices,
+           std::span<const asset::Index> indices)
+    : vertex_buffer_(CreateGpuBuffer(context, std::as_bytes(vertices),
                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)),
-      index_buffer_(CreateGpuBuffer(context,
-                                    std::as_bytes(std::span(data.indices)),
+      index_buffer_(CreateGpuBuffer(context, std::as_bytes(indices),
                                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT)),
-      index_count_(static_cast<uint32_t>(data.indices.size())) {}
+      index_count_(static_cast<uint32_t>(indices.size())) {}
 
 void Mesh::Bind(VkCommandBuffer cmd) const {
   const VkBuffer vertex_buffer = vertex_buffer_.handle();

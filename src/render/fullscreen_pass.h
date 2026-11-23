@@ -40,6 +40,10 @@ struct FullscreenTarget {
   // LOAD keeps what is there (e.g. for additive blending); DONT_CARE when
   // the triangle overwrites every pixel anyway.
   VkAttachmentLoadOp load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  // The pixels to draw (render area and scissor), inside `extent`; pixels
+  // outside keep their contents. An empty extent draws the whole target.
+  // The viewport, hence inUv, always spans the whole target.
+  VkRect2D area{};
 };
 
 // A pass that runs one fragment shader over a whole target: tonemapping,

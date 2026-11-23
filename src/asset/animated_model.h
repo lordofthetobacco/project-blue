@@ -17,6 +17,8 @@
 
 namespace blue::asset {
 
+class EmbeddedImages;
+
 // The mesh drawn at one node of an AnimatedModel. `mesh` is in the node's
 // local space (node transforms are not baked in), so it is drawn with the
 // node's world matrix from animation::ComputeWorldMatrices(). All primitives
@@ -60,8 +62,13 @@ struct AnimatedModel {
 // Files without animations import with empty `clips`. Errors as ImportModel():
 // kFileNotFound, kParseFailed, kNoMeshes (no part with triangles and normals)
 // and kTooLarge (a part's vertices overflow Index).
+// When `embedded` is not null, a successful import also moves the file's
+// embedded images into it (asset/texture_loader.h), so the textures that
+// `materials` reference with embedded_index can be decoded without parsing
+// the file again; it is left unchanged on failure.
 [[nodiscard]] core::Result<AnimatedModel, ImportError> ImportAnimatedModel(
-    const std::string& path, const ImportOptions& options = {});
+    const std::string& path, const ImportOptions& options = {},
+    EmbeddedImages* embedded = nullptr);
 
 }  // namespace blue::asset
 

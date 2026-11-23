@@ -102,6 +102,22 @@ template <typename T>
 
 ImTextureID ThumbnailCache::Get(EditorContext& context,
                                 const prefab::Texture& texture) {
+  if (!stale_.empty() && context.frame_count() > stale_frame_) {
+    for (const ImTextureID id : stale_) {
+      context.ReleaseImageTexture(id);
+    }
+    stale_.clear();
+  }
+  if (context.prefab_generation() != generation_) {
+    for (const auto& [old_key, id] : thumbnails_) {
+      if (id != ImTextureID{}) {
+        stale_.push_back(id);
+      }
+    }
+    thumbnails_.clear();
+    stale_frame_ = context.frame_count();
+    generation_ = context.prefab_generation();
+  }
   if (texture.mips.empty()) {
     return ImTextureID{};
   }
@@ -116,6 +132,12 @@ ImTextureID ThumbnailCache::Get(EditorContext& context,
          std::max(texture.mips[static_cast<size_t>(mip)].width,
                   texture.mips[static_cast<size_t>(mip)].height) > kMaxSize) {
     ++mip;
+  }
+  const prefab::TextureMip& level = texture.mips[static_cast<size_t>(mip)];
+  if (std::max(level.width, level.height) > kMaxDecodeSize) {
+    // No small mip: decoding a large level would cost tens of megabytes.
+    thumbnails_.emplace(key, ImTextureID{});
+    return ImTextureID{};
   }
   const asset::ImageData image = cook::DecodeTextureMip(texture, mip);
   ImTextureID id{};
@@ -391,6 +413,9 @@ void StartImportCook(EditorContext& context, PrefabModeShared& shared) {
     return;
   }
   shared.cook_target = dialog.target;
+  // The preview's GPU copy is freed while the cook runs (its peak memory
+  // should not depend on what is open); it comes back afterwards.
+  context.SetPrefabPreviewSuspended(true);
   context.Status(std::format("Cooking {}...", core::FileName(dialog.path)));
 }
 
@@ -401,6 +426,11 @@ void FinishImportCook(EditorContext& context, PrefabModeShared& shared) {
     return;
   }
   const std::string& source = shared.cook.path();
+  if (!result->ok() || shared.cook_target != ImportTarget::kNewDocument) {
+    // A new document lifts the suspension when it replaces the old one (or
+    // the user keeps the old one).
+    context.SetPrefabPreviewSuspended(false);
+  }
   if (!result->ok()) {
     context.ShowError("Import model",
                       std::format("Cannot import {}: {}", source,

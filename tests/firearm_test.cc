@@ -313,7 +313,7 @@ TEST_CASE("negative dt is treated as zero") {
 
 TEST_CASE("a semi-only weapon starts and stays in semi") {
   FirearmSpec spec;
-  spec.select_fire = false;
+  spec.fire_modes = FireModeBit(FireMode::kSemi);
   spec.fire_mode = FireMode::kAuto;
   Firearm firearm(spec);
   CHECK(firearm.fire_mode() == FireMode::kSemi);
@@ -340,6 +340,43 @@ TEST_CASE("the pistol spec: 17 + 1 rounds, semi only, 3 spares") {
   // 0.5 s of clicking at 120 pulls per second: 1100 rpm allows 9 + 1.
   CHECK(shots <= 10);
   CHECK(shots >= 8);
+}
+
+TEST_CASE("double action fires once per trigger pull") {
+  FirearmSpec spec;
+  spec.fire_modes = FireModeBit(FireMode::kDoubleAction);
+  Firearm firearm(spec);
+  CHECK(firearm.fire_mode() == FireMode::kDoubleAction);
+  CHECK(RunFor(firearm, Trigger(), kFrame, 1.0f).shots == 1);
+  (void)firearm.Update(Idle(), kFrame);
+  CHECK(RunFor(firearm, Trigger(), kFrame, 1.0f).shots == 1);
+}
+
+TEST_CASE("the selector cycles through every available mode in order") {
+  FirearmSpec spec;
+  spec.fire_modes = FireModeBit(FireMode::kSemi) |
+                    FireModeBit(FireMode::kAuto) |
+                    FireModeBit(FireMode::kDoubleAction);
+  spec.fire_mode = FireMode::kAuto;
+  Firearm firearm(spec);
+  CHECK(firearm.fire_mode() == FireMode::kAuto);
+  const FirearmInput toggle{.fire_mode_pressed = true};
+  CHECK(firearm.Update(toggle, kFrame).fire_mode_changed);
+  CHECK(firearm.fire_mode() == FireMode::kDoubleAction);
+  (void)firearm.Update(toggle, kFrame);
+  CHECK(firearm.fire_mode() == FireMode::kSemi);
+  (void)firearm.Update(toggle, kFrame);
+  CHECK(firearm.fire_mode() == FireMode::kAuto);
+}
+
+TEST_CASE("an empty fire mode set behaves as semi only") {
+  FirearmSpec spec;
+  spec.fire_modes = 0;
+  spec.fire_mode = FireMode::kAuto;
+  Firearm firearm(spec);
+  CHECK(firearm.fire_mode() == FireMode::kSemi);
+  CHECK_FALSE(
+      firearm.Update({.fire_mode_pressed = true}, kFrame).fire_mode_changed);
 }
 
 TEST_CASE("CancelReload does nothing without a reload") {
@@ -398,6 +435,121 @@ TEST_CASE("CancelReload keeps the magazine bookkeeping at every stage") {
       CHECK(firearm.round_chambered());
       CHECK_FALSE(firearm.bolt_locked_back());
     }
+  }
+}
+
+TEST_CASE("a weapon that is not functional neither fires nor reloads") {
+  FirearmSpec spec = Glock17Spec();
+  spec.functional = false;
+  Firearm pistol(spec);
+  const FirearmEvents pulled = pistol.Update(Trigger(), kFrame);
+  CHECK(pulled.shots == 0);
+  CHECK_FALSE(pulled.dry_fire);
+  (void)pistol.Update(Idle(), kFrame);
+  CHECK_FALSE(pistol.Update(Reload(), kFrame).reload_started);
+  CHECK(pistol.round_chambered());
+  CHECK(pistol.rounds_in_magazine() == 17);
+}
+
+TEST_CASE("a weapon without a magazine fires its chambered round only") {
+  FirearmSpec spec = Glock17Spec();
+  spec.magazine_capacity = 0;
+  Firearm pistol(spec);
+  CHECK_FALSE(pistol.magazine_inserted());
+  CHECK(pistol.rounds_loaded() == 1);
+  CHECK(pistol.spare_magazines().empty());
+  CHECK(PullOnce(pistol) == 1);
+  CHECK(pistol.bolt_locked_back());
+  CHECK(PullOnce(pistol) == 0);
+  CHECK_FALSE(pistol.Update(Reload(), kFrame).reload_started);
+}
+
+TEST_CASE("Refit keeps the state the new parts allow") {
+  const FirearmSpec stock = Glock17Spec();
+  FirearmSpec extended = stock;
+  extended.magazine_capacity = 33;
+  FirearmSpec bare = stock;
+  bare.magazine_capacity = 0;
+
+  SUBCASE("a bigger magazine keeps the rounds") {
+    Firearm pistol(stock);
+    (void)PullOnce(pistol);
+    pistol.Refit(extended);
+    CHECK(pistol.spec().magazine_capacity == 33);
+    CHECK(pistol.rounds_in_magazine() == 16);
+    CHECK(pistol.round_chambered());
+    CHECK(pistol.spare_magazines().size() == 3);
+  }
+  SUBCASE("a smaller magazine drops the rounds above its capacity") {
+    Firearm pistol(extended);
+    FirearmSpec small = stock;
+    small.magazine_capacity = 10;
+    pistol.Refit(small);
+    CHECK(pistol.rounds_in_magazine() == 10);
+    CHECK(pistol.round_chambered());
+    for (const int rounds : pistol.spare_magazines()) {
+      CHECK(rounds == 10);
+    }
+  }
+  SUBCASE("taking the magazine off leaves the chambered round, no reload") {
+    Firearm pistol(stock);
+    pistol.Refit(bare);
+    CHECK_FALSE(pistol.magazine_inserted());
+    CHECK(pistol.rounds_in_magazine() == 0);
+    CHECK(pistol.rounds_loaded() == 1);
+    CHECK_FALSE(pistol.Update(Reload(), kFrame).reload_started);
+    CHECK(PullOnce(pistol) == 1);
+    CHECK(PullOnce(pistol) == 0);
+    // Spares stay with the weapon for when a magazine is fitted again.
+    CHECK(pistol.spare_magazines().size() == 3);
+  }
+  SUBCASE("a magazine fitted again goes in full") {
+    Firearm pistol(stock);
+    pistol.Refit(bare);
+    pistol.Refit(stock);
+    CHECK(pistol.magazine_inserted());
+    CHECK(pistol.rounds_in_magazine() == 17);
+    CHECK(pistol.round_chambered());
+  }
+  SUBCASE("a running reload is cancelled") {
+    Firearm pistol(stock);
+    (void)PullOnce(pistol);
+    REQUIRE(pistol.Update(Reload(), kFrame).reload_started);
+    pistol.Refit(extended);
+    CHECK_FALSE(pistol.reloading());
+    CHECK(TotalSpareRounds(pistol) == 3 * 17);
+  }
+  SUBCASE("the fire mode stays if offered, else the start mode") {
+    FirearmSpec select = stock;
+    select.fire_modes =
+        FireModeBit(FireMode::kSemi) | FireModeBit(FireMode::kAuto);
+    Firearm pistol(select);
+    (void)pistol.Update({.fire_mode_pressed = true}, kFrame);
+    REQUIRE(pistol.fire_mode() == FireMode::kAuto);
+    pistol.Refit(select);
+    CHECK(pistol.fire_mode() == FireMode::kAuto);
+    pistol.Refit(stock);
+    CHECK(pistol.fire_mode() == FireMode::kSemi);
+  }
+  SUBCASE("a locked bolt stays locked") {
+    Firearm pistol(stock);
+    while (pistol.round_chambered()) {
+      (void)PullOnce(pistol);
+    }
+    REQUIRE(pistol.bolt_locked_back());
+    pistol.Refit(extended);
+    CHECK(pistol.bolt_locked_back());
+    CHECK_FALSE(pistol.round_chambered());
+  }
+  SUBCASE("losing a vital part stops the trigger") {
+    Firearm pistol(stock);
+    FirearmSpec broken = stock;
+    broken.functional = false;
+    pistol.Refit(broken);
+    CHECK(pistol.Update(Trigger(), kFrame).shots == 0);
+    (void)pistol.Update(Idle(), kFrame);
+    pistol.Refit(stock);
+    CHECK(pistol.Update(Trigger(), kFrame).shots == 1);
   }
 }
 

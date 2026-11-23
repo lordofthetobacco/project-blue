@@ -47,6 +47,8 @@ class ShadowPass {
   // The 2D-array view of all cascades and its comparison sampler (PCF).
   [[nodiscard]] VkImageView map_view() const { return map_.view(); }
   [[nodiscard]] VkSampler sampler() const { return sampler_; }
+  // Device memory of the cascade map, in bytes.
+  [[nodiscard]] VkDeviceSize map_bytes() const { return map_.size_bytes(); }
 
  private:
   // Moves the map out of its initial layout the first time, so it can be

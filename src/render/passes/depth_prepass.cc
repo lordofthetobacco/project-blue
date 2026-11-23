@@ -84,13 +84,13 @@ void DepthPrepass::CreatePipelines(bool masked,
 
 void DepthPrepass::Record(const FrameContext& ctx) const {
   const VkCommandBuffer cmd = ctx.cmd;
-  const Image& depth = ctx.targets.depth();
+  const Image& depth = ctx.scene_depth;
   // The previous frame sampled (SSAO) and depth-tested (scene) it.
   ImageBarrier(cmd, depth.handle(), VK_IMAGE_ASPECT_DEPTH_BIT, kDepthReaders,
                kDepthAttachment, VK_IMAGE_LAYOUT_UNDEFINED,
                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
-  const VkExtent2D extent = ctx.targets.extent();
+  const VkExtent2D extent = ctx.scene_extent;
   const VkRenderingAttachmentInfo depth_attachment{
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
       .imageView = depth.view(),

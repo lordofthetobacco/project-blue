@@ -65,9 +65,17 @@ class PrefabCache {
   // already cached, that entry is replaced (see Replace()).
   PrefabId Upload(prefab::Prefab prefab, std::string_view key);
 
-  // Replaces the prefab behind `id` and uploads it again. Worlds holding `id`
-  // must be rebuilt (World::Build()) before their next frame.
+  // Replaces the prefab behind `id` and uploads it again. The previous GPU
+  // resources and CPU copy are freed first (GpuBackend::FlushReleases()), so
+  // two versions never take memory at once. Worlds holding `id` must be
+  // rebuilt (World::Build()) before their next frame.
   void Replace(PrefabId id, prefab::Prefab prefab);
+
+  // Points the CPU copy of `id` at the bulk data of `source`, an equal prefab
+  // stored elsewhere (e.g. the editor document after saving, now a mapped
+  // file; see prefab::RebaseBulk). Nothing is uploaded. Returns false and
+  // changes nothing when `id` is released or the bulk arrays differ.
+  bool RebaseCpu(PrefabId id, const prefab::Prefab& source);
 
   // Frees the GPU resources of `id` (and the override materials derived
   // from it) and forgets its key; the CPU prefab is dropped too. `id` must

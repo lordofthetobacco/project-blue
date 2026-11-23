@@ -25,6 +25,7 @@
 #include "cook/clip_tools.h"
 #include "cook/collision_cook.h"
 #include "cook/cook_error.h"
+#include "cook/generated_file.h"
 #include "cook/model_cook.h"
 #include "core/log.h"
 #include "core/path.h"
@@ -38,6 +39,8 @@
 #include "scene/mscn_serializer.h"
 #include "scene/scene.h"
 #include "scene/scene_data.h"
+#include "tools/blue-pack/sample_parts.h"
+#include "weapon/weapon_def.h"
 #include "weapon/weapon_geometry.h"
 
 namespace blue::pack {
@@ -64,6 +67,10 @@ constexpr float kPistolSlideLockTime = 0.4f;  // s
 // A static copy of the moving parts merged into one mesh; drawing it would
 // hide the slide and trigger and z-fight with them.
 constexpr const char* kPistolDuplicateNode = "Glock_parts_ORIGINAL_combined";
+// Where the Glock parts and the parts catalogue go (asset root relative).
+constexpr std::string_view kPartsDirectory = "weapons/glock17/parts";
+constexpr std::string_view kCatalogDirectory = "weapons/catalog";
+constexpr std::string_view kBaseCatalog = "weapons/catalog/base.cfg";
 
 // ---------------------------------------------------------------------------
 // The range scene (formerly App::InitializeScene).
@@ -267,7 +274,56 @@ bool CookRifle(SampleCooker& cooker) {
   }
   prefab::Prefab prefab = std::move(cooked).value();
   AddWeaponSockets(prefab, weapon::M16Geometry());
+  prefab::SetTag(prefab, weapon::kWeaponTag, "m16");
   return cooker.Save(prefab, "m16", start);
+}
+
+// The Glock 17 cut into part prefabs plus the placeholder parts (see
+// sample_parts.h), from the cooked whole pistol.
+bool CookPistolParts(SampleCooker& cooker, const prefab::Prefab& pistol) {
+  const Clock::time_point start = Clock::now();
+  if (!platform::CreateDirectories(cooker.Out(kPartsDirectory))) {
+    core::log::Error("blue-pack samples: cannot create {}",
+                     cooker.Out(kPartsDirectory));
+    return false;
+  }
+  auto parts = MakeGlockParts(pistol, cooker.cook_options());
+  if (!parts.ok()) {
+    core::log::Error("blue-pack samples: Glock parts: {}", parts.error());
+    return false;
+  }
+  for (SamplePart& part : parts.value()) {
+    const std::string_view path = part.path;
+    if (!cooker.Save(part.prefab, path.substr(0, path.size() - 4), start)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// weapons/catalog/base.cfg; a copy the user edited is kept (the fresh text
+// then goes to base.generated.cfg, see cook/generated_file.h).
+bool CookPartsCatalog(const SampleCooker& cooker) {
+  if (!platform::CreateDirectories(cooker.Out(kCatalogDirectory))) {
+    core::log::Error("blue-pack samples: cannot create {}",
+                     cooker.Out(kCatalogDirectory));
+    return false;
+  }
+  const std::string path = cooker.Out(kBaseCatalog);
+  const std::string text = BaseCatalogText();
+  auto written = cook::WriteGeneratedFile(
+      path, std::as_bytes(std::span(text.data(), text.size())));
+  if (!written.ok()) {
+    core::log::Error("blue-pack samples: {}", written.error());
+    return false;
+  }
+  if (written.value().kept_user_file) {
+    core::log::Warn(
+        "blue-pack samples: kept {} (edited since it was generated); the "
+        "generated catalogue was written to {} - delete {} to regenerate it",
+        path, written.value().written_path, path);
+  }
+  return true;
 }
 
 bool CookPistol(SampleCooker& cooker) {
@@ -296,7 +352,9 @@ bool CookPistol(SampleCooker& cooker) {
     return false;
   }
   AddWeaponSockets(prefab, weapon::Glock17Geometry());
-  return cooker.Save(prefab, "glock17", start);
+  prefab::SetTag(prefab, weapon::kWeaponTag, "glock17");
+  return cooker.Save(prefab, "glock17", start) &&
+         CookPistolParts(cooker, prefab);
 }
 
 bool CookHouse(SampleCooker& cooker) {
@@ -509,10 +567,24 @@ bool CookRangeScene(
   if (!issues.empty()) {
     return false;
   }
-  if (auto saved = scene::SaveMscn(scene, path); !saved.ok()) {
-    core::log::Error("blue-pack samples: cannot write {}: {}", path,
-                     scene::ToString(saved.error()));
+  auto encoded = scene::EncodeMscn(scene, path);
+  if (!encoded.ok()) {
+    core::log::Error("blue-pack samples: cannot encode {}: {}", path,
+                     scene::ToString(encoded.error()));
     return false;
+  }
+  // A range.mscn the user changed (e.g. saved from the editor) is kept; the
+  // fresh scene then goes beside it (see cook/generated_file.h).
+  auto written = cook::WriteGeneratedFile(path, encoded.value());
+  if (!written.ok()) {
+    core::log::Error("blue-pack samples: {}", written.error());
+    return false;
+  }
+  if (written.value().kept_user_file) {
+    core::log::Warn(
+        "blue-pack samples: kept {} (edited since it was generated); the "
+        "generated scene was written to {} - delete {} to regenerate it",
+        path, written.value().written_path, path);
   }
   core::log::Info(
       "sample range.mscn built in {:.0f} ms ({} instances)",
@@ -532,11 +604,12 @@ bool CookSamples(const SamplesOptions& options) {
   physics::PhysicsRuntime runtime;
   SampleCooker cooker(options);
   std::array<std::array<std::string, 5>, 2> preview_names;
-  const bool ok =
-      CookRifle(cooker) && CookPistol(cooker) && CookHouse(cooker) &&
-      CookGround(cooker) && CookTarget(cooker) && CookCrate(cooker) &&
-      CookSphere(cooker) && CookMaterialLibrary(cooker, preview_names) &&
-      CookRangeScene(cooker, preview_names);
+  const bool ok = CookRifle(cooker) && CookPistol(cooker) &&
+                  CookPartsCatalog(cooker) && CookHouse(cooker) &&
+                  CookGround(cooker) && CookTarget(cooker) &&
+                  CookCrate(cooker) && CookSphere(cooker) &&
+                  CookMaterialLibrary(cooker, preview_names) &&
+                  CookRangeScene(cooker, preview_names);
   core::log::Info("blue-pack samples: {} in {:.1f} s ({} textures)",
                   ok ? "done" : "FAILED",
                   std::chrono::duration<double>(Clock::now() - start).count(),

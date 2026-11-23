@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include <glm/ext/vector_uint4.hpp>
@@ -60,19 +61,36 @@ struct FrameUniforms {
   // x: number of valid point_lights, [0, kMaxPointLights].
   glm::uvec4 point_light_count;
   std::array<GpuPointLight, kMaxPointLights> point_lights;
+  // Camera::previous_view_projection, for the motion vectors of the weapon
+  // motion blur (render/motion_blur_math.h).
+  glm::mat4 previous_view_proj;
+  // x: blur scale (MotionBlurScale(); 0 when the blur is off), y: longest
+  // blur vector in pixels (twice z), z: largest blur radius in pixels
+  // (MotionBlurMaxRadius(), the tile size of RenderTargets::motion_tiles()),
+  // w: unused.
+  glm::vec4 motion_blur;
 };
 
 // Returns the uniforms of `view` for a render target of `extent`.
 // `cascades` are only read when `shadows` is true. The environment fields
-// stay zero (no environment yet). Point lights whose range sphere lies
-// outside the camera frustum are dropped; when more than kMaxPointLights
+// stay zero (no environment yet). The motion blur scale is 0 when
+// view.post disables the weapon motion blur. Point lights whose range sphere
+// lies outside the camera frustum are dropped; when more than kMaxPointLights
 // remain, the ones that light the camera position the least are dropped.
 // Allocates nothing.
 [[nodiscard]] FrameUniforms MakeFrameUniforms(
     const SceneView& view, std::span<const lighting::Cascade> cascades,
     bool shadows, VkExtent2D extent);
 
-// Descriptor set 0 of the scene passes, one per frame in flight:
+// The views a frame renders with their own uniforms: the camera's and a
+// rifle scope's (SceneView::scope).
+enum class FrameView : uint32_t {
+  kMain = 0,
+  kScope = 1,
+};
+inline constexpr size_t kFrameViewCount = 2;
+
+// Descriptor set 0 of the scene passes, one per frame in flight and view:
 //   binding 0: FrameUniforms (uniform buffer)
 //   binding 1: cascaded shadow map (sampler2DArrayShadow)
 //   binding 2: prefiltered environment cube (samplerCube), specular IBL
@@ -80,6 +98,8 @@ struct FrameUniforms {
 //   binding 4: ambient occlusion (sampler2D, R, render-target sized)
 // Bindings 2-4 start bound to 1 x 1 defaults (black cube, zero LUT, white
 // AO) so shaders can sample them before the passes that produce them exist.
+// The scope view's sets share every image but the ambient occlusion, which
+// stays the white default (no SSAO in the scope picture).
 // Borrows `context` and `samplers`, which must outlive it. Neither copyable
 // nor movable. Not thread-safe.
 class FrameGlobals {
@@ -91,12 +111,14 @@ class FrameGlobals {
   FrameGlobals& operator=(const FrameGlobals&) = delete;
 
   [[nodiscard]] VkDescriptorSetLayout set_layout() const { return layout_; }
-  [[nodiscard]] VkDescriptorSet set(size_t frame) const {
-    return frames_[frame].set;
+  [[nodiscard]] VkDescriptorSet set(size_t frame,
+                                    FrameView view = FrameView::kMain) const {
+    return frames_[Index(frame, view)].set;
   }
-  // Copies `uniforms` into the buffer of `frame`, whose previous use the GPU
-  // must have finished (its fence waited on).
-  void Write(size_t frame, const FrameUniforms& uniforms) const;
+  // Copies `uniforms` into the buffer of `frame` and `view`, whose previous
+  // use the GPU must have finished (its fence waited on).
+  void Write(size_t frame, const FrameUniforms& uniforms,
+             FrameView view = FrameView::kMain) const;
 
   // The Bind* calls rewrite a binding of every frame's set: no frame may be
   // in flight (call while the GPU is idle, e.g. at startup or after a
@@ -112,15 +134,21 @@ class FrameGlobals {
     VkDescriptorSet set = VK_NULL_HANDLE;
   };
 
-  // Points `binding` of every frame's set at `view` with `sampler`.
+  static size_t Index(size_t frame, FrameView view) {
+    return frame * kFrameViewCount + static_cast<size_t>(view);
+  }
+  // Points `binding` of every frame's set (only those of `only` when set)
+  // at `view` with `sampler`.
   void BindImage(uint32_t binding, VkImageView view, VkSampler sampler,
-                 VkImageLayout layout);
+                 VkImageLayout layout,
+                 std::optional<FrameView> only = std::nullopt);
 
   VkDevice device_;
   const Samplers& samplers_;
   VkDescriptorSetLayout layout_ = VK_NULL_HANDLE;
   VkDescriptorPool pool_ = VK_NULL_HANDLE;
-  std::array<Frame, kFramesInFlight> frames_;
+  // Indexed by Index().
+  std::array<Frame, kFramesInFlight * kFrameViewCount> frames_;
   Image default_cube_;
   Image default_lut_;
   Image default_ambient_occlusion_;

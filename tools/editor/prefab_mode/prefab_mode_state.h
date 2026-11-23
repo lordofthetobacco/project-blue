@@ -14,6 +14,7 @@
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include <glm/vec3.hpp>
 
@@ -53,12 +54,15 @@ struct AnimationPreview {
 
 // Thumbnails of prefab textures for ImGui, keyed by the texture's identity
 // (its first mip's bytes, which never change once stored), so undo and
-// structural edits reuse them. Thumbnails are never released: the renderer
-// keeps textures resident until exit, and each is at most kMaxSize square.
+// structural edits reuse them. Each is decoded from the first mip of at most
+// kMaxSize (never a large level: a texture whose smallest mip is above
+// kMaxDecodeSize gets none) and is at most kMaxSize square. All are released
+// when the prefab document is replaced (EditorContext::prefab_generation()).
 // Not thread-safe.
 class ThumbnailCache {
  public:
   static constexpr int kMaxSize = 128;
+  static constexpr int kMaxDecodeSize = 256;
 
   ThumbnailCache() = default;
   ThumbnailCache(const ThumbnailCache&) = delete;
@@ -72,6 +76,11 @@ class ThumbnailCache {
  private:
   using Key = std::tuple<const std::byte*, int, int, int>;
   std::map<Key, ImTextureID> thumbnails_;
+  uint64_t generation_ = 0;  // EditorContext::prefab_generation() seen
+  // Thumbnails of a replaced document, released in a later frame than the
+  // one that may still draw them.
+  std::vector<ImTextureID> stale_;
+  uint64_t stale_frame_ = 0;
 };
 
 // A model cook running on a worker thread so the UI keeps drawing. At most
@@ -163,7 +172,9 @@ struct PrefabModeShared {
 // and, if it returns no error, makes the copy the new state as one undo step.
 // Otherwise the document is untouched and the error is shown in a modal
 // titled `label`. Returns true on success. Copies are cheap (bulk data is
-// shared); meant for buttons and commands, not per-frame drags.
+// shared); meant for buttons and commands, not per-frame drags. Bulk blocks
+// the change superseded (a replaced texture or mesh) are dropped from the new
+// state (prefab::CompactStorage), so only undo steps keep them alive.
 template <typename Change>
 bool TryEdit(EditorContext& context, PrefabDocument& document,
              std::string_view label, ChangeKind kind, Change&& change) {
@@ -172,6 +183,7 @@ bool TryEdit(EditorContext& context, PrefabDocument& document,
     context.ShowError(std::string(label), std::move(*error));
     return false;
   }
+  prefab::CompactStorage(copy);
   document.Edit(label, kind,
                 [&](prefab::Prefab& prefab) { prefab = std::move(copy); });
   return true;
@@ -186,6 +198,7 @@ core::Result<void, std::string> TryEditQuiet(PrefabDocument& document,
   if (std::optional<std::string> error = std::forward<Change>(change)(copy)) {
     return core::Result<void, std::string>::Error(std::move(*error));
   }
+  prefab::CompactStorage(copy);
   document.Edit(label, kind,
                 [&](prefab::Prefab& prefab) { prefab = std::move(copy); });
   return core::Result<void, std::string>::Ok();

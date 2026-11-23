@@ -23,6 +23,31 @@ constexpr bool kEnableValidation = true;
 constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
 constexpr std::array kDeviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
+// Size of the device memory blocks VMA sub-allocates from (its default is
+// 256 MiB). VMA gives every allocation larger than half a block its own
+// VkDeviceMemory and keeps one empty block per memory type after frees.
+// With 256 MiB blocks, 13 cooked 4k textures (22 MiB each) filled 448 MiB
+// of blocks (64 + 128 + 256) and a 256 MiB block stayed committed after
+// they were released. With 16 MiB blocks, textures, meshes and staging
+// buffers above 8 MiB are dedicated allocations that go back to the driver
+// on release, small ones still share blocks (VMA stops preferring dedicated
+// memory near maxMemoryAllocationCount), and an empty block kept for reuse
+// is 16 MiB.
+constexpr VkDeviceSize kPreferredBlockSize = VkDeviceSize{16} << 20;
+
+// Returns whether `device` supports the device extension `name`.
+bool HasDeviceExtension(VkPhysicalDevice device, const char* name) {
+  uint32_t count = 0;
+  vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+  std::vector<VkExtensionProperties> available(count);
+  vkEnumerateDeviceExtensionProperties(device, nullptr, &count,
+                                       available.data());
+  return std::ranges::any_of(
+      available, [name](const VkExtensionProperties& extension) {
+        return std::strcmp(extension.extensionName, name) == 0;
+      });
+}
+
 // A physical device that can run the renderer, with its preference score.
 struct DeviceCandidate {
   VkPhysicalDevice device = VK_NULL_HANDLE;
@@ -66,17 +91,8 @@ bool IsLayerAvailable(const char* name) {
 }
 
 bool SupportsDeviceExtensions(VkPhysicalDevice device) {
-  uint32_t count = 0;
-  vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
-  std::vector<VkExtensionProperties> available(count);
-  vkEnumerateDeviceExtensionProperties(device, nullptr, &count,
-                                       available.data());
-
-  return std::ranges::all_of(kDeviceExtensions, [&](const char* required) {
-    return std::ranges::any_of(
-        available, [required](const VkExtensionProperties& extension) {
-          return std::strcmp(extension.extensionName, required) == 0;
-        });
+  return std::ranges::all_of(kDeviceExtensions, [device](const char* name) {
+    return HasDeviceExtension(device, name);
   });
 }
 
@@ -281,6 +297,8 @@ void VulkanContext::SelectPhysicalDevice() {
   VkPhysicalDeviceFeatures supported{};
   vkGetPhysicalDeviceFeatures(physical_device_, &supported);
   sampler_anisotropy_ = supported.samplerAnisotropy == VK_TRUE;
+  memory_budget_ =
+      HasDeviceExtension(physical_device_, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
   core::log::Info(
       "GPU: {} (Vulkan {}.{}.{}, driver 0x{:x})", properties_.deviceName,
@@ -313,13 +331,18 @@ void VulkanContext::CreateDevice() {
                    .textureCompressionBC = VK_TRUE},
   };
 
+  std::vector<const char*> extensions(kDeviceExtensions.begin(),
+                                      kDeviceExtensions.end());
+  if (memory_budget_) {
+    extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+  }
   const VkDeviceCreateInfo create_info{
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
       .pNext = &features,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
-      .enabledExtensionCount = static_cast<uint32_t>(kDeviceExtensions.size()),
-      .ppEnabledExtensionNames = kDeviceExtensions.data(),
+      .enabledExtensionCount = static_cast<uint32_t>(extensions.size()),
+      .ppEnabledExtensionNames = extensions.data(),
   };
   CheckVk(vkCreateDevice(physical_device_, &create_info, nullptr, &device_));
   vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
@@ -331,8 +354,11 @@ void VulkanContext::CreateAllocator() {
       .vkGetDeviceProcAddr = vkGetDeviceProcAddr,
   };
   const VmaAllocatorCreateInfo create_info{
+      .flags = memory_budget_ ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT
+                              : VmaAllocatorCreateFlags{0},
       .physicalDevice = physical_device_,
       .device = device_,
+      .preferredLargeHeapBlockSize = kPreferredBlockSize,
       .pVulkanFunctions = &functions,
       .instance = instance_,
       .vulkanApiVersion = kApiVersion,
@@ -381,5 +407,14 @@ void VulkanContext::SubmitImmediate(
 }
 
 void VulkanContext::WaitIdle() const { CheckVk(vkDeviceWaitIdle(device_)); }
+
+void VulkanContext::AddStagingBytes(VkDeviceSize bytes) const {
+  staging_usage_.current += bytes;
+  staging_usage_.peak = std::max(staging_usage_.peak, staging_usage_.current);
+}
+
+void VulkanContext::RemoveStagingBytes(VkDeviceSize bytes) const {
+  staging_usage_.current -= std::min(bytes, staging_usage_.current);
+}
 
 }  // namespace blue::render

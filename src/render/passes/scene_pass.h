@@ -4,8 +4,10 @@
 #include "render/passes/frame_context.h"
 
 // The HDR scene pass: one dynamic-rendering scope on the HDR color target
-// and the scene depth, inside which MeshPass, ReticlePass (and later the
-// skybox) record their draws.
+// and the scene depth (FrameContext::scene_hdr / scene_depth, over
+// scene_extent from the top-left corner: the main view's targets or a
+// scope's picture), inside which MeshPass, SkyboxPass, ReticlePass and
+// ScopeLensPass record their draws.
 
 namespace blue::render {
 
@@ -16,6 +18,12 @@ namespace blue::render {
 // (negative height, so clip space matches GLM and CCW stays front-facing)
 // and scissor.
 void BeginScenePass(const FrameContext& ctx);
+
+// Same, but keeps the HDR target's contents: for draws that must come after
+// a pass that rewrites the image (the reflex sight after the weapon motion
+// blur). Expects the HDR target in SHADER_READ_ONLY_OPTIMAL, last written as
+// a color attachment. End with EndScenePass().
+void ResumeScenePass(const FrameContext& ctx);
 
 // Ends the rendering scope. Leaves the HDR target in
 // SHADER_READ_ONLY_OPTIMAL for the post chain; the depth target stays

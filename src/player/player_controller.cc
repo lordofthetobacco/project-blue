@@ -91,7 +91,8 @@ void PlayerController::Update(const input::InputFrame& input,
     // The look is linear in the delta, so scaling the delta scales the
     // sensitivity without copying the settings.
     const camera::LookAngles turned = camera::ApplyMouseLook(
-        look_, input.mouse_delta * SensitivityScale(), settings);
+        look_, input.mouse_delta * (SensitivityScale() * look_scale_),
+        settings);
     look_delta_ = {camera::WrapYaw(turned.yaw - look_.yaw),
                    turned.pitch - look_.pitch};
     look_ = turned;
@@ -156,8 +157,8 @@ void PlayerController::UpdateView(const input::InputSettings& settings,
     return;
   }
   const bool crouching = character_->crouching();
-  const float target_eye = crouching ? tuning_.eye_height_crouching
-                                     : tuning_.eye_height_standing;
+  const float target_eye =
+      crouching ? tuning_.eye_height_crouching : tuning_.eye_height_standing;
   eye_height_ += (target_eye - eye_height_) *
                  (1.0f - std::exp(-tuning_.stance_blend_rate * dt));
 
@@ -194,6 +195,10 @@ void PlayerController::UpdateView(const input::InputSettings& settings,
   };
 }
 
+void PlayerController::SetLookScale(float factor) {
+  look_scale_ = std::isfinite(factor) && factor > 0.0f ? factor : 1.0f;
+}
+
 void PlayerController::AddLookKick(float pitch_radians, float yaw_radians) {
   look_.pitch = std::clamp(look_.pitch + pitch_radians, -kMaxPitch, kMaxPitch);
   look_.yaw = camera::WrapYaw(look_.yaw + yaw_radians);
@@ -203,14 +208,9 @@ float PlayerController::SensitivityScale() const {
   // A mouse count turns the view by a fixed angle, but how far that moves the
   // picture on screen goes with 1 / tan(fov / 2); scale the angle by the
   // ratio of the half-angle tangents to keep the on-screen motion constant.
-  // Both angles are those of the last UpdateView; before the first one the
-  // controller has no field of view yet.
-  const float tan_unzoomed = std::tan(glm::radians(fov_.current()) * 0.5f);
-  if (!(tan_unzoomed > 0.0f)) {
-    return 1.0f;
-  }
-  return std::tan(glm::radians(view_.vertical_fov_degrees) * 0.5f) /
-         tan_unzoomed;
+  // Both angles are those of the last UpdateView; before the
+  // first one the controller has no field of view yet (scale 1).
+  return ZoomSensitivityScale(view_.vertical_fov_degrees, fov_.current());
 }
 
 bool PlayerController::crouching() const {

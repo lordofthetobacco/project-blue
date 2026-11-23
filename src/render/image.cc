@@ -2,13 +2,12 @@
 
 #include <algorithm>
 #include <bit>
-#include <cstring>
 #include <utility>
 #include <vector>
 
 #include "core/log.h"
 #include "render/barriers.h"
-#include "render/buffer.h"
+#include "render/staging_upload.h"
 #include "render/vk_check.h"
 
 namespace blue::render {
@@ -293,47 +292,24 @@ Image CreateSampledImage(const VulkanContext& context, ImageDesc desc,
   }
   Image image(context, desc);
 
-  Buffer staging(context.allocator(), expected,
-                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 Buffer::Access::kCpuSequentialWrite);
-  std::memcpy(staging.mapped(), texels.data(), texels.size_bytes());
-
-  context.SubmitImmediate([&](VkCommandBuffer cmd) {
-    ImageBarrier(
-        cmd, image.handle(), VK_IMAGE_ASPECT_COLOR_BIT, kNoAccess,
-        {VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT},
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    const VkBufferImageCopy2 region{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
-        .bufferOffset = 0,
-        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
-                             desc.array_layers},
-        .imageExtent = {desc.extent.width, desc.extent.height, 1},
-    };
-    const VkCopyBufferToImageInfo2 copy{
-        .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2,
-        .srcBuffer = staging.handle(),
-        .dstImage = image.handle(),
-        .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .regionCount = 1,
-        .pRegions = &region,
-    };
-    vkCmdCopyBufferToImage2(cmd, &copy);
-    RecordMipChain(cmd, image, mip_filter);
-  });
+  StagingUploader uploader(context, expected);
+  ImageBarrier(
+      uploader.cmd(), image.handle(), VK_IMAGE_ASPECT_COLOR_BIT, kNoAccess,
+      {VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT},
+      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  const size_t layer_bytes = texels.size_bytes() / desc.array_layers;
+  for (uint32_t layer = 0; layer < desc.array_layers; ++layer) {
+    uploader.CopyToImage(texels.subspan(layer * layer_bytes, layer_bytes),
+                         image.handle(), desc.format, desc.extent, 0, layer);
+  }
+  RecordMipChain(uploader.cmd(), image, mip_filter);
+  uploader.Finish();
   return image;
 }
 
 std::vector<Image> CreateImagesFromMipChains(
     const VulkanContext& context, std::span<const MipChainUpload> uploads) {
-  // Offsets of levels in the staging buffer are aligned to a BC block
-  // (16 bytes), which also satisfies the texel size of every other format.
-  constexpr VkDeviceSize kLevelAlignment = 16;
-  const auto align = [](VkDeviceSize offset) {
-    return (offset + kLevelAlignment - 1) / kLevelAlignment * kLevelAlignment;
-  };
-  VkDeviceSize staging_size = 0;
-  size_t region_count = 0;
+  VkDeviceSize total_bytes = 0;
   for (const MipChainUpload& upload : uploads) {
     if (upload.mips.size() != upload.desc.mip_levels ||
         upload.desc.array_layers != 1) {
@@ -341,9 +317,8 @@ std::vector<Image> CreateImagesFromMipChains(
                        upload.mips.size(), upload.desc.mip_levels);
     }
     for (const std::span<const std::byte> level : upload.mips) {
-      staging_size = align(staging_size) + level.size_bytes();
+      total_bytes += level.size_bytes();
     }
-    region_count += upload.mips.size();
   }
   std::vector<Image> images;
   images.reserve(uploads.size());
@@ -351,61 +326,28 @@ std::vector<Image> CreateImagesFromMipChains(
     return images;
   }
 
-  Buffer staging(context.allocator(), std::max(staging_size, VkDeviceSize{1}),
-                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 Buffer::Access::kCpuSequentialWrite);
-  auto* const staging_bytes = static_cast<std::byte*>(staging.mapped());
-  // Copy regions of all images, image after image; region_begin[i] is the
-  // first region of image i.
-  std::vector<VkBufferImageCopy2> regions;
-  regions.reserve(region_count);
-  std::vector<size_t> region_begin;
-  region_begin.reserve(uploads.size() + 1);
-  VkDeviceSize offset = 0;
+  // Image after image: its barrier into TRANSFER_DST, its levels (split
+  // over staging chunks as they fill up), its barrier to sampled reads.
+  constexpr BarrierScope kTransferWrite{VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                        VK_ACCESS_2_TRANSFER_WRITE_BIT};
+  StagingUploader uploader(context, total_bytes);
   for (const MipChainUpload& upload : uploads) {
     ImageDesc desc = upload.desc;
     desc.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    images.emplace_back(context, desc);
-    region_begin.push_back(regions.size());
+    const Image& image = images.emplace_back(context, desc);
+    ImageBarrier(uploader.cmd(), image.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
+                 kNoAccess, kTransferWrite, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     for (uint32_t level = 0; level < desc.mip_levels; ++level) {
-      const std::span<const std::byte> bytes = upload.mips[level];
-      offset = align(offset);
-      std::memcpy(staging_bytes + offset, bytes.data(), bytes.size_bytes());
-      const VkExtent2D extent = MipExtent(desc.extent, level);
-      regions.push_back({
-          .sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
-          .bufferOffset = offset,
-          .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
-          .imageExtent = {extent.width, extent.height, 1},
-      });
-      offset += bytes.size_bytes();
+      uploader.CopyToImage(upload.mips[level], image.handle(), desc.format,
+                           desc.extent, level, 0);
     }
+    ImageBarrier(uploader.cmd(), image.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
+                 kTransferWrite, kFragmentSampledRead,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
   }
-  region_begin.push_back(regions.size());
-
-  constexpr BarrierScope kTransferWrite{VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                                        VK_ACCESS_2_TRANSFER_WRITE_BIT};
-  context.SubmitImmediate([&](VkCommandBuffer cmd) {
-    for (size_t i = 0; i < images.size(); ++i) {
-      const VkImage image = images[i].handle();
-      ImageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, kNoAccess,
-                   kTransferWrite, VK_IMAGE_LAYOUT_UNDEFINED,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-      const VkCopyBufferToImageInfo2 copy{
-          .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2,
-          .srcBuffer = staging.handle(),
-          .dstImage = image,
-          .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-          .regionCount =
-              static_cast<uint32_t>(region_begin[i + 1] - region_begin[i]),
-          .pRegions = regions.data() + region_begin[i],
-      };
-      vkCmdCopyBufferToImage2(cmd, &copy);
-      ImageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, kTransferWrite,
-                   kFragmentSampledRead, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-  });
+  uploader.Finish();
   return images;
 }
 

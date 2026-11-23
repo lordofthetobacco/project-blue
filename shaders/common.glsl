@@ -35,6 +35,9 @@ layout(set = 0, binding = 0) uniform FrameUniforms {
                                               // z: max prefiltered mip, w: 1 if bound
     uvec4 pointLightCount;                    // x: valid entries of pointLights
     GpuPointLight pointLights[kMaxPointLights]; // Culled on the CPU, unshadowed.
+    mat4 previousViewProj;                    // Last frame's viewProj (motion blur).
+    vec4 motionBlur;                          // x: blur scale (0: off), y: max blur
+                                              // length (px), z: max radius (px)
 } frame;
 
 // Cascaded sun shadow map, one layer per cascade; compares against the

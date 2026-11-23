@@ -2,13 +2,32 @@
 #define BLUE_WEAPON_FIREARM_H_
 
 #include <array>
+#include <cstdint>
 #include <span>
 #include <string_view>
 #include <vector>
 
 namespace blue::weapon {
 
-enum class FireMode { kSemi, kAuto };
+// Trigger behaviour. kDoubleAction fires once per pull like kSemi (the
+// longer double-action trigger pull is not modelled).
+enum class FireMode { kSemi, kAuto, kDoubleAction };
+
+inline constexpr int kFireModeCount = 3;
+
+// A set of fire modes: bit i set = FireMode with value i available.
+using FireModeMask = uint32_t;
+
+// Returns the mask holding only `mode`.
+constexpr FireModeMask FireModeBit(FireMode mode) {
+  return FireModeMask{1} << static_cast<uint32_t>(mode);
+}
+
+// What sort of weapon a firearm is; decides the Loadout slot it occupies.
+// Indexes tables (kWeaponKindCount entries).
+enum class WeaponKind { kPistol, kRifle };
+
+inline constexpr int kWeaponKindCount = 2;
 
 // Most shots a single Firearm::Update can report. At 800 rounds per minute
 // this covers a 1.1 s frame; further shots due in that frame are dropped.
@@ -32,10 +51,21 @@ struct FirearmSpec {
   // deceleration is drag * |v|^2.
   float bullet_drag = 1.2e-3f;
   int spare_magazines = 4;  // carried in addition to the inserted one, full
-  FireMode fire_mode = FireMode::kSemi;  // selector position at start
-  // False: semi-automatic only. The weapon starts and stays in kSemi
-  // whatever `fire_mode` says; the selector toggle is ignored (no event).
-  bool select_fire = true;
+  // Selector position at start. A mode missing from `fire_modes` starts in
+  // the first available mode (enum order) instead.
+  FireMode fire_mode = FireMode::kSemi;
+  // Modes the selector offers; it cycles through them in enum order. With a
+  // single mode the selector toggle is ignored (no event). An empty set
+  // counts as kSemi only.
+  FireModeMask fire_modes =
+      FireModeBit(FireMode::kSemi) | FireModeBit(FireMode::kAuto);
+  WeaponKind kind = WeaponKind::kRifle;
+  // kg, loaded: what a dropped weapon weighs as a physics body (M16A2 3.77
+  // kg empty plus a loaded 30-round magazine).
+  float mass = 3.99f;
+  // False for a weapon missing a vital part (weapon/parts/weapon_stats.h):
+  // the trigger does nothing (no shot, no dry fire) and no reload starts.
+  bool functional = true;
 };
 
 // One frame of player intent.
@@ -69,13 +99,14 @@ struct FirearmEvents {
 // Rules: a shot needs a chambered round. After a shot the bolt strips the next
 // round from the magazine into the chamber or, with an empty magazine, locks
 // back with the chamber empty, so a fresh weapon fires capacity + 1 rounds.
-// Semi fires once per trigger pull; auto fires at the cyclic rate from a time
-// accumulator (the first shot of a pull is immediate, a long frame can fire
-// several shots). A reload is refused when the magazine is full with a round
-// chambered, when no spare magazine is left, and while reloading; nothing
-// fires during it. The magazine is pulled at 30 % of the reload (it returns
-// to the spares unless empty), the fullest spare is seated at 65 % and, after
-// an empty reload, the bolt release chambers its top round at 85 %.
+// Semi and double action fire once per trigger pull; auto fires at the cyclic
+// rate from a time accumulator (the first shot of a pull is immediate, a long
+// frame can fire several shots). A reload is refused when the magazine is full
+// with a round chambered, when no spare magazine is left, when the weapon has
+// no magazine fitted (capacity 0) or is not functional, and while reloading;
+// nothing fires during it. The magazine is pulled at 30 % of the reload (it
+// returns to the spares unless empty), the fullest spare is seated at 65 % and,
+// after an empty reload, the bolt release chambers its top round at 85 %.
 //
 // Deterministic, frame-rate independent, no allocation after construction.
 // Copyable. Not thread-safe.
@@ -83,6 +114,7 @@ class Firearm {
  public:
   // Starts loaded: a full magazine plus one round chambered, and
   // `spec.spare_magazines` full spares. Negative counts are treated as 0.
+  // Capacity 0 (no magazine fitted): only the chambered round, no spares.
   explicit Firearm(const FirearmSpec& spec = {});
   Firearm(const Firearm&) = default;
   Firearm& operator=(const Firearm&) = default;
@@ -101,6 +133,23 @@ class Firearm {
   //   magazine stays in and the bolt stays locked back.
   // A later reload starts from that state like any other.
   bool CancelReload();
+
+  // Gives the weapon a new spec after its parts changed, keeping its state
+  // where the new parts allow it. A running reload is cancelled first
+  // (CancelReload). Then:
+  // - the chambered round and a locked-back bolt stay;
+  // - capacity 0 (the magazine was taken off): no magazine is inserted and
+  //   its rounds are gone with it; reloading is impossible until one is
+  //   fitted again;
+  // - a magazine fitted where there was none (capacity was 0) is inserted
+  //   full;
+  // - otherwise rounds above a smaller capacity are dropped, and a magazine
+  //   pulled by a cancelled reload stays out;
+  // - spare magazines keep their rounds, cut to a smaller capacity;
+  // - the fire mode stays if the new spec offers it, else the spec's start
+  //   mode is used.
+  // Allocates nothing.
+  void Refit(const FirearmSpec& spec);
 
   [[nodiscard]] int rounds_in_magazine() const { return magazine_; }
   [[nodiscard]] bool magazine_inserted() const { return magazine_inserted_; }

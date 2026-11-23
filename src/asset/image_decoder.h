@@ -25,6 +25,12 @@ struct ImageData {
   std::vector<uint8_t> pixels;  // width * height * 4 bytes
 };
 
+// The dimensions of an encoded image, read from its header.
+struct ImageSize {
+  int width = 0;
+  int height = 0;
+};
+
 // A linear floating-point RGB image (HDR), rows top to bottom.
 struct ImageDataF {
   int width = 0;
@@ -49,6 +55,17 @@ inline constexpr int kMaxImageDimension = 16384;
 // Decodes an encoded image file held in memory to RGBA8.
 [[nodiscard]] core::Result<ImageData, ImageError> DecodeImage(
     std::span<const std::byte> bytes);
+
+// Returns the size an encoded image held in memory decodes to, from its
+// header alone: kDecodeFailed if stb_image does not recognise it, kTooLarge
+// above kMaxImageDimension.
+[[nodiscard]] core::Result<ImageSize, ImageError> ProbeImage(
+    std::span<const std::byte> bytes);
+
+// Reads the image file at `path` and returns the size it decodes to, as
+// ProbeImage(); kFileNotFound if it cannot be read.
+[[nodiscard]] core::Result<ImageSize, ImageError> ProbeImageFile(
+    const std::string& path);
 
 // Reads and decodes the image file at `path` to RGBA8.
 [[nodiscard]] core::Result<ImageData, ImageError> LoadImageFile(

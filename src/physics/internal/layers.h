@@ -13,16 +13,21 @@
 
 namespace blue::physics::internal {
 
-// Two object layers: static geometry and everything that moves. Something
-// collides only if at least one side is kMoving.
+// Object layers: static geometry and two kinds of moving bodies. Something
+// collides only if at least one side moves. Bodies on kMovingNoCharacter
+// collide like kMoving ones, but characters walk through them
+// (ShapeBodyDesc::blocks_characters false).
 namespace layers {
 inline constexpr JPH::ObjectLayer kNonMoving = 0;
 inline constexpr JPH::ObjectLayer kMoving = 1;
-inline constexpr JPH::uint kCount = 2;
+inline constexpr JPH::ObjectLayer kMovingNoCharacter = 2;
+inline constexpr JPH::uint kCount = 3;
 }  // namespace layers
 
-// One broad phase layer per object layer.
+// Two broad phase layers: static geometry and everything that moves (both
+// moving object layers).
 namespace broad_layers {
+inline constexpr JPH::uint kCount = 2;
 inline constexpr JPH::BroadPhaseLayer kNonMoving(0);
 inline constexpr JPH::BroadPhaseLayer kMoving(1);
 }  // namespace broad_layers

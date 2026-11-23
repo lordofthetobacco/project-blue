@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "asset/mesh_data.h"
 #include "render/buffer.h"
@@ -73,8 +74,10 @@ PositionUvVertexAttributes() {
 // Mesh resident in device-local memory. Move-only. Not thread-safe.
 class Mesh {
  public:
-  // Uploads `data` to the GPU and blocks until the upload has finished.
-  Mesh(const VulkanContext& context, const asset::MeshData& data);
+  // Uploads `vertices` and `indices` (borrowed for the call) to the GPU
+  // and blocks until the upload has finished.
+  Mesh(const VulkanContext& context, std::span<const asset::Vertex> vertices,
+       std::span<const asset::Index> indices);
 
   Mesh(const Mesh&) = delete;
   Mesh& operator=(const Mesh&) = delete;
@@ -93,6 +96,10 @@ class Mesh {
   }
 
   [[nodiscard]] uint32_t index_count() const { return index_count_; }
+  // Device memory of the vertex and index buffers, in bytes.
+  [[nodiscard]] VkDeviceSize size_bytes() const {
+    return vertex_buffer_.size() + index_buffer_.size();
+  }
   // False once the mesh was moved from (Renderer::ReleaseMesh() leaves such
   // a tombstone in its slot): nothing may be drawn from it.
   [[nodiscard]] bool resident() const {

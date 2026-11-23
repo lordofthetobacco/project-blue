@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 
 #include <glm/common.hpp>
@@ -13,6 +14,7 @@
 #include <glm/vec2.hpp>
 
 #include "camera/frustum.h"
+#include "render/motion_blur_math.h"
 #include "render/vk_check.h"
 
 namespace blue::render {
@@ -40,7 +42,11 @@ static_assert(offsetof(FrameUniforms, environment_params) == 848);
 static_assert(offsetof(FrameUniforms, point_light_count) == 864);
 static_assert(offsetof(FrameUniforms, point_lights) == 880);
 static_assert(sizeof(GpuPointLight) == 32);
-static_assert(sizeof(FrameUniforms) == 880 + 32 * kMaxPointLights);
+static_assert(offsetof(FrameUniforms, previous_view_proj) ==
+              880 + 32 * kMaxPointLights);
+static_assert(offsetof(FrameUniforms, motion_blur) ==
+              944 + 32 * kMaxPointLights);
+static_assert(sizeof(FrameUniforms) == 960 + 32 * kMaxPointLights);
 
 // Shadow lookups move along the surface normal by this many shadow texels.
 constexpr float kShadowNormalOffsetTexels = 1.5f;
@@ -79,7 +85,7 @@ VkDescriptorSetLayout CreateLayout(VkDevice device) {
 }
 
 VkDescriptorPool CreatePool(VkDevice device) {
-  const auto frames = static_cast<uint32_t>(kFramesInFlight);
+  const auto frames = static_cast<uint32_t>(kFramesInFlight * kFrameViewCount);
   const std::array<VkDescriptorPoolSize, 2> pool_sizes{{
       {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = frames},
       {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -167,6 +173,18 @@ void FillPointLights(std::span<const PointLight> lights,
   uniforms.point_light_count = glm::uvec4(count, 0, 0, 0);
 }
 
+// Returns FrameUniforms::motion_blur for `view` on a target of `extent`.
+glm::vec4 MotionBlurUniform(const SceneView& view, VkExtent2D extent) {
+  const float scale =
+      view.post.weapon_motion_blur_enabled
+          ? MotionBlurScale(view.post.weapon_motion_blur_strength,
+                            view.frame_seconds)
+          : 0.0f;
+  const auto max_radius =
+      static_cast<float>(MotionBlurMaxRadius(extent.height));
+  return {scale, 2.0f * max_radius, max_radius, 0.0f};
+}
+
 }  // namespace
 
 FrameUniforms MakeFrameUniforms(const SceneView& view,
@@ -196,6 +214,8 @@ FrameUniforms MakeFrameUniforms(const SceneView& view,
       .environment_params = glm::vec4(0.0f),
       .point_light_count = glm::uvec4(0),
       .point_lights = {},
+      .previous_view_proj = view.camera.previous_view_projection,
+      .motion_blur = MotionBlurUniform(view, extent),
   };
   FillPointLights(view.point_lights, camera::Frustum(view_proj),
                   view.camera.position, uniforms);
@@ -255,7 +275,8 @@ FrameGlobals::FrameGlobals(const VulkanContext& context,
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
   }
   BindEnvironment(default_cube_.view(), default_lut_.view());
-  BindAmbientOcclusion(default_ambient_occlusion_.view());
+  BindImage(kAmbientOcclusionBinding, default_ambient_occlusion_.view(),
+            samplers_.linear_clamp(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 FrameGlobals::~FrameGlobals() {
@@ -263,8 +284,10 @@ FrameGlobals::~FrameGlobals() {
   vkDestroyDescriptorSetLayout(device_, layout_, nullptr);
 }
 
-void FrameGlobals::Write(size_t frame, const FrameUniforms& uniforms) const {
-  std::memcpy(frames_[frame].uniforms.mapped(), &uniforms, sizeof(uniforms));
+void FrameGlobals::Write(size_t frame, const FrameUniforms& uniforms,
+                         FrameView view) const {
+  std::memcpy(frames_[Index(frame, view)].uniforms.mapped(), &uniforms,
+              sizeof(uniforms));
 }
 
 void FrameGlobals::BindShadowMap(VkImageView view, VkSampler compare_sampler) {
@@ -282,20 +305,25 @@ void FrameGlobals::BindEnvironment(VkImageView prefiltered_cube,
 
 void FrameGlobals::BindAmbientOcclusion(VkImageView ambient_occlusion) {
   BindImage(kAmbientOcclusionBinding, ambient_occlusion,
-            samplers_.linear_clamp(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            samplers_.linear_clamp(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            FrameView::kMain);
 }
 
 void FrameGlobals::BindImage(uint32_t binding, VkImageView view,
-                             VkSampler sampler, VkImageLayout layout) {
+                             VkSampler sampler, VkImageLayout layout,
+                             std::optional<FrameView> only) {
   const VkDescriptorImageInfo image_info{
       .sampler = sampler,
       .imageView = view,
       .imageLayout = layout,
   };
-  for (const Frame& frame : frames_) {
+  for (size_t i = 0; i < frames_.size(); ++i) {
+    if (only && static_cast<size_t>(*only) != i % kFrameViewCount) {
+      continue;
+    }
     const VkWriteDescriptorSet write{
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = frame.set,
+        .dstSet = frames_[i].set,
         .dstBinding = binding,
         .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,

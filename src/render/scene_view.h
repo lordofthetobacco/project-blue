@@ -1,12 +1,14 @@
 #ifndef BLUE_RENDER_SCENE_VIEW_H_
 #define BLUE_RENDER_SCENE_VIEW_H_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
@@ -26,6 +28,11 @@ struct Camera {
   // Parameters of `projection`, needed to fit the shadow cascades.
   float vertical_fov_radians = 1.0f;
   float near_plane = 0.1f;
+  // Last frame's projection * view; read with DrawItem::previous_transform
+  // (weapon motion blur). A surface point's screen velocity is its position
+  // this frame minus its position under the previous model and previous
+  // view-projection, so an item rigidly following the camera does not move.
+  glm::mat4 previous_view_projection{1.0f};
 };
 
 // Light intensities follow one convention throughout the renderer: color *
@@ -80,6 +87,14 @@ struct DrawItem {
   // Replaces the material of every submesh when set, e.g. a builtin cube
   // drawn as a tracer.
   std::optional<MaterialId> material_override;
+  // The item's `transform` in the previous frame. Set: the item writes
+  // motion vectors and is motion-blurred along its screen motion (the
+  // first-person weapon). Unset (the default): static as far as motion blur
+  // goes; leave it unset for an item that was not drawn last frame or jumped.
+  std::optional<glm::mat4> previous_transform;
+  // Not drawn into a scope's picture (SceneView::scope): the first-person
+  // weapon, which carries the scope.
+  bool hidden_in_scope = false;
 };
 
 // Draw counts of the most recent frame. Culled items were submitted in the
@@ -90,6 +105,7 @@ struct RenderStats {
   uint32_t culled_draws = 0;
   uint32_t shadow_draw_calls = 0;  // Summed over the cascades.
   uint32_t shadow_culled_draws = 0;
+  uint32_t scope_draw_calls = 0;  // The scope view's, 0 without one.
 };
 
 // A collimated reflex sight, drawn over the opaque scene. The lens window is
@@ -112,6 +128,66 @@ struct ReticleSight {
   // visible when the nominal size is below a pixel.
   float min_dot_pixels = 2.0f;
   glm::vec3 tint{0.004f, 0.006f, 0.005f};  // light added over the window
+};
+
+// The most pixels per side of a scope's picture.
+inline constexpr uint32_t kMaxScopeResolution = 1024;
+// The most lines of a scope reticle.
+inline constexpr size_t kMaxScopeReticleLines = 8;
+
+// A magnifying rifle scope: a second, narrow view of the world along the
+// scope's axis, shown inside its eyepiece glass, which is drawn over the
+// opaque scene like the reflex sight (depth tested, no depth write, after
+// the weapon motion blur, before bloom and tonemapping). Like the reflex
+// dot, what a pixel of the glass shows depends only on the direction from
+// the camera through it (weapon/scope_optics.h, which the lens shader
+// mirrors): direction tangent t against (right, up, axis) -> the eyepiece's
+// distortion -> the world tangent t / magnification -> the scope picture.
+struct ScopeSight {
+  // The scope's own camera: world -> its view space (x along `right`, y
+  // along `up`, looking down -z = `axis`), and its position (the
+  // objective).
+  glm::mat4 view{1.0f};
+  glm::vec3 position{0.0f};
+  // tan of the half field of the (square) picture it renders.
+  float camera_tangent = 0.05f;
+  // Pixels per side of the picture, at most kMaxScopeResolution (sized to
+  // the glass on screen).
+  uint32_t resolution = 256;
+  // false: no picture is rendered (the eye sees no light through the
+  // scope) and the glass is drawn dark.
+  bool render_picture = true;
+
+  // Maps the unit disc (x, y in [-1, 1], z = 0) onto the eyepiece glass in
+  // world space.
+  glm::mat4 lens{1.0f};
+  // The scope's frame, world, unit; `axis` points downrange.
+  glm::vec3 right{1.0f, 0.0f, 0.0f};
+  glm::vec3 up{0.0f, 1.0f, 0.0f};
+  glm::vec3 axis{0.0f, 0.0f, -1.0f};
+
+  // Optics, see weapon::ScopeOptics.
+  float magnification = 1.0f;
+  float apparent_field = 0.18f;
+  float distortion = 0.0f;
+  float chromatic_aberration = 0.0f;
+  float vignetting = 0.0f;
+  // The eye box: the eye's placement (weapon::EyePlacement) and the pupils.
+  glm::vec2 eye_lateral{0.0f};       // m
+  float eye_relief_error = 0.0f;     // m
+  float exit_pupil_radius = 0.004f;  // m
+  float eye_pupil_radius = 0.003f;   // m
+  float pupil_shadow_depth = 0.0f;   // m
+
+  // Reticle lines: xy from, zw to, apparent tangent; and their half widths
+  // (apparent tangent). Lines are never thinner than `min_line_pixels`.
+  std::array<glm::vec4, kMaxScopeReticleLines> reticle_lines{};
+  std::array<float, kMaxScopeReticleLines> reticle_half_widths{};
+  uint32_t reticle_line_count = 0;
+  glm::vec3 reticle_color{0.0f};  // linear
+  float min_line_pixels = 1.0f;
+  // Faint light the glass reflects where the scope shows nothing (linear).
+  glm::vec3 glass_tint{0.004f, 0.005f, 0.006f};
 };
 
 // How the HDR image is mapped to the display.
@@ -142,6 +218,13 @@ struct PostSettings {
   float ssao_intensity = 1.0f;  // occlusion exponent: ao = pow(ao, intensity)
   // FXAA on the tonemapped image; off = plain copy to the swapchain.
   bool fxaa_enabled = true;
+  // Motion blur of the draw items with a previous_transform (the weapon),
+  // along their motion on screen; the world is never blurred. The blur
+  // length is the motion over 1/60 s times the strength, whatever the frame
+  // rate (render/motion_blur_math.h). Skipped entirely when off, when the
+  // strength is 0 or when no such item is visible.
+  bool weapon_motion_blur_enabled = true;
+  float weapon_motion_blur_strength = 1.0f;  // [0, 2]
 };
 
 // Everything the renderer needs to draw one frame. The spans are borrowed
@@ -161,7 +244,14 @@ struct SceneView {
   std::span<const DrawItem> draws;
   // Drawn after the draw items when present.
   std::optional<ReticleSight> sight;
+  // A scope's picture is rendered before the scene and its eyepiece drawn
+  // like `sight`, when present.
+  std::optional<ScopeSight> scope;
   PostSettings post;
+  // Duration of the frame in seconds (since the previous one), which turns
+  // the items' motion since the previous frame into a blur of fixed exposure.
+  // 0 (unknown), negative or very long frames blur nothing.
+  float frame_seconds = 0.0f;
 
   // Editor overlays, drawn over the tonemapped image; empty spans cost
   // nothing. Line vertex pairs (DebugLines::tested() / on_top()): `lines`

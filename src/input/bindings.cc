@@ -144,13 +144,18 @@ InputBindings::InputBindings() {
   Set(Action::kSaveScene, key(SDL_SCANCODE_F5));
   Set(Action::kLoadScene, key(SDL_SCANCODE_F9));
   Set(Action::kToggleVsync, key(SDL_SCANCODE_V));
-  Set(Action::kPush, key(SDL_SCANCODE_F));
+  Set(Action::kPush, key(SDL_SCANCODE_H));
   Set(Action::kToggleCascadeDebug, key(SDL_SCANCODE_C));
   Set(Action::kToggleShadows, key(SDL_SCANCODE_X));
   Set(Action::kReload, key(SDL_SCANCODE_R));
   Set(Action::kToggleFireMode, key(SDL_SCANCODE_B));
   Set(Action::kEquipPistol, key(SDL_SCANCODE_2));
   Set(Action::kEquipRifle, key(SDL_SCANCODE_3));
+  Set(Action::kInteract, key(SDL_SCANCODE_F));
+  Set(Action::kDropWeapon, key(SDL_SCANCODE_G));
+  Set(Action::kZeroUp, key(SDL_SCANCODE_PAGEUP));
+  Set(Action::kZeroDown, key(SDL_SCANCODE_PAGEDOWN));
+  Set(Action::kInspectWeapon, key(SDL_SCANCODE_T));
 }
 
 bool InputBindings::IsBound(Action action, const Binding& binding) const {

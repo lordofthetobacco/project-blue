@@ -18,6 +18,8 @@
 #include "editor/commands.h"
 #include "editor/dialogs.h"
 #include "editor/document.h"
+#include "editor/editor_settings.h"
+#include "editor/memory_report.h"
 #include "editor/panel.h"
 #include "editor/viewport/viewport_panel.h"
 #include "prefab/prefab.h"
@@ -74,7 +76,17 @@ class EditorContext {
   // Replaces the prefab document by a new one holding `prefab` (e.g. a
   // freshly cooked import), untitled unless `path` is given, dirty, and
   // switches to Prefab mode. Asks about unsaved changes first.
+  //
+  // Replacing the prefab document (here, OpenFile(), on Discard/Save of the
+  // question) frees the old document, its undo history and its GPU preview
+  // before the new one is uploaded, so two large prefabs never take memory
+  // at once; prefab_generation() advances.
   void NewPrefabDocument(prefab::Prefab prefab, std::string path = {});
+  // Counts prefab document replacements, so caches keyed by its data (e.g.
+  // texture thumbnails) know when to drop their entries.
+  [[nodiscard]] uint64_t prefab_generation() const {
+    return prefab_generation_;
+  }
   // Replaces the scene document by an empty scene and switches to Scene mode.
   void NewSceneDocument();
   // Saves the active document to its path, or asks for one (Save As) when
@@ -110,6 +122,30 @@ class EditorContext {
   // document.
   [[nodiscard]] world::PrefabPose* prefab_pose() { return preview_pose_.get(); }
   [[nodiscard]] world::PrefabCache& prefab_cache() { return prefab_cache_; }
+  // While suspended the preview is released (GPU memory freed) and not
+  // uploaded; set while a model cook runs so the cook does not compete with
+  // the old preview for memory. Cleared automatically when the prefab
+  // document is replaced or the replacement is cancelled.
+  void SetPrefabPreviewSuspended(bool suspended) {
+    preview_suspended_ = suspended;
+  }
+  [[nodiscard]] bool prefab_preview_suspended() const {
+    return preview_suspended_;
+  }
+
+  // --- Memory ----------------------------------------------------------------
+  // Heap bytes of bulk data the prefab document's undo history may keep
+  // alive on top of the document (EditorSettings::history_budget_mb); the
+  // oldest steps are dropped beyond it (TrimHistoryBulk()).
+  void set_history_budget(uint64_t bytes) {
+    history_budget_ = bytes;
+    history_measured_ = {};
+  }
+  [[nodiscard]] uint64_t history_budget() const { return history_budget_; }
+  // Gathers the memory readout (process, documents, undo history, GPU).
+  // Cheap enough for the status bar each frame: the history is measured
+  // only when it changed.
+  [[nodiscard]] MemoryReport memory_report() const;
 
   // --- Rendering -----------------------------------------------------------
   [[nodiscard]] render::Renderer& renderer() { return renderer_; }
@@ -218,6 +254,12 @@ class EditorContext {
   // Saves the document of `mode` to `path` (empty: its own); shows errors.
   bool SaveDocument(EditorMode mode, const std::string& path);
   void ResetPreview();
+  // Frees the prefab document and its history now and advances
+  // prefab_generation_; its GPU preview goes at the next SyncPrefabPreview(),
+  // before anything new is uploaded.
+  void ClosePrefabDocument();
+  // Applies the history budget when the prefab document's history changed.
+  void UpdateHistoryBudget();
   // Drops selected items of the active document that no longer exist.
   void PruneSelection();
   void AddMessage(bool error, std::string text);
@@ -236,6 +278,21 @@ class EditorContext {
   // The document revision the preview reflects.
   const PrefabDocument* preview_document_ = nullptr;
   DocumentRevision preview_revision_;
+  bool preview_suspended_ = false;
+  uint64_t prefab_generation_ = 0;
+
+  // The undo history budget and what the history held when last measured,
+  // keyed by the document and its history's shape.
+  struct HistoryMeasure {
+    const PrefabDocument* document = nullptr;
+    uint64_t structure = 0;
+    size_t undo = 0;
+    size_t redo = 0;
+    bool edit_open = false;
+    BulkBytes bytes;
+  };
+  uint64_t history_budget_ = uint64_t{kDefaultHistoryBudgetMb} * 1024 * 1024;
+  HistoryMeasure history_measured_;
 
   const render::SceneView* frame_view_ = nullptr;
   uint64_t frame_count_ = 0;
@@ -254,6 +311,7 @@ class EditorContext {
   struct ImageTexture {
     ImTextureID imgui{};
     render::TextureId texture{};
+    uint64_t bytes = 0;
   };
   std::vector<ImageTexture> image_textures_;
 };

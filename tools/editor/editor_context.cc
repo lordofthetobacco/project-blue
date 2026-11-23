@@ -20,7 +20,10 @@
 #include "core/result.h"
 #include "editor/dialogs.h"
 #include "editor/document.h"
+#include "editor/memory_report.h"
+#include "editor/undo.h"
 #include "platform/file_system.h"
+#include "platform/process_memory.h"
 #include "prefab/prefab.h"
 #include "render/texture_cache.h"
 
@@ -73,6 +76,7 @@ VoidResult EditorContext::OpenFile(const std::string& path) {
     }
     auto document = std::make_shared<PrefabDocument>(std::move(loaded).value());
     ReplaceDocument(EditorMode::kPrefab, [this, document, path] {
+      ClosePrefabDocument();
       prefab_ = std::make_unique<PrefabDocument>(std::move(*document));
       SetMode(EditorMode::kPrefab);
       Status(std::format("Opened {}", DisplayPath(path)));
@@ -104,6 +108,7 @@ VoidResult EditorContext::OpenFile(const std::string& path) {
 void EditorContext::NewPrefabDocument(prefab::Prefab prefab, std::string path) {
   auto shared = std::make_shared<prefab::Prefab>(std::move(prefab));
   ReplaceDocument(EditorMode::kPrefab, [this, shared, path = std::move(path)] {
+    ClosePrefabDocument();
     prefab_ = std::make_unique<PrefabDocument>(std::move(*shared), path,
                                                /*dirty=*/true);
     SetMode(EditorMode::kPrefab);
@@ -162,6 +167,13 @@ bool EditorContext::SaveDocument(EditorMode mode, const std::string& path) {
   if (!saved.ok()) {
     ShowError("Save failed", saved.error());
     return false;
+  }
+  if (mode == EditorMode::kPrefab && preview_id_ &&
+      preview_document_ == prefab_.get() &&
+      preview_revision_ == prefab_->revision()) {
+    // The document now views the saved file (SavePrefabDocument): let the
+    // preview's CPU copy follow, so the old blocks can go.
+    (void)prefab_cache_.RebaseCpu(*preview_id_, prefab_->state());
   }
   Status(std::format("Saved {}", DisplayPath(saved_path)));
   return true;
@@ -292,13 +304,85 @@ void EditorContext::ResolvePendingReplace(ReplaceChoice choice) {
       pending.proceed();
       break;
     case ReplaceChoice::kCancel:
+      if (pending.mode == EditorMode::kPrefab) {
+        preview_suspended_ = false;  // Show the kept document again.
+      }
       break;
   }
 }
 
-void EditorContext::SyncPrefabPreview() {
+void EditorContext::ClosePrefabDocument() {
+  // The preview may still be drawn this frame: the next SyncPrefabPreview()
+  // frees it (PrefabCache::Replace releases and flushes before uploading).
+  prefab_.reset();
+  preview_suspended_ = false;
+  history_measured_ = {};
+  ++prefab_generation_;
+}
+
+void EditorContext::UpdateHistoryBudget() {
   if (prefab_ == nullptr) {
-    ResetPreview();
+    history_measured_ = {};
+    return;
+  }
+  const SnapshotHistory<prefab::Prefab>& history = prefab_->history();
+  const HistoryMeasure key{.document = prefab_.get(),
+                           .structure = prefab_->revision().structure,
+                           .undo = history.undo_count(),
+                           .redo = history.redo_count(),
+                           .edit_open = history.edit_open()};
+  if (key.document == history_measured_.document &&
+      key.structure == history_measured_.structure &&
+      key.undo == history_measured_.undo &&
+      key.redo == history_measured_.redo &&
+      key.edit_open == history_measured_.edit_open) {
+    return;
+  }
+  if (const int dropped = TrimHistoryBulk(*prefab_, history_budget_);
+      dropped > 0) {
+    Status(std::format(
+        "Dropped the {} oldest undo step(s): the history held more than {} "
+        "of textures and meshes",
+        dropped, FormatBytes(history_budget_)));
+  }
+  history_measured_ = key;
+  history_measured_.undo = history.undo_count();
+  history_measured_.bytes = HistoryOnlyBulk(*prefab_);
+}
+
+MemoryReport EditorContext::memory_report() const {
+  MemoryReport report;
+  report.process = platform::QueryProcessMemory();
+  report.history_budget = history_budget_;
+  if (prefab_ != nullptr) {
+    report.has_prefab = true;
+    report.document = DocumentBulk(*prefab_);
+    report.history = history_measured_.document == prefab_.get()
+                         ? history_measured_.bytes
+                         : HistoryOnlyBulk(*prefab_);
+    report.undo_steps = static_cast<int>(prefab_->history().undo_count());
+    report.redo_steps = static_cast<int>(prefab_->history().redo_count());
+  }
+  for (size_t i = 0; i < prefab_cache_.size(); ++i) {
+    const auto id = static_cast<world::PrefabId>(i);
+    report.prefab_cache_entries += prefab_cache_.alive(id) ? 1 : 0;
+  }
+  report.prefab_cache_gpu_bytes = prefab_cache_.gpu_bytes();
+  report.thumbnail_count = static_cast<int>(image_textures_.size());
+  for (const ImageTexture& image : image_textures_) {
+    report.thumbnail_bytes += image.bytes;
+  }
+  report.gpu = renderer_.memory_stats();
+  return report;
+}
+
+void EditorContext::SyncPrefabPreview() {
+  UpdateHistoryBudget();
+  if (prefab_ == nullptr || preview_suspended_) {
+    if (preview_id_) {
+      ResetPreview();
+      renderer_.FlushReleases();
+    }
     return;
   }
   const DocumentRevision revision = prefab_->revision();
@@ -367,7 +451,8 @@ ImTextureID EditorContext::CreateImageTexture(int width, int height,
       renderer_.UploadTextures(std::span(&upload, 1));
   const ImTextureID texture =
       imgui_.AddTexture(renderer_.texture_view(ids.front()));
-  image_textures_.push_back({texture, ids.front()});
+  image_textures_.push_back(
+      {.imgui = texture, .texture = ids.front(), .bytes = rgba.size()});
   return texture;
 }
 

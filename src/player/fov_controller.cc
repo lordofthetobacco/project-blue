@@ -3,9 +3,25 @@
 #include <algorithm>
 #include <cmath>
 
+#include <glm/trigonometric.hpp>
+
 #include "input/input_settings.h"
 
 namespace blue::player {
+
+float MagnifiedFovDegrees(float base_degrees, float magnification) {
+  const float half = glm::radians(base_degrees) * 0.5f;
+  return glm::degrees(
+      2.0f * std::atan(std::tan(half) / std::max(magnification, 1.0f)));
+}
+
+float ZoomSensitivityScale(float fov_degrees, float base_fov_degrees) {
+  const float tan_base = std::tan(glm::radians(base_fov_degrees) * 0.5f);
+  if (!(tan_base > 0.0f)) {
+    return 1.0f;
+  }
+  return std::tan(glm::radians(fov_degrees) * 0.5f) / tan_base;
+}
 
 float FovController::Update(const FovInput& input) {
   const float boost = input.sprinting ? input.sprint_boost_degrees : 0.0f;

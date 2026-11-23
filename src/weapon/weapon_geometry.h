@@ -29,6 +29,10 @@ struct WeaponGeometry {
   // Model units. 0 means the weapon has no optic: draw no dot.
   float optic_lens_radius = 0.0f;
   glm::vec3 grip{0.0f};  // pistol grip, where the firing hand sits
+  // Centre of a scope's eyepiece glass, on the sight line: where the
+  // magnified picture is drawn (ScopeOptics::eyepiece_radius around it,
+  // perpendicular to the axis). sight_eye_point for weapons without a scope.
+  glm::vec3 eyepiece{0.0f};
 };
 
 // Returns the calibration of samples/m16.obj, measured from the vertices and

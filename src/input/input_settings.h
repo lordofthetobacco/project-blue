@@ -30,7 +30,10 @@ struct InputSettings {
 // Loads the settings file at `path`. A missing file or bad values fall back to
 // the defaults per key; malformed lines are logged and skipped. Numbers are
 // clamped to their documented ranges. A "bind." line with an unknown action
-// or an unparsable key is ignored; an empty value unbinds the action.
+// or an unparsable key is ignored; an empty value unbinds the action. An
+// action the file does not bind (one added since it was saved) gets its
+// default keys, taking them from any other action the file bound them to
+// (that action falls back to its own defaults if left with no key).
 [[nodiscard]] InputSettings LoadInputSettings(const std::string& path);
 
 // Writes `settings` to `path` through a temporary file that is renamed over

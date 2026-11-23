@@ -145,7 +145,10 @@ void FullscreenPass::Record(VkCommandBuffer cmd, const FullscreenTarget& target,
       .loadOp = target.load_op,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
   };
-  const VkRect2D area{{0, 0}, target.extent};
+  const VkRect2D area =
+      target.area.extent.width > 0 && target.area.extent.height > 0
+          ? target.area
+          : VkRect2D{{0, 0}, target.extent};
   const VkRenderingInfo rendering_info{
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
       .renderArea = area,

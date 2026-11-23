@@ -25,7 +25,10 @@ include(SampleAssets)
 # and every consumer needs both.
 add_library(blue_core STATIC
     src/core/path.cc
+    src/core/text.cc
     src/platform/file_system.cc
+    src/platform/mapped_file.cc
+    src/platform/process_memory.cc
 )
 
 target_include_directories(blue_core PUBLIC src)
@@ -194,7 +197,11 @@ add_library(blue_cook STATIC
     src/cook/clip_tools.cc
     src/cook/collision_cook.cc
     src/cook/cook_error.cc
+    src/cook/generated_file.cc
     src/cook/model_cook.cc
+    src/cook/prefab_edits.cc
+    src/cook/prefab_split.cc
+    src/cook/scene_edits.cc
     src/cook/texture_cook.cc
 )
 
@@ -203,13 +210,14 @@ target_include_directories(blue_cook PUBLIC src)
 blue_target_defaults(blue_cook)
 
 target_link_libraries(blue_cook
-    PUBLIC blue_prefab blue_asset blue_physics blue_animation blue_material blue_core glm::glm
+    PUBLIC blue_prefab blue_scene blue_asset blue_physics blue_animation blue_material blue_core glm::glm
     PRIVATE bc7enc_rdo meshoptimizer
 )
 
 # Headless cooker: imports models into .pbo prefabs and prints their contents.
 add_executable(blue-pack
     tools/blue-pack/main.cc
+    tools/blue-pack/sample_parts.cc
     tools/blue-pack/samples.cc
 )
 
@@ -279,17 +287,33 @@ blue_target_defaults(blue_player)
 target_link_libraries(blue_player PUBLIC blue_physics blue_input blue_camera glm::glm)
 
 # Weapon gameplay: loadout switching, firing mechanism, fire-animation driver, ballistic bullets swept against the physics
-# world, model calibration and the first-person viewmodel pose. No rendering.
+# world, model calibration, the first-person viewmodel pose and its motion history (for the
+# weapon motion blur), throwing weapons and the dropped ones' bodies. No rendering.
 add_library(blue_weapon STATIC
+    src/weapon/dispersion.cc
+    src/weapon/dropped_weapons.cc
     src/weapon/firearm.cc
     src/weapon/loadout.cc
+    src/weapon/motion_history.cc
+    src/weapon/parts/part_catalog.cc
+    src/weapon/parts/part_catalog_file.cc
+    src/weapon/parts/weapon_assembly.cc
+    src/weapon/parts/weapon_build.cc
+    src/weapon/parts/weapon_stats.cc
+    src/weapon/parts/weapon_tuning.cc
     src/weapon/projectile_system.cc
+    src/weapon/scope.cc
+    src/weapon/scope_optics.cc
+    src/weapon/scope_view.cc
     src/weapon/target_log.cc
     src/weapon/viewmodel.cc
     src/weapon/weapon_animator.cc
+    src/weapon/weapon_def.cc
     src/weapon/weapon_geometry.cc
     src/weapon/weapon_prefab.cc
     src/weapon/weapon_specs.cc
+    src/weapon/weapon_throw.cc
+    src/weapon/zeroing.cc
 )
 
 target_include_directories(blue_weapon PUBLIC src)
@@ -297,6 +321,18 @@ target_include_directories(blue_weapon PUBLIC src)
 blue_target_defaults(blue_weapon)
 
 target_link_libraries(blue_weapon PUBLIC blue_physics blue_camera blue_animation blue_prefab glm::glm)
+
+# Interaction focus: which interactable the player is looking at (reach, aim radius,
+# hysteresis). Pure logic; line of sight is the game's job.
+add_library(blue_interact STATIC
+    src/interact/interaction_focus.cc
+)
+
+target_include_directories(blue_interact PUBLIC src)
+
+blue_target_defaults(blue_interact)
+
+target_link_libraries(blue_interact PUBLIC glm::glm)
 
 # shaderc for blue_shader. On Windows it is the SDK's DLL (shaderc_sharedd.dll in Debug,
 # shaderc_shared.dll otherwise): the static shaderc_combined libraries are built with C++
@@ -392,6 +428,7 @@ add_library(blue_render STATIC
     src/render/fullscreen_pass.cc
     src/render/image.cc
     src/render/material_system.cc
+    src/render/motion_blur_math.cc
     src/render/pipeline.cc
     src/render/render_targets.cc
     src/render/samplers.cc
@@ -399,14 +436,17 @@ add_library(blue_render STATIC
     src/render/gpu_timer.cc
     src/render/mesh.cc
     src/render/renderer.cc
+    src/render/staging_upload.cc
     src/render/texture_cache.cc
     src/render/passes/bloom_pass.cc
     src/render/passes/depth_prepass.cc
     src/render/passes/mesh_pass.cc
+    src/render/passes/motion_blur_pass.cc
     src/render/passes/overlay_pass.cc
     src/render/passes/present_pass.cc
     src/render/passes/reticle_pass.cc
     src/render/passes/scene_pass.cc
+    src/render/passes/scope_lens_pass.cc
     src/render/passes/shadow_pass.cc
     src/render/passes/ssao_pass.cc
     src/render/passes/skybox_pass.cc
@@ -469,10 +509,29 @@ target_link_libraries(blue_world
            blue_material blue_mesh blue_core glm::glm
 )
 
+# Game-side glue between the world, the weapons and the interaction focus (scene
+# weapon pick-ups, weapons built from the part catalogue). No rendering of its
+# own; unit tested.
+add_library(blue_game STATIC
+    src/game/inspect_screen_rules.cc
+    src/game/part_stash.cc
+    src/game/scene_pickups.cc
+    src/game/weapon_builds.cc
+    src/game/weapon_modding.cc
+)
+
+target_include_directories(blue_game PUBLIC src)
+
+blue_target_defaults(blue_game)
+
+target_link_libraries(blue_game PUBLIC blue_world blue_weapon blue_interact blue_input
+    glm::glm)
+
 add_executable(project-blue
     src/main.cc
     src/app.cc
     src/ui/perf_overlay.cc
+    src/ui/weapon_inspect_screen.cc
 )
 
 set_target_properties(project-blue PROPERTIES
@@ -495,7 +554,9 @@ target_link_libraries(project-blue PRIVATE
     blue_camera
     blue_input_mapper
     blue_player
+    blue_interact
     blue_weapon
+    blue_game
     blue_world
     blue_prefab
     blue_shader

@@ -75,7 +75,7 @@ TEST_CASE("an older settings file without weapon bindings gets the defaults") {
   file.write(
       "mouse_sensitivity = 0.002\n"
       "bind.jump = Space\n"
-      "bind.push = G\n");
+      "bind.push = P\n");
   const InputSettings settings = LoadInputSettings(file.path());
   const InputBindings defaults;
   for (const Action action :
@@ -85,7 +85,61 @@ TEST_CASE("an older settings file without weapon bindings gets the defaults") {
           ToVector(defaults.For(action)));
   }
   CHECK(ToVector(settings.bindings.For(Action::kPush)) ==
+        std::vector<Binding>{Binding::Key(SDL_SCANCODE_P)});
+}
+
+TEST_CASE("a file saved before interact existed gives F to interact") {
+  // Such a file binds every action of its time, push to F among them.
+  InputBindings old_defaults;
+  old_defaults.Set(Action::kPush, {Binding::Key(SDL_SCANCODE_F)});
+  std::string text;
+  for (const Action action : AllActions()) {
+    if (action == Action::kInteract || action == Action::kDropWeapon) {
+      continue;
+    }
+    text += "bind." + std::string(ActionName(action)) + " = " +
+            FormatBindingList(old_defaults.For(action)) + "\n";
+  }
+  const TempFile file("before_interact.ini");
+  file.write(text);
+  const InputSettings settings = LoadInputSettings(file.path());
+  CHECK(ToVector(settings.bindings.For(Action::kInteract)) ==
+        std::vector<Binding>{Binding::Key(SDL_SCANCODE_F)});
+  CHECK(ToVector(settings.bindings.For(Action::kDropWeapon)) ==
         std::vector<Binding>{Binding::Key(SDL_SCANCODE_G)});
+  // Push falls back to its new default instead of sharing F.
+  CHECK(ToVector(settings.bindings.For(Action::kPush)) ==
+        std::vector<Binding>{Binding::Key(SDL_SCANCODE_H)});
+  // The deliberate shared defaults are left alone.
+  CHECK(settings.bindings.IsBound(Action::kJump,
+                                  Binding::Key(SDL_SCANCODE_SPACE)));
+  CHECK(settings.bindings.IsBound(Action::kFlyUp,
+                                  Binding::Key(SDL_SCANCODE_SPACE)));
+  CHECK(settings.bindings == InputBindings::Defaults());
+}
+
+TEST_CASE("a new action's key leaves the other keys of an old action") {
+  const TempFile file("push_two_keys.ini");
+  file.write("bind.push = F, P\n");
+  const InputSettings settings = LoadInputSettings(file.path());
+  CHECK(ToVector(settings.bindings.For(Action::kPush)) ==
+        std::vector<Binding>{Binding::Key(SDL_SCANCODE_P)});
+  CHECK(ToVector(settings.bindings.For(Action::kInteract)) ==
+        std::vector<Binding>{Binding::Key(SDL_SCANCODE_F)});
+}
+
+TEST_CASE("keys the file binds to the new actions themselves are kept") {
+  const TempFile file("explicit.ini");
+  file.write(
+      "bind.push = F\n"
+      "bind.interact = F\n"
+      "bind.drop_weapon = Q\n");
+  const InputSettings settings = LoadInputSettings(file.path());
+  CHECK(settings.bindings.IsBound(Action::kPush, Binding::Key(SDL_SCANCODE_F)));
+  CHECK(settings.bindings.IsBound(Action::kInteract,
+                                  Binding::Key(SDL_SCANCODE_F)));
+  CHECK(ToVector(settings.bindings.For(Action::kDropWeapon)) ==
+        std::vector<Binding>{Binding::Key(SDL_SCANCODE_Q)});
 }
 
 TEST_CASE("player settings and custom bindings round trip") {
@@ -100,6 +154,7 @@ TEST_CASE("player settings and custom bindings round trip") {
                                      Binding::Key(SDL_SCANCODE_KP_0)});
   saved.bindings.Set(Action::kCrouch, {Binding::Key(SDL_SCANCODE_C)});
   saved.bindings.Set(Action::kToggleCascadeDebug, {});
+  saved.bindings.Set(Action::kInspectWeapon, {Binding::Key(SDL_SCANCODE_K)});
 
   REQUIRE(SaveInputSettings(saved, file.path()));
   const InputSettings loaded = LoadInputSettings(file.path());
@@ -110,6 +165,8 @@ TEST_CASE("player settings and custom bindings round trip") {
   CHECK(loaded.head_bob_intensity == 0.25f);
   CHECK(loaded.bindings == saved.bindings);
   CHECK(loaded.bindings.For(Action::kToggleCascadeDebug).empty());
+  CHECK(loaded.bindings.IsBound(Action::kInspectWeapon,
+                                Binding::Key(SDL_SCANCODE_K)));
 }
 
 TEST_CASE("bad binding lines keep the defaults, empty values unbind") {

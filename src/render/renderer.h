@@ -27,14 +27,17 @@
 #include "render/gpu_timer.h"
 #include "render/image.h"
 #include "render/material_system.h"
+#include "render/memory_stats.h"
 #include "render/mesh.h"
 #include "render/passes/bloom_pass.h"
 #include "render/passes/depth_prepass.h"
 #include "render/passes/frame_context.h"
 #include "render/passes/mesh_pass.h"
+#include "render/passes/motion_blur_pass.h"
 #include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/reticle_pass.h"
+#include "render/passes/scope_lens_pass.h"
 #include "render/passes/shadow_pass.h"
 #include "render/passes/skybox_pass.h"
 #include "render/passes/ssao_pass.h"
@@ -56,8 +59,23 @@
 //   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
 //   ssao                 SsaoPass          depth -> ssao (half res, blurred)
+//   scope picture        RecordScopeView   SceneView::scope only: the same
+//                                          DepthPrepass, MeshPass and
+//                                          SkyboxPass from the scope's
+//                                          camera into the scope picture
+//                                          (shadow map and IBL shared, no
+//                                          SSAO, the held weapon left out)
 //   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
-//                        SkyboxPass, ReticlePass -> EndScenePass
+//                        SkyboxPass, ReticlePass, ScopeLensPass ->
+//                        EndScenePass
+//   motion blur          MotionBlurPass    weapon items -> velocity -> tile
+//                                          max; hdr blurred in place (via a
+//                                          copy); then ResumeScenePass ->
+//                                          ReticlePass, ScopeLensPass ->
+//                                          EndScenePass. Only in frames with
+//                                          weapon motion blur, where the
+//                                          sights move here from the scene
+//                                          pass.
 //   bloom                BloomPass         hdr -> bloom mip chain
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
 //   overlay              OverlayPass       debug lines + selection outline
@@ -87,8 +105,10 @@
 // of an image it overwrites (all frames in flight share the render targets).
 //
 // Layouts between passes: depth is DEPTH_READ_ONLY after the pre-pass (and
-// stays so through the scene pass); ssao, hdr, bloom and ldr are
-// SHADER_READ_ONLY whenever they are not being written; the shadow map is
+// stays so through the scene and motion blur passes); ssao, hdr, bloom,
+// ldr and the motion blur images are SHADER_READ_ONLY whenever they are not
+// being written or copied (hdr is TRANSFER_SRC for the motion blur's copy);
+// the shadow map is
 // DEPTH_READ_ONLY; the swapchain image is COLOR_ATTACHMENT after the present
 // pass and PRESENT_SRC after the UI.
 
@@ -182,7 +202,13 @@ class Renderer {
 
   // Uploads `data` and returns its handle. Meshes stay resident until
   // ReleaseMesh().
-  [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data);
+  [[nodiscard]] MeshId UploadMesh(const asset::MeshData& data) {
+    return UploadMesh(data.vertices, data.indices);
+  }
+  // Same, from borrowed vertex and index arrays (e.g. the bulk data of a
+  // loaded prefab), without an intermediate copy.
+  [[nodiscard]] MeshId UploadMesh(std::span<const asset::Vertex> vertices,
+                                  std::span<const asset::Index> indices);
 
   // Releasing GPU resources. Each call takes effect at once for new frames
   // and destroys the GPU objects only once no frame in flight can use them.
@@ -196,6 +222,12 @@ class Renderer {
   void ReleaseMesh(MeshId id);
   void ReleaseTextures(std::span<const TextureId> ids);
   void ReleaseMaterial(MaterialId id) { materials_.Release(id); }
+  // Destroys every released mesh and texture now instead of after the
+  // frames in flight: waits for those frames' fences (not for the whole
+  // device). For loads that replace large resources, between releasing the
+  // old ones and uploading the new ones, so both never coexist in device
+  // memory; not meant for every frame.
+  void FlushReleases();
   // Returns the view of uploaded texture `id` (the white default when it is
   // unknown or released), e.g. to show it in the UI.
   [[nodiscard]] VkImageView texture_view(TextureId id) const {
@@ -231,6 +263,9 @@ class Renderer {
   }
   [[nodiscard]] size_t material_count() const { return materials_.count(); }
   [[nodiscard]] TextureStats texture_stats() const { return textures_.stats(); }
+  // Returns what the renderer holds in device memory, per heap and per
+  // owner; cheap enough to call every frame (see MemoryStats).
+  [[nodiscard]] MemoryStats memory_stats() const;
 
   // Replaces the environment (sky and image-based lighting) by the
   // equirectangular HDR image `equirect`, scaled by `intensity` and turned
@@ -303,6 +338,10 @@ class Renderer {
   // Destroys the retired meshes and images no frame in flight can use any
   // more. Call after the current frame's fence was waited on.
   void DestroyRetired();
+  // Destroys every retired mesh and image if no frame is in flight any more
+  // (all fences signalled; does not wait). Keeps releases moving while
+  // frames are skipped (minimized window, out-of-date swapchain).
+  void DestroyRetiredIfIdle();
   // Points the passes that read render targets at the current ones.
   void BindTargets();
   [[nodiscard]] bool RebuildSwapchain();
@@ -320,9 +359,19 @@ class Renderer {
   // Submits the recorded commands of `frame` and presents `image_index`.
   void SubmitAndPresent(const Frame& frame, uint32_t image_index);
   // Records every pass of the frame described by `ctx` (see the top of this
-  // file).
+  // file); `scope_ctx` is the scope picture's, or null.
   void RecordCommands(const Frame& frame, const FrameContext& ctx,
-                      ImDrawData* ui, Output output);
+                      const FrameContext* scope_ctx, ImDrawData* ui,
+                      Output output);
+  // Creates the scope picture and its depth (kMaxScopeResolution square) the
+  // first time a frame has a scope; they live as long as the renderer.
+  void EnsureScopeTargets();
+  // Records the scope picture: depth pre-pass, meshes and sky of
+  // `scope_ctx`.
+  void RecordScopeView(const FrameContext& scope_ctx);
+  // Draws the sights (reflex dot, scope eyepiece) of `ctx`; inside the
+  // scene pass.
+  void DrawSights(const FrameContext& ctx) const;
   // Records the copy of the viewport image (COLOR_ATTACHMENT_OPTIMAL after
   // the present pass, and again afterwards) for every readback not recorded
   // yet.
@@ -345,6 +394,9 @@ class Renderer {
   Environment environment_;
   // Declared before the passes that borrow it.
   std::vector<Mesh> meshes_;
+  // Device memory of the resident meshes in meshes_ and their count.
+  VkDeviceSize mesh_bytes_ = 0;
+  uint32_t mesh_count_ = 0;
   // Released GPU objects waiting until no frame in flight uses them
   // (ReleaseMesh(), ReleaseTextures()); declared after the context so they
   // are destroyed before it.
@@ -356,6 +408,11 @@ class Renderer {
   std::vector<Retired<Mesh>> retired_meshes_;
   std::vector<Retired<Image>> retired_images_;
   DrawList draw_list_;
+  // The scope view's culled draw list and its picture and depth
+  // (EnsureScopeTargets(); empty until a frame has a scope).
+  DrawList scope_draw_list_;
+  Image scope_picture_;
+  Image scope_depth_;
 
   ShadowPass shadow_pass_;
   DepthPrepass depth_prepass_;
@@ -363,6 +420,8 @@ class Renderer {
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
   ReticlePass reticle_pass_;
+  ScopeLensPass scope_lens_pass_;
+  MotionBlurPass motion_blur_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   OverlayPass overlay_pass_;
