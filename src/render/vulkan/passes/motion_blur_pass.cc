@@ -13,6 +13,8 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
 #include "camera/frustum.h"
 #include "core/path.h"
 #include "render/draw_list.h"
@@ -24,7 +26,7 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match VelocityConstants in shaders/motion_velocity.vert.
+// Must match VelocityConstants in shaders/motion_velocity.slang.
 struct VelocityConstants {
   glm::mat4 model;
   glm::mat4 previous_model;
@@ -32,14 +34,14 @@ struct VelocityConstants {
 static_assert(sizeof(VelocityConstants) <= 128,
               "Push constants must fit the guaranteed minimum of 128 bytes");
 
-// Must match TileMaxConstants in shaders/motion_tile_max.frag.
+// Must match TileMaxConstants in shaders/motion_tile_max.slang.
 struct TileMaxConstants {
   glm::ivec4 area;  // xy: min pixel, zw: max pixel (exclusive)
   int32_t tile_size;
   float max_length;
 };
 
-// Must match BlurConstants in shaders/motion_blur.frag.
+// Must match BlurConstants in shaders/motion_blur_gather.slang.
 struct BlurConstants {
   float max_length;
   int32_t tile_size;
@@ -55,7 +57,7 @@ constexpr auto kVertexBindings = VertexBindings();
 constexpr auto kVertexAttributes = PositionOnlyVertexAttributes();
 
 // "No motion": a zero blur vector (0.5 in the encoding) and no coverage
-// (shaders/motion_blur.glsl, EncodeBlur).
+// (shaders/motion_blur.slang, EncodeBlur).
 constexpr VkClearColorValue kNoMotion{{0.5f, 0.5f, 0.0f, 0.0f}};
 
 // The HDR target after the scene pass: written as a color attachment, then
@@ -73,25 +75,23 @@ constexpr BarrierScope kCopyWrite{VK_PIPELINE_STAGE_2_COPY_BIT,
 
 MotionBlurPass::MotionBlurPass(const VulkanContext& context,
                                ShaderPrograms& programs,
-                               const std::string& shader_dir,
                                VkDescriptorSetLayout frame_layout,
                                const std::vector<Mesh>& meshes)
     : device_(context.device()),
       frame_layout_(frame_layout),
       meshes_(meshes),
       tile_max_(
-          context, programs, shader_dir,
-          {.fragment_path = core::JoinPath(shader_dir, "motion_tile_max.frag"),
+          context, programs,
+          {.program = ShaderProgram::kMotionTileMax,
            .push_constant_size = sizeof(TileMaxConstants),
            .output_format = RenderTargets::kMotionTileFormat}),
-      blur_(context, programs, shader_dir,
-            {.fragment_path = core::JoinPath(shader_dir, "motion_blur.frag"),
+      blur_(context, programs,
+            {.program = ShaderProgram::kMotionBlur,
              .input_count = 3,
              .push_constant_size = sizeof(BlurConstants),
              .output_format = RenderTargets::kHdrFormat}) {
   programs.Add(
-      core::JoinPath(shader_dir, "motion_velocity.vert"),
-      core::JoinPath(shader_dir, "motion_velocity.frag"),
+      ShaderProgram::kMotionVelocity,
       [this](std::span<const uint32_t> vertex,
              std::span<const uint32_t> fragment) {
         for (size_t i = 0; i < velocity_pipelines_.size(); ++i) {
@@ -111,7 +111,7 @@ MotionBlurPass::MotionBlurPass(const VulkanContext& context,
                                    ? VkCullModeFlags{VK_CULL_MODE_NONE}
                                    : VkCullModeFlags{VK_CULL_MODE_BACK_BIT},
                   // Only the surface the depth pre-pass kept, as in the mesh
-                  // pass (the invariant gl_Position matches depth.vert).
+                  // pass (the invariant position matches depth.slang).
                   // Alpha-masked cut-outs hold the depth of what is behind
                   // them, so they fail the test without a material.
                   .depth_compare_op = VK_COMPARE_OP_EQUAL,

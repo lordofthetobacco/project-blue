@@ -5,26 +5,37 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "core/result.h"
-#include "shader/shader_compiler.h"
+#include "render/shader_manifest.h"
+#include "shader/compile_mode.h"
 #include "shader/shader_watcher.h"
+
+namespace blue::shader {
+class SlangCompiler;
+}  // namespace blue::shader
 
 namespace blue::render::vulkan {
 
-// Registry of the renderer's shader programs (a vertex shader plus an
-// optional fragment shader, each compiled from a GLSL file) with hot reload.
+// Registry of the renderer's shader programs (render::ShaderProgram: a
+// vertex stage plus an optional fragment stage of one Slang file) with hot
+// reload.
 //
 // Each program is registered together with a factory that (re)creates the
-// pipeline that uses it from SPIR-V. Add() compiles the program and creates
-// the pipeline immediately. ReloadChanged() polls the watched source files,
-// recompiles the programs whose sources (or includes) changed and recreates
+// pipeline that uses it from SPIR-V. Add() loads the SPIR-V the build
+// compiled (cmake/Shaders.cmake) and creates the pipeline immediately.
+//
+// With a source directory (and a build with BLUE_SHADER_HOT_RELOAD),
+// ReloadChanged() polls the Slang sources, recompiles the programs whose
+// source or any shared file changed with the runtime compiler and recreates
 // their pipelines. A program is always recompiled as a whole, so a failed
-// edit in one stage is never masked by a later edit in the other.
+// edit in one stage is never masked by a later edit in the other. Edits made
+// while the application was not running need a build (which recompiles the
+// blobs); only edits seen while it runs are reloaded.
 //
 // If a recompile fails, the old pipeline stays in use and the compiler
 // message is kept for last_error() until a later reload of that same program
@@ -43,21 +54,25 @@ class ShaderPrograms {
   using PipelineFactory = std::function<void(
       std::span<const uint32_t> vertex, std::span<const uint32_t> fragment)>;
 
-  ShaderPrograms(VkDevice device, shader::CompileMode mode);
+  // `blob_dir` holds the build's SPIR-V (<name>.vert.spv, <name>.frag.spv).
+  // `source_dir` holds the Slang sources to watch and recompile with `mode`;
+  // empty (or a build without BLUE_SHADER_HOT_RELOAD): no hot reload.
+  ShaderPrograms(VkDevice device, std::string blob_dir, std::string source_dir,
+                 shader::CompileMode mode);
+  ~ShaderPrograms();
 
   ShaderPrograms(const ShaderPrograms&) = delete;
   ShaderPrograms& operator=(const ShaderPrograms&) = delete;
 
-  // Compiles the program from `vertex_path` and `fragment_path` (empty for
-  // none), calls `create` with the result and starts watching the sources.
-  // A compile error is fatal: there is no previous pipeline to keep.
-  void Add(const std::string& vertex_path, const std::string& fragment_path,
-           PipelineFactory create);
+  // Loads the blobs of `program`, calls `create` with them and, with hot
+  // reload, starts watching its sources. A missing or invalid blob is fatal:
+  // there is no previous pipeline to keep.
+  void Add(ShaderProgram program, PipelineFactory create);
 
   // Recompiles the programs whose sources changed since the last call (see
   // shader::ShaderWatcher for what counts as a change) and recreates their
   // pipelines, waiting for the GPU to go idle once if any pipeline is
-  // replaced. Cheap when nothing changed.
+  // replaced. Cheap when nothing changed; does nothing without hot reload.
   void ReloadChanged();
 
   // Returns the compiler message of the most recent failed reload that has
@@ -67,8 +82,9 @@ class ShaderPrograms {
 
  private:
   struct Program {
-    std::string vertex_path;
-    std::string fragment_path;
+    ShaderProgram id{};
+    // The program's Slang file; empty without hot reload.
+    std::string source_path;
     PipelineFactory create;
     std::vector<uint32_t> vertex_spirv;
     std::vector<uint32_t> fragment_spirv;
@@ -80,18 +96,30 @@ class ShaderPrograms {
 
   // The successful result of compiling every stage of a program.
   struct CompiledProgram {
-    shader::CompiledShader vertex;
-    shader::CompiledShader fragment;  // Empty spirv without a fragment stage.
+    std::vector<uint32_t> vertex;
+    std::vector<uint32_t> fragment;  // Empty without a fragment stage.
+    // The files the stages were made from, the program's source excluded.
+    std::vector<std::string> dependencies;
   };
 
-  [[nodiscard]] core::Result<CompiledProgram, shader::ShaderError>
-  CompileProgram(const Program& program) const;
-  // Makes `compiled` the program's current shaders: creates the pipeline,
-  // starts watching the sources and clears the error.
-  void Apply(Program& program, CompiledProgram compiled);
+  // Reads SPIR-V blob `file_name` of the blob directory; fatal on failure.
+  [[nodiscard]] std::vector<uint32_t> LoadBlob(
+      const std::string& file_name) const;
+  // Makes `compiled` the program's current shaders and creates the pipeline.
+  static void Apply(Program& program, CompiledProgram compiled);
 
   VkDevice device_;
-  shader::ShaderCompiler compiler_;
+  std::string blob_dir_;
+  // Empty: no hot reload.
+  std::string source_dir_;
+  // Of the runtime compiler.
+  [[maybe_unused]] shader::CompileMode mode_;
+  // The files of source_dir_ that are no program's own source: what a
+  // program is assumed to include until its first runtime compile reports
+  // the real list.
+  std::vector<std::string> shared_files_;
+  // Created by the first reload (starting Slang takes a moment).
+  std::unique_ptr<shader::SlangCompiler> compiler_;
   shader::ShaderWatcher watcher_;
   std::vector<Program> programs_;
   uint64_t next_error_serial_ = 1;

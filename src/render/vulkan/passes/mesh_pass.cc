@@ -6,6 +6,8 @@
 #include <memory>
 #include <span>
 
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/vulkan/draw_record.h"
 #include "render/vulkan/render_targets.h"
@@ -20,7 +22,6 @@ constexpr auto kVertexAttributes = VertexAttributes();
 }  // namespace
 
 MeshPass::MeshPass(const VulkanContext& context, ShaderPrograms& programs,
-                   const std::string& shader_dir,
                    VkDescriptorSetLayout frame_layout,
                    const MaterialSystem& materials,
                    const std::vector<Mesh>& meshes)
@@ -28,24 +29,26 @@ MeshPass::MeshPass(const VulkanContext& context, ShaderPrograms& programs,
       frame_layout_(frame_layout),
       materials_(materials),
       meshes_(meshes) {
-  programs.Add(
-      core::JoinPath(shader_dir, "mesh.vert"),
-      core::JoinPath(shader_dir, "mesh.frag"),
-      [this](std::span<const uint32_t> vertex,
-             std::span<const uint32_t> fragment) {
-        const std::array<VkDescriptorSetLayout, 2> set_layouts{
-            frame_layout_, materials_.set_layout()};
-        for (size_t i = 0; i < kMaterialVariantCount; ++i) {
+  // One program per variant: alpha mask and double sided are compile-time
+  // switches of shaders/mesh.slang.
+  constexpr std::array<ShaderProgram, kMaterialVariantCount> kPrograms = {
+      ShaderProgram::kMesh,        // kOpaque
+      ShaderProgram::kMeshMasked,  // kMasked
+      ShaderProgram::kMeshDouble,  // kDoubleSided
+      ShaderProgram::kMeshMaskedDouble,
+  };
+  for (size_t i = 0; i < kMaterialVariantCount; ++i) {
+    programs.Add(
+        kPrograms[i], [this, i](std::span<const uint32_t> vertex,
+                                std::span<const uint32_t> fragment) {
           const auto variant = static_cast<MaterialVariant>(i);
-          // constant_id 0: alpha mask, 1: double sided (shaders/mesh.frag).
-          const std::array<uint32_t, 2> constants{
-              IsMasked(variant) ? 1u : 0u, IsDoubleSided(variant) ? 1u : 0u};
+          const std::array<VkDescriptorSetLayout, 2> set_layouts{
+              frame_layout_, materials_.set_layout()};
           pipelines_[i] = std::make_unique<Pipeline>(
               device_,
               GraphicsPipelineDesc{
                   .vertex_spirv = vertex,
                   .fragment_spirv = fragment,
-                  .fragment_constants = constants,
                   .vertex_bindings = kVertexBindings,
                   .vertex_attributes = kVertexAttributes,
                   .set_layouts = set_layouts,
@@ -56,13 +59,14 @@ MeshPass::MeshPass(const VulkanContext& context, ShaderPrograms& programs,
                                    ? VkCullModeFlags{VK_CULL_MODE_NONE}
                                    : VkCullModeFlags{VK_CULL_MODE_BACK_BIT},
                   // Only the surface the depth pre-pass kept passes; both
-                  // vertex shaders compute an invariant gl_Position with the
-                  // same expression, so the depths match exactly.
+                  // vertex shaders compute an invariant position with the
+                  // same expression (ClipPosition() in shaders/common.slang),
+                  // so the depths match exactly.
                   .depth_compare_op = VK_COMPARE_OP_EQUAL,
                   .depth_write = false,
               });
-        }
-      });
+        });
+  }
 }
 
 void MeshPass::Draw(const FrameContext& ctx) const {

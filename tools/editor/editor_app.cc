@@ -40,7 +40,7 @@
 #include "mcp/server.h"
 #include "platform/file_system.h"
 #include "platform/window.h"
-#include "shader/shader_compiler.h"
+#include "shader/compile_mode.h"
 
 namespace blue::editor {
 
@@ -78,15 +78,21 @@ constexpr const char* kGameExecutable = "project-blue.exe";
 constexpr const char* kGameExecutable = "project-blue";
 #endif
 
-// Returns the shader source directory: the repository's in Debug (live
-// edits), else the copy next to the executable.
+// Returns where the build deployed the compiled shaders: next to the
+// executable, so lookups do not depend on the working directory.
 std::string ShaderDirectory() {
+  return core::JoinPath(platform::BasePath(), "shaders");
+}
+
+// Returns the repository's shader sources for hot reload (Debug builds, when
+// they exist on this machine), else "".
+std::string ShaderSourceDirectory() {
 #ifdef BLUE_DEV_SHADER_DIR
   if (platform::PathExists(BLUE_DEV_SHADER_DIR)) {
     return BLUE_DEV_SHADER_DIR;
   }
 #endif
-  return core::JoinPath(platform::BasePath(), "shaders");
+  return {};
 }
 
 // Returns the share of the dock space a slot's split takes.
@@ -108,6 +114,8 @@ EditorApp::EditorApp(EditorOptions options)
       renderer_(render::RendererOptions{.window = &window_,
                                         .backend = options_.backend,
                                         .shader_dir = ShaderDirectory(),
+                                        .shader_source_dir =
+                                            ShaderSourceDirectory(),
                                         .shader_mode = kShaderCompileMode}),
       imgui_(window_, renderer_,
              {.scale_mode = ui::UiScaleMode::kDisplayScale,

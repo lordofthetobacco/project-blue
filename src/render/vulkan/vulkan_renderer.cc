@@ -16,6 +16,7 @@
 #include "camera/frustum.h"
 #include "camera/projection.h"
 #include "core/log.h"
+#include "core/path.h"
 #include "lighting/cascades.h"
 #include "material/material.h"
 #include "platform/window.h"
@@ -74,7 +75,6 @@ VulkanRenderer::VulkanRenderer(const RendererOptions& options,
     : context_owner_(std::move(context)),
       context_(*context_owner_),
       window_(options.window),
-      shader_dir_(options.shader_dir),
       headless_extent_{std::max(options.headless_extent.width, 1u),
                        std::max(options.headless_extent.height, 1u)},
       swapchain_(MakeSwapchain(context_, options.window, vsync_)),
@@ -83,28 +83,30 @@ VulkanRenderer::VulkanRenderer(const RendererOptions& options,
       frame_globals_(context_, samplers_),
       textures_(context_),
       materials_(context_, textures_, samplers_),
-      shader_programs_(context_.device(), options.shader_mode),
-      environment_(context_, shader_programs_, shader_dir_, samplers_,
+      shader_programs_(context_.device(),
+                       core::JoinPath(options.shader_dir, "spirv"),
+                       options.shader_source_dir, options.shader_mode),
+      environment_(context_, shader_programs_, samplers_,
                    frame_globals_),
-      shadow_pass_(context_, shader_programs_, shader_dir_, meshes_),
-      depth_prepass_(context_, shader_programs_, shader_dir_,
+      shadow_pass_(context_, shader_programs_, meshes_),
+      depth_prepass_(context_, shader_programs_,
                      frame_globals_.set_layout(), materials_, meshes_),
-      ssao_pass_(context_, shader_programs_, shader_dir_),
-      mesh_pass_(context_, shader_programs_, shader_dir_,
+      ssao_pass_(context_, shader_programs_),
+      mesh_pass_(context_, shader_programs_,
                  frame_globals_.set_layout(), materials_, meshes_),
-      skybox_pass_(context_, shader_programs_, shader_dir_,
+      skybox_pass_(context_, shader_programs_,
                    frame_globals_.set_layout(), environment_),
-      reticle_pass_(context_, shader_programs_, shader_dir_,
+      reticle_pass_(context_, shader_programs_,
                     frame_globals_.set_layout()),
-      scope_lens_pass_(context_, shader_programs_, shader_dir_,
+      scope_lens_pass_(context_, shader_programs_,
                        frame_globals_.set_layout()),
-      motion_blur_pass_(context_, shader_programs_, shader_dir_,
+      motion_blur_pass_(context_, shader_programs_,
                         frame_globals_.set_layout(), meshes_),
-      bloom_pass_(context_, shader_programs_, shader_dir_),
-      tonemap_pass_(context_, shader_programs_, shader_dir_),
-      overlay_pass_(context_, shader_programs_, shader_dir_,
+      bloom_pass_(context_, shader_programs_),
+      tonemap_pass_(context_, shader_programs_),
+      overlay_pass_(context_, shader_programs_,
                     frame_globals_.set_layout(), meshes_),
-      present_pass_(context_, shader_programs_, shader_dir_, output_format()),
+      present_pass_(context_, shader_programs_, output_format()),
       gpu_timer_(context_) {
   if (!swapchain_) {
     // Left in UNDEFINED: every frame's present pass discards it.
@@ -353,7 +355,7 @@ ViewportImage VulkanRenderer::PrepareViewport(core::Extent2D requested) {
   const VkExtent2D size{std::max(requested.width, 1u),
                         std::max(requested.height, 1u)};
   if (!viewport_present_pass_) {
-    viewport_present_pass_.emplace(context_, shader_programs_, shader_dir_,
+    viewport_present_pass_.emplace(context_, shader_programs_,
                                    ViewportFormat(output_format()));
     viewport_present_pass_->BindTargets(targets_, samplers_);
   }

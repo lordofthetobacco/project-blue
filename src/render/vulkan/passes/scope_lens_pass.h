@@ -27,7 +27,6 @@ namespace blue::render::vulkan {
 class ScopeLensPass {
  public:
   ScopeLensPass(const VulkanContext& context, ShaderPrograms& programs,
-                const std::string& shader_dir,
                 VkDescriptorSetLayout frame_layout);
   ~ScopeLensPass();
 

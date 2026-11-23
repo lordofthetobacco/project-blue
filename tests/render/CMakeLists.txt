@@ -24,6 +24,7 @@ add_executable(blue_render_tests
 target_include_directories(blue_render_tests PRIVATE ${CMAKE_SOURCE_DIR})
 
 target_compile_definitions(blue_render_tests PRIVATE
+    BLUE_SHADER_BLOB_DIR="${BLUE_SHADER_BLOB_DIR}"
     BLUE_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
     BLUE_RENDER_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden"
     BLUE_RENDER_TEST_OUT_DIR="${CMAKE_BINARY_DIR}/render_test_out"
@@ -34,7 +35,11 @@ blue_target_defaults(blue_render_tests ALLOW_EXCEPTIONS_AND_RTTI)
 target_link_libraries(blue_render_tests PRIVATE
     blue_render blue_image_compare blue_core glm::glm doctest::doctest)
 
-blue_copy_runtime_dlls(blue_render_tests)
+# SLANG: the hot reload test recompiles shaders.
+blue_copy_runtime_dlls(blue_render_tests SLANG)
+
+# The compiled shaders it renders with.
+add_dependencies(blue_render_tests blue_shaders)
 
 add_test(NAME blue_render_tests COMMAND blue_render_tests)
 set_tests_properties(blue_render_tests PROPERTIES LABELS gpu)

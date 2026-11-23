@@ -5,6 +5,9 @@
 #include <memory>
 #include <span>
 
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
+#include "render/vulkan/descriptor_layout.h"
 #include "core/path.h"
 #include "render/vulkan/render_targets.h"
 #include "render/vulkan/vk_check.h"
@@ -19,33 +22,20 @@ constexpr uint32_t kVertexCount = 3;
 }  // namespace
 
 SkyboxPass::SkyboxPass(const VulkanContext& context, ShaderPrograms& programs,
-                       const std::string& shader_dir,
                        VkDescriptorSetLayout frame_layout,
                        const Environment& environment)
     : device_(context.device()), frame_layout_(frame_layout) {
-  const VkDescriptorSetLayoutBinding binding{
-      .binding = 0,
-      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .descriptorCount = 1,
-      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-  };
-  const VkDescriptorSetLayoutCreateInfo layout_info{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 1,
-      .pBindings = &binding,
-  };
-  CheckVk(vkCreateDescriptorSetLayout(device_, &layout_info, nullptr,
-                                      &sky_layout_));
+  sky_layout_ = CreateSetLayout(device_, kSkyBindings);
 
-  const VkDescriptorPoolSize pool_size{
-      .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .descriptorCount = 1,
-  };
+  const std::array<VkDescriptorPoolSize, 2> pool_sizes{{
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1},
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1},
+  }};
   const VkDescriptorPoolCreateInfo pool_info{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .maxSets = 1,
-      .poolSizeCount = 1,
-      .pPoolSizes = &pool_size,
+      .poolSizeCount = static_cast<uint32_t>(pool_sizes.size()),
+      .pPoolSizes = pool_sizes.data(),
   };
   CheckVk(vkCreateDescriptorPool(device_, &pool_info, nullptr, &pool_));
   const VkDescriptorSetAllocateInfo set_info{
@@ -56,22 +46,19 @@ SkyboxPass::SkyboxPass(const VulkanContext& context, ShaderPrograms& programs,
   };
   CheckVk(vkAllocateDescriptorSets(device_, &set_info, &sky_set_));
   const VkDescriptorImageInfo image_info{
-      .sampler = environment.sky_sampler(),
       .imageView = environment.sky_view(),
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
-  const VkWriteDescriptorSet write{
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = sky_set_,
-      .dstBinding = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .pImageInfo = &image_info,
+  const VkDescriptorImageInfo sampler_info{.sampler =
+                                               environment.sky_sampler()};
+  const std::array<VkWriteDescriptorSet, 2> writes{
+      ImageWrite(sky_set_, BLUE_SKY_CUBE_BINDING, image_info),
+      SamplerWrite(sky_set_, BLUE_SKY_SAMPLER_BINDING, sampler_info),
   };
-  vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+  vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
+                         writes.data(), 0, nullptr);
 
-  programs.Add(core::JoinPath(shader_dir, "skybox.vert"),
-               core::JoinPath(shader_dir, "skybox.frag"),
+  programs.Add(ShaderProgram::kSkybox,
                [this](std::span<const uint32_t> vertex,
                       std::span<const uint32_t> fragment) {
                  const std::array<VkDescriptorSetLayout, 2> set_layouts{

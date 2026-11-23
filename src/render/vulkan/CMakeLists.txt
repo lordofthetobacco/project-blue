@@ -5,6 +5,7 @@
 add_library(blue_render_vulkan STATIC
     barriers.cc
     buffer.cc
+    descriptor_layout.cc
     draw_record.cc
     environment.cc
     frame_globals.cc

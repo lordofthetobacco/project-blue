@@ -11,6 +11,9 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec4.hpp>
 
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
+#include "render/vulkan/descriptor_layout.h"
 #include "core/path.h"
 #include "render/vulkan/render_targets.h"
 #include "render/vulkan/vk_check.h"
@@ -19,7 +22,7 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match ScopeLensUniforms in shaders/scope_lens.glsl (std140).
+// Must match ScopeLensUniforms in shaders/scope_lens.slang.
 struct ScopeLensUniforms {
   glm::mat4 lens;
   glm::vec4 right;          // w: magnification
@@ -46,8 +49,9 @@ static_assert(offsetof(ScopeLensUniforms, reticle_lines) == 192);
 static_assert(offsetof(ScopeLensUniforms, reticle_half_widths) ==
               192 + 16 * kMaxScopeReticleLines);
 
-constexpr uint32_t kUniformBinding = 0;
-constexpr uint32_t kPictureBinding = 1;
+constexpr uint32_t kUniformBinding = BLUE_SCOPE_UNIFORMS_BINDING;
+constexpr uint32_t kPictureBinding = BLUE_SCOPE_PICTURE_BINDING;
+constexpr uint32_t kSamplerBinding = BLUE_SCOPE_SAMPLER_BINDING;
 
 // The glass is generated in the vertex shader from two triangles.
 constexpr uint32_t kVertexCount = 6;
@@ -87,32 +91,15 @@ ScopeLensUniforms MakeUniforms(const ScopeSight& scope) {
 
 ScopeLensPass::ScopeLensPass(const VulkanContext& context,
                              ShaderPrograms& programs,
-                             const std::string& shader_dir,
                              VkDescriptorSetLayout frame_layout)
     : device_(context.device()), frame_layout_(frame_layout) {
-  const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{
-      {.binding = kUniformBinding,
-       .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-       .descriptorCount = 1,
-       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
-      {.binding = kPictureBinding,
-       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       .descriptorCount = 1,
-       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
-  }};
-  const VkDescriptorSetLayoutCreateInfo layout_info{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings = bindings.data(),
-  };
-  CheckVk(vkCreateDescriptorSetLayout(device_, &layout_info, nullptr,
-                                      &lens_layout_));
+  lens_layout_ = CreateSetLayout(device_, kScopeBindings);
 
   const auto frames = static_cast<uint32_t>(kFramesInFlight);
-  const std::array<VkDescriptorPoolSize, 2> pool_sizes{{
+  const std::array<VkDescriptorPoolSize, 3> pool_sizes{{
       {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = frames},
-      {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-       .descriptorCount = frames},
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = frames},
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = frames},
   }};
   const VkDescriptorPoolCreateInfo pool_info{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -149,8 +136,7 @@ ScopeLensPass::ScopeLensPass(const VulkanContext& context,
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
   }
 
-  programs.Add(core::JoinPath(shader_dir, "scope_lens.vert"),
-               core::JoinPath(shader_dir, "scope_lens.frag"),
+  programs.Add(ShaderProgram::kScopeLens,
                [this](std::span<const uint32_t> vertex,
                       std::span<const uint32_t> fragment) {
                  const std::array<VkDescriptorSetLayout, 2> set_layouts{
@@ -181,20 +167,17 @@ ScopeLensPass::~ScopeLensPass() {
 
 void ScopeLensPass::BindPicture(VkImageView view, VkSampler sampler) {
   const VkDescriptorImageInfo image_info{
-      .sampler = sampler,
       .imageView = view,
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
+  const VkDescriptorImageInfo sampler_info{.sampler = sampler};
   for (const Frame& frame : frames_) {
-    const VkWriteDescriptorSet write{
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = frame.set,
-        .dstBinding = kPictureBinding,
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = &image_info,
+    const std::array<VkWriteDescriptorSet, 2> writes{
+        ImageWrite(frame.set, kPictureBinding, image_info),
+        SamplerWrite(frame.set, kSamplerBinding, sampler_info),
     };
-    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+    vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
+                           writes.data(), 0, nullptr);
   }
   picture_bound_ = true;
 }

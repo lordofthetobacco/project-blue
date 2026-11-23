@@ -21,9 +21,6 @@ struct GraphicsPipelineDesc {
   std::span<const uint32_t> vertex_spirv;
   // Empty for a pipeline without a fragment stage (depth-only).
   std::span<const uint32_t> fragment_spirv;
-  // Values of the fragment shader's specialization constants: element i is
-  // constant_id i, read as a 32-bit int / uint / bool (0 = false).
-  std::span<const uint32_t> fragment_constants;
 
   std::span<const VkVertexInputBindingDescription> vertex_bindings;
   std::span<const VkVertexInputAttributeDescription> vertex_attributes;

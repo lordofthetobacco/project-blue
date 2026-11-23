@@ -13,8 +13,8 @@
 
 #include <glm/vec4.hpp>
 
+#include "render/shader_manifest.h"
 #include "core/log.h"
-#include "core/path.h"
 #include "render/vulkan/barriers.h"
 
 namespace blue::render::vulkan {
@@ -37,7 +37,7 @@ constexpr int kDefaultSkyHeight = 128;
 // the sample's solid angle) keeps this low without fireflies.
 constexpr int kPrefilterSamples = 128;
 
-// Must match the push blocks of the env_*.frag shaders (std430).
+// Must match the push constant blocks of shaders/env_*.slang.
 struct ToCubeConstants {
   int32_t face;
   float max_luminance;  // texels above are scaled down to it
@@ -101,7 +101,6 @@ std::vector<std::byte> ToRgba(const asset::ImageDataF& equirect) {
 }  // namespace
 
 Environment::Environment(const VulkanContext& context, ShaderPrograms& programs,
-                         const std::string& shader_dir,
                          const Samplers& samplers, FrameGlobals& frame_globals)
     : context_(context),
       samplers_(samplers),
@@ -114,19 +113,18 @@ Environment::Environment(const VulkanContext& context, ShaderPrograms& programs,
                           .format = kLutFormat,
                           .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                    VK_IMAGE_USAGE_SAMPLED_BIT}),
-      to_cube_pass_(context, programs, shader_dir,
-                    {.fragment_path = core::JoinPath(
-                         shader_dir, "env_equirect_to_cube.frag"),
+      to_cube_pass_(context, programs,
+                    {.program = ShaderProgram::kEnvEquirectToCube,
                      .push_constant_size = sizeof(ToCubeConstants),
                      .output_format = kCubeFormat}),
       prefilter_pass_(
-          context, programs, shader_dir,
-          {.fragment_path = core::JoinPath(shader_dir, "env_prefilter.frag"),
+          context, programs,
+          {.program = ShaderProgram::kEnvPrefilter,
            .push_constant_size = sizeof(PrefilterConstants),
            .output_format = kCubeFormat}),
       brdf_lut_pass_(
-          context, programs, shader_dir,
-          {.fragment_path = core::JoinPath(shader_dir, "env_brdf_lut.frag"),
+          context, programs,
+          {.program = ShaderProgram::kEnvBrdfLut,
            .output_format = kLutFormat}) {
   for (uint32_t face = 0; face < kFaceCount; ++face) {
     sky_face_views_[face] = FaceView(sky_cube_, 0, face);

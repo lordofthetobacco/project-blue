@@ -35,13 +35,13 @@ namespace blue::render::vulkan {
 //                 (shaders/motion_velocity.*): blur vector and coverage,
 //                 depth tested EQUAL against the pre-pass like the mesh
 //                 pass, so only their visible surface writes.
-//   2. tile max   velocity -> motion_tiles (shaders/motion_tile_max.frag):
+//   2. tile max   velocity -> motion_tiles (shaders/motion_tile_max.slang):
 //                 the longest blur vector per tile of the largest blur
 //                 radius.
 //   3. copy       hdr -> motion_source, the area only (the blur reads the
 //                 image it writes).
 //   4. blur       motion_source + velocity + motion_tiles -> hdr
-//                 (shaders/motion_blur.frag): a gather along the longest
+//                 (shaders/motion_blur_gather.slang): a gather along the longest
 //                 blur vector of the 3 x 3 tiles around each pixel. Only the
 //                 moving items' colour spreads, softly past their
 //                 silhouette; a pixel no moving item reaches is copied back
@@ -56,7 +56,6 @@ namespace blue::render::vulkan {
 class MotionBlurPass {
  public:
   MotionBlurPass(const VulkanContext& context, ShaderPrograms& programs,
-                 const std::string& shader_dir,
                  VkDescriptorSetLayout frame_layout,
                  const std::vector<Mesh>& meshes);
 

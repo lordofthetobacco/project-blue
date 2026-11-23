@@ -72,20 +72,6 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
       .module = vertex_module,
       .pName = "main",
   });
-  std::vector<VkSpecializationMapEntry> constant_entries;
-  for (size_t i = 0; i < desc.fragment_constants.size(); ++i) {
-    constant_entries.push_back({
-        .constantID = static_cast<uint32_t>(i),
-        .offset = static_cast<uint32_t>(i * sizeof(uint32_t)),
-        .size = sizeof(uint32_t),
-    });
-  }
-  const VkSpecializationInfo specialization{
-      .mapEntryCount = static_cast<uint32_t>(constant_entries.size()),
-      .pMapEntries = constant_entries.data(),
-      .dataSize = desc.fragment_constants.size_bytes(),
-      .pData = desc.fragment_constants.data(),
-  };
   if (!desc.fragment_spirv.empty()) {
     fragment_module = CreateShaderModule(device_, desc.fragment_spirv);
     stages.push_back({
@@ -93,8 +79,6 @@ Pipeline::Pipeline(VkDevice device, const GraphicsPipelineDesc& desc)
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
         .module = fragment_module,
         .pName = "main",
-        .pSpecializationInfo =
-            constant_entries.empty() ? nullptr : &specialization,
     });
   }
 

@@ -31,7 +31,7 @@ option(BLUE_RENDERER_VULKAN "Build the Vulkan renderer backend" ON)
 option(BLUE_RENDERER_D3D12 "Build the Direct3D 12 renderer backend (Windows)" ${blue_d3d12_available})
 option(BLUE_RENDERER_METAL "Build the Metal renderer backend (Apple)" ${blue_metal_available})
 option(BLUE_SHADER_HOT_RELOAD
-    "Compile shaders at run time and reload them when their sources change" ON)
+    "Link the runtime shader compiler and reload shaders when their sources change" ON)
 
 if(BLUE_RENDERER_D3D12 AND NOT WIN32)
     message(FATAL_ERROR "BLUE_RENDERER_D3D12 is only available on Windows")
@@ -49,11 +49,11 @@ if(NOT BLUE_RENDERER_VULKAN AND NOT BLUE_RENDERER_D3D12 AND NOT BLUE_RENDERER_ME
     message(FATAL_ERROR "Enable at least one renderer backend (BLUE_RENDERER_VULKAN, "
         "BLUE_RENDERER_D3D12, BLUE_RENDERER_METAL)")
 endif()
-if(NOT BLUE_SHADER_HOT_RELOAD)
-    # Every backend compiles its shaders at run time until the build-time compilation of
-    # package S1 exists.
-    message(FATAL_ERROR "BLUE_SHADER_HOT_RELOAD=OFF needs build-time shader compilation, "
-        "which does not exist yet")
+if(NOT BLUE_SHADER_HOT_RELOAD AND BLUE_RENDERER_METAL)
+    # Vulkan and Direct3D 12 load the blobs the build compiles (cmake/Shaders.cmake); the
+    # Metal backend still compiles its MSL sources at run time.
+    message(FATAL_ERROR "BLUE_SHADER_HOT_RELOAD=OFF is not supported with "
+        "BLUE_RENDERER_METAL yet")
 endif()
 
 # The backend used unless --renderer= or BLUE_RENDERER names another one.
@@ -75,13 +75,13 @@ message(STATUS "Renderer backends: Vulkan ${BLUE_RENDERER_VULKAN}, D3D12 ${BLUE_
     "Metal ${BLUE_RENDERER_METAL}; default ${BLUE_DEFAULT_RENDERER}")
 
 if(BLUE_RENDERER_VULKAN)
-    find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
+    find_package(Vulkan 1.3 REQUIRED)
 endif()
 
 # ProjectOptions first: cmake/Dependencies.cmake uses its MSVC flag helpers.
 include(ProjectOptions)
 include(Dependencies)
-include(ShaderSources)
+include(Shaders)
 include(SampleAssets)
 
 # Path handling and file system access (src/core/path.cc is pure; file_system.cc sits on
@@ -398,65 +398,89 @@ blue_target_defaults(blue_interact)
 
 target_link_libraries(blue_interact PUBLIC glm::glm)
 
-# shaderc for blue_shader. On Windows it is the SDK's DLL (shaderc_sharedd.dll in Debug,
-# shaderc_shared.dll otherwise): the static shaderc_combined libraries are built with C++
-# exceptions and would put their std::exception family definitions next to ours
-# (_HAS_EXCEPTIONS=0, a different layout) into one link, where the linker keeps one copy
-# depending on link order - the ODR clash that crashed assimp (see cmake/Dependencies.cmake).
-# Only shaderc's C API crosses the DLL boundary (shaderc.hpp is a header-only wrapper over
-# it; include results are allocated and freed on our side), so the DLL's CRT does not matter.
-# Executables linking blue_shader get the DLL copied next to them (blue_copy_runtime_dlls).
-# Elsewhere the static shaderc_combined is kept as before.
-if(NOT BLUE_RENDERER_VULKAN)
-    set(blue_shaderc_target "")
-elseif(WIN32)
-    cmake_path(GET Vulkan_INCLUDE_DIR PARENT_PATH blue_vulkan_sdk_dir)
-    set(blue_shaderc_files
-        "${blue_vulkan_sdk_dir}/Lib/shaderc_shared.lib"
-        "${blue_vulkan_sdk_dir}/Lib/shaderc_sharedd.lib"
-        "${blue_vulkan_sdk_dir}/Bin/shaderc_shared.dll"
-        "${blue_vulkan_sdk_dir}/Bin/shaderc_sharedd.dll")
-    foreach(file IN LISTS blue_shaderc_files)
-        if(NOT EXISTS "${file}")
-            message(FATAL_ERROR "Vulkan SDK file missing: ${file}")
+# The Slang library of the Vulkan SDK for the runtime shader compiler (hot reload), as
+# target blue_slang; empty without hot reload or without a backend that uses Slang.
+# On Windows it is a DLL that is delay-loaded: an executable only needs slang.dll (and
+# what it loads: BLUE_SLANG_RUNTIME_DLLS) once a shader is actually recompiled, so only
+# the game, the editor and the unit tests get copies (blue_copy_runtime_dlls(... SLANG)).
+set(blue_slang_target "")
+set(BLUE_SLANG_RUNTIME_DLLS "")
+if(BLUE_SHADER_HOT_RELOAD AND (BLUE_RENDERER_VULKAN OR BLUE_RENDERER_D3D12))
+    if(Vulkan_INCLUDE_DIR)
+        cmake_path(GET Vulkan_INCLUDE_DIR PARENT_PATH blue_vulkan_sdk_dir)
+    elseif(DEFINED ENV{VULKAN_SDK})
+        file(TO_CMAKE_PATH "$ENV{VULKAN_SDK}" blue_vulkan_sdk_dir)
+    else()
+        message(FATAL_ERROR "BLUE_SHADER_HOT_RELOAD needs the Vulkan SDK (Slang); "
+            "set VULKAN_SDK")
+    endif()
+    find_path(BLUE_SLANG_INCLUDE_DIR slang/slang.h
+        HINTS "${blue_vulkan_sdk_dir}/Include" "${blue_vulkan_sdk_dir}/include"
+        DOC "Directory with slang/slang.h (Vulkan SDK)")
+    find_library(BLUE_SLANG_LIBRARY slang
+        HINTS "${blue_vulkan_sdk_dir}/Lib" "${blue_vulkan_sdk_dir}/lib"
+        DOC "The Slang library (Vulkan SDK)")
+    if(NOT BLUE_SLANG_INCLUDE_DIR OR NOT BLUE_SLANG_LIBRARY)
+        message(FATAL_ERROR "Slang (slang/slang.h, the slang library) not found in the "
+            "Vulkan SDK at ${blue_vulkan_sdk_dir}; it ships with SDK >= 1.3.296. "
+            "Set -DBLUE_SHADER_HOT_RELOAD=OFF to build without the runtime compiler.")
+    endif()
+    if(WIN32)
+        # slang.dll forwards to slang-compiler.dll; slang-glslang.dll optimizes SPIR-V and
+        # dxcompiler.dll emits DXIL. All are release builds used through COM-style
+        # interfaces only, so they work with either CRT.
+        set(BLUE_SLANG_RUNTIME_DLLS
+            "${blue_vulkan_sdk_dir}/Bin/slang.dll"
+            "${blue_vulkan_sdk_dir}/Bin/slang-compiler.dll"
+            "${blue_vulkan_sdk_dir}/Bin/slang-glslang.dll")
+        if(BLUE_RENDERER_D3D12)
+            list(APPEND BLUE_SLANG_RUNTIME_DLLS "${blue_vulkan_sdk_dir}/Bin/dxcompiler.dll")
         endif()
-    endforeach()
-    add_library(blue_shaderc SHARED IMPORTED)
-    set_target_properties(blue_shaderc PROPERTIES
-        IMPORTED_CONFIGURATIONS "DEBUG;RELEASE"
-        IMPORTED_IMPLIB_DEBUG "${blue_vulkan_sdk_dir}/Lib/shaderc_sharedd.lib"
-        IMPORTED_LOCATION_DEBUG "${blue_vulkan_sdk_dir}/Bin/shaderc_sharedd.dll"
-        IMPORTED_IMPLIB_RELEASE "${blue_vulkan_sdk_dir}/Lib/shaderc_shared.lib"
-        IMPORTED_LOCATION_RELEASE "${blue_vulkan_sdk_dir}/Bin/shaderc_shared.dll"
-        MAP_IMPORTED_CONFIG_RELWITHDEBINFO RELEASE
-        MAP_IMPORTED_CONFIG_MINSIZEREL RELEASE
-        INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIR}"
-        INTERFACE_COMPILE_DEFINITIONS SHADERC_SHAREDLIB)
-    set(blue_shaderc_target blue_shaderc)
-else()
-    set(blue_shaderc_target Vulkan::shaderc_combined)
+        foreach(file IN LISTS BLUE_SLANG_RUNTIME_DLLS)
+            if(NOT EXISTS "${file}")
+                message(FATAL_ERROR "Vulkan SDK file missing: ${file}")
+            endif()
+        endforeach()
+    endif()
+    add_library(blue_slang INTERFACE)
+    target_include_directories(blue_slang SYSTEM INTERFACE "${BLUE_SLANG_INCLUDE_DIR}")
+    target_link_libraries(blue_slang INTERFACE "${BLUE_SLANG_LIBRARY}")
+    set(blue_slang_target blue_slang)
 endif()
 
 # Copies the DLLs `target` loads at run time next to it (Windows only; elsewhere they are
-# static or found by the loader).
+# static or found by the loader). SLANG: also the runtime shader compiler's DLLs, for
+# executables that recompile shaders (hot reload).
 function(blue_copy_runtime_dlls target)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "SLANG" "" "")
     if(WIN32)
+        # "cmake -E true" when the target loads no DLL (copy_if_different needs a source).
+        set(dlls "$<TARGET_RUNTIME_DLLS:${target}>")
         add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_RUNTIME_DLLS:${target}> $<TARGET_FILE_DIR:${target}>
+            COMMAND ${CMAKE_COMMAND} -E "$<IF:$<BOOL:${dlls}>,copy_if_different,true>"
+                "${dlls}" "$<$<BOOL:${dlls}>:$<TARGET_FILE_DIR:${target}>>"
             COMMAND_EXPAND_LISTS)
+        if(arg_SLANG AND BLUE_SLANG_RUNTIME_DLLS)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${BLUE_SLANG_RUNTIME_DLLS} $<TARGET_FILE_DIR:${target}>)
+        endif()
     endif()
 endfunction()
 
-# Runtime shader compilation and source change detection: the include preprocessor (pure
-# C++), the file watcher and, with Vulkan, GLSL -> SPIR-V (shaderc). No GPU device needed.
-# shaderc stays private: no shaderc type appears in the public headers.
+# Shader support without a GPU device: source change detection, SPIR-V blob helpers, the
+# Metal include preprocessor (pure C++) and, with BLUE_SHADER_HOT_RELOAD, the runtime Slang
+# compiler. Slang stays private: no Slang type appears in the public headers.
 add_library(blue_shader STATIC
     src/shader/shader_preprocessor.cc
     src/shader/shader_watcher.cc
+    src/shader/spirv_blob.cc
 )
-if(BLUE_RENDERER_VULKAN)
-    target_sources(blue_shader PRIVATE src/shader/shader_compiler.cc)
+if(blue_slang_target)
+    target_sources(blue_shader PRIVATE src/shader/slang_compiler.cc)
+    target_compile_definitions(blue_shader PUBLIC BLUE_SHADER_HOT_RELOAD=1)
+else()
+    target_compile_definitions(blue_shader PUBLIC BLUE_SHADER_HOT_RELOAD=0)
 endif()
 
 target_include_directories(blue_shader PUBLIC src)
@@ -465,8 +489,19 @@ blue_target_defaults(blue_shader)
 
 target_link_libraries(blue_shader
     PUBLIC blue_core
-    PRIVATE ${blue_shaderc_target}
+    PRIVATE ${blue_slang_target}
 )
+if(blue_slang_target AND WIN32)
+    # Delay-loaded (see blue_slang above); link options of a private dependency do not
+    # reach the executables by themselves.
+    target_link_libraries(blue_shader INTERFACE delayimp)
+    target_link_options(blue_shader INTERFACE "/DELAYLOAD:slang.dll")
+endif()
+
+# The shader programs: compiled by the build into <build>/bin/shaders (target
+# blue_shaders) and listed in the generated render/shader_manifest.h.
+include(shaders/programs.cmake)
+blue_finalize_shaders()
 
 # SDL3 window, created for the renderer backend's graphics API (platform::WindowGraphics);
 # shared by the game and the editor. No graphics API header.
@@ -495,11 +530,14 @@ add_library(blue_render_common STATIC
     src/render/texture_types.cc
 )
 
-target_include_directories(blue_render_common PUBLIC src)
+# The repository root too: render/binding_layout.h includes "shaders/gpu_bindings.h", the
+# numbers C++ shares with the shaders.
+target_include_directories(blue_render_common PUBLIC src ${PROJECT_SOURCE_DIR})
 
 blue_target_defaults(blue_render_common)
 
 target_link_libraries(blue_render_common PUBLIC
+    blue_shader_manifest
     blue_core
     blue_camera
     blue_lighting
@@ -641,12 +679,12 @@ target_link_libraries(project-blue PRIVATE
     imgui
 )
 
-blue_copy_runtime_dlls(project-blue)
-blue_copy_shader_sources(project-blue)
+blue_copy_runtime_dlls(project-blue SLANG)
+# The compiled shaders in <build>/bin/shaders, next to the executable.
+add_dependencies(project-blue blue_shaders)
 
-# Debug builds compile the repo's shader sources directly, so edits apply live without
-# rebuilding; Release uses the copies next to the executable. Content comes from the cooked
-# assets directory (blue_sample_assets).
+# Debug builds watch the repo's shader sources, so edits apply live without rebuilding
+# (hot reload). Content comes from the cooked assets directory (blue_sample_assets).
 target_compile_definitions(project-blue PRIVATE
     $<$<CONFIG:Debug>:BLUE_DEV_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders">
 )

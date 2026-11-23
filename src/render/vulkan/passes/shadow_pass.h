@@ -32,7 +32,7 @@ class ShadowPass {
   static constexpr VkFormat kFormat = VK_FORMAT_D16_UNORM;
 
   ShadowPass(const VulkanContext& context, ShaderPrograms& programs,
-             const std::string& shader_dir, const std::vector<Mesh>& meshes);
+             const std::vector<Mesh>& meshes);
   ~ShadowPass();
 
   ShadowPass(const ShadowPass&) = delete;

@@ -7,6 +7,8 @@
 
 #include <glm/mat4x4.hpp>
 
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "lighting/cascades.h"
 #include "render/vulkan/barriers.h"
@@ -23,7 +25,7 @@ constexpr float kDepthBiasSlope = 1.75f;
 // The cascades use standard depth: the far plane is 1.
 constexpr float kDepthClearValue = 1.0f;
 
-// Must match ShadowConstants in shaders/shadow.vert.
+// Must match ShadowConstants in shaders/shadow.slang.
 struct ShadowConstants {
   glm::mat4 light_model_view_proj;
 };
@@ -92,13 +94,12 @@ GraphicsPipelineDesc PipelineDesc(std::span<const uint32_t> vertex_spirv) {
 }  // namespace
 
 ShadowPass::ShadowPass(const VulkanContext& context, ShaderPrograms& programs,
-                       const std::string& shader_dir,
                        const std::vector<Mesh>& meshes)
     : device_(context.device()),
       meshes_(meshes),
       map_(context, MapDesc()),
       sampler_(CreateSampler(device_)) {
-  programs.Add(core::JoinPath(shader_dir, "shadow.vert"), "",
+  programs.Add(ShaderProgram::kShadow,
                [this](std::span<const uint32_t> vertex,
                       std::span<const uint32_t> /*fragment*/) {
                  pipeline_ =

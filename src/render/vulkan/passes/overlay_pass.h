@@ -28,13 +28,13 @@ namespace blue::render::vulkan {
 //
 //   lines      SceneView::lines (depth-tested against the scene depth, not
 //              writing it) and SceneView::overlay_lines (always on top), one
-//              pixel wide, alpha-blended (shaders/line.vert/.frag).
+//              pixel wide, alpha-blended (shaders/line.slang).
 //   selection  The items of SceneView::selected_draws are rendered into
 //              ctx.targets.selection_mask() (R8: 0.5 where an item is
 //              hidden by the scene, 1 where visible), then an edge filter
 //              draws a 2-pixel outline in SceneView::selection_color around
 //              the mask, dimmed where the item is hidden
-//              (shaders/selection_mask.frag, shaders/selection_outline.frag).
+//              (shaders/depth.slang, shaders/selection_outline.slang).
 //
 // Records nothing at all when the view has no lines and no selection (the
 // game's case). Line vertices go through a per-frame-in-flight host-visible
@@ -49,7 +49,7 @@ namespace blue::render::vulkan {
 class OverlayPass {
  public:
   OverlayPass(const VulkanContext& context, ShaderPrograms& programs,
-              const std::string& shader_dir, VkDescriptorSetLayout frame_layout,
+              VkDescriptorSetLayout frame_layout,
               const std::vector<Mesh>& meshes);
 
   OverlayPass(const OverlayPass&) = delete;

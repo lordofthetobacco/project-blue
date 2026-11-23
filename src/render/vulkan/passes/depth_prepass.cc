@@ -6,6 +6,8 @@
 #include <memory>
 #include <span>
 
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/vulkan/barriers.h"
 #include "render/vulkan/draw_record.h"
@@ -34,7 +36,6 @@ constexpr BarrierScope kDepthReaders{
 
 DepthPrepass::DepthPrepass(const VulkanContext& context,
                            ShaderPrograms& programs,
-                           const std::string& shader_dir,
                            VkDescriptorSetLayout frame_layout,
                            const MaterialSystem& materials,
                            const std::vector<Mesh>& meshes)
@@ -42,13 +43,12 @@ DepthPrepass::DepthPrepass(const VulkanContext& context,
       frame_layout_(frame_layout),
       materials_(materials),
       meshes_(meshes) {
-  const std::string vertex_path = core::JoinPath(shader_dir, "depth.vert");
-  programs.Add(vertex_path, "",
+  programs.Add(ShaderProgram::kDepth,
                [this](std::span<const uint32_t> vertex,
                       std::span<const uint32_t> fragment) {
                  CreatePipelines(/*masked=*/false, vertex, fragment);
                });
-  programs.Add(vertex_path, core::JoinPath(shader_dir, "depth_masked.frag"),
+  programs.Add(ShaderProgram::kDepthMasked,
                [this](std::span<const uint32_t> vertex,
                       std::span<const uint32_t> fragment) {
                  CreatePipelines(/*masked=*/true, vertex, fragment);

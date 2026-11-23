@@ -72,14 +72,14 @@ if(TARGET blue_world AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/main.cc)
         imgui
     )
 
-    blue_copy_runtime_dlls(blue-editor)
+    blue_copy_runtime_dlls(blue-editor SLANG)
     # The cooked samples (<build>/bin/assets: range.mscn, *.pbo) the browser starts in.
     if(TARGET blue_sample_assets)
         add_dependencies(blue-editor blue_sample_assets)
     endif()
-    blue_copy_shader_sources(blue-editor)
+    add_dependencies(blue-editor blue_shaders)
 
-    # Debug builds compile the repo's shader sources directly (live edits), like the game.
+    # Debug builds watch the repo's shader sources (live edits), like the game.
     target_compile_definitions(blue-editor PRIVATE
         $<$<CONFIG:Debug>:BLUE_DEV_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders">
     )

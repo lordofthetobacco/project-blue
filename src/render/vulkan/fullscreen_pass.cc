@@ -1,10 +1,13 @@
 #include "render/vulkan/fullscreen_pass.h"
 
 #include <array>
+#include <string_view>
 #include <vector>
 
 #include "core/log.h"
-#include "core/path.h"
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
+#include "render/vulkan/descriptor_layout.h"
 #include "render/vulkan/vk_check.h"
 
 namespace blue::render::vulkan {
@@ -18,48 +21,49 @@ constexpr uint32_t kMaxPushConstantSize = 128;
 constexpr VkShaderStageFlags kPushStages =
     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
+// The pass's set: `count` textures, then the sampler they share.
 VkDescriptorSetLayout CreateInputLayout(VkDevice device, uint32_t count) {
-  std::vector<VkDescriptorSetLayoutBinding> bindings(count);
+  std::vector<BindingDesc> bindings;
+  bindings.reserve(count + 1);
   for (uint32_t i = 0; i < count; ++i) {
-    bindings[i] = {
-        .binding = i,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-    };
+    bindings.push_back({.name = "input",
+                        .binding = i,
+                        .kind = BindingKind::kTexture,
+                        .stages = kStageFragment});
   }
-  const VkDescriptorSetLayoutCreateInfo create_info{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = count,
-      .pBindings = bindings.data(),
-  };
-  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-  CheckVk(vkCreateDescriptorSetLayout(device, &create_info, nullptr, &layout));
-  return layout;
+  bindings.push_back(kFullscreenSampler);
+  return CreateSetLayout(device, bindings);
+}
+
+// The program's name, for messages.
+std::string_view NameOf(const FullscreenPassDesc& desc) {
+  return ShaderProgramInfoOf(desc.program).name;
 }
 
 }  // namespace
 
 FullscreenPass::FullscreenPass(const VulkanContext& context,
                                ShaderPrograms& programs,
-                               const std::string& shader_dir,
                                const FullscreenPassDesc& desc)
     : device_(context.device()), desc_(desc) {
-  if (desc.input_count == 0 || desc.input_set_count == 0 ||
+  if (desc.input_count == 0 || desc.input_count > kMaxFullscreenInputs ||
+      desc.input_set_count == 0 ||
       desc.push_constant_size > kMaxPushConstantSize) {
-    core::log::Fatal("Invalid full-screen pass '{}'", desc.fragment_path);
+    core::log::Fatal("Invalid full-screen pass '{}'", NameOf(desc));
   }
   input_layout_ = CreateInputLayout(device_, desc.input_count);
 
-  const VkDescriptorPoolSize pool_size{
-      .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .descriptorCount = desc.input_count * desc.input_set_count,
-  };
+  const std::array<VkDescriptorPoolSize, 2> pool_sizes{{
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+       .descriptorCount = desc.input_count * desc.input_set_count},
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLER,
+       .descriptorCount = desc.input_set_count},
+  }};
   const VkDescriptorPoolCreateInfo pool_info{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .maxSets = desc.input_set_count,
-      .poolSizeCount = 1,
-      .pPoolSizes = &pool_size,
+      .poolSizeCount = static_cast<uint32_t>(pool_sizes.size()),
+      .pPoolSizes = pool_sizes.data(),
   };
   CheckVk(vkCreateDescriptorPool(device_, &pool_info, nullptr, &pool_));
   sets_.resize(desc.input_set_count);
@@ -74,7 +78,7 @@ FullscreenPass::FullscreenPass(const VulkanContext& context,
   CheckVk(vkAllocateDescriptorSets(device_, &set_info, sets_.data()));
 
   programs.Add(
-      core::JoinPath(shader_dir, "fullscreen.vert"), desc.fragment_path,
+      desc.program,
       [this](std::span<const uint32_t> vertex,
              std::span<const uint32_t> fragment) {
         const std::array<VkDescriptorSetLayout, 2> set_layouts{
@@ -111,26 +115,19 @@ void FullscreenPass::SetInputs(uint32_t set_index,
                                std::span<const VkImageView> views,
                                VkSampler sampler, VkImageLayout layout) {
   if (set_index >= sets_.size() || views.size() != desc_.input_count) {
-    core::log::Fatal("Bad inputs for full-screen pass '{}'",
-                     desc_.fragment_path);
+    core::log::Fatal("Bad inputs for full-screen pass '{}'", NameOf(desc_));
   }
-  std::vector<VkDescriptorImageInfo> infos(views.size());
-  std::vector<VkWriteDescriptorSet> writes(views.size());
+  // The images, then the sampler.
+  std::vector<VkDescriptorImageInfo> infos(views.size() + 1);
+  std::vector<VkWriteDescriptorSet> writes(views.size() + 1);
   for (size_t i = 0; i < views.size(); ++i) {
-    infos[i] = {
-        .sampler = sampler,
-        .imageView = views[i],
-        .imageLayout = layout,
-    };
-    writes[i] = {
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = sets_[set_index],
-        .dstBinding = static_cast<uint32_t>(i),
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = &infos[i],
-    };
+    infos[i] = {.imageView = views[i], .imageLayout = layout};
+    writes[i] =
+        ImageWrite(sets_[set_index], static_cast<uint32_t>(i), infos[i]);
   }
+  infos.back() = {.sampler = sampler};
+  writes.back() = SamplerWrite(sets_[set_index], kFullscreenSampler.binding,
+                               infos.back());
   vkUpdateDescriptorSets(device_, static_cast<uint32_t>(writes.size()),
                          writes.data(), 0, nullptr);
 }

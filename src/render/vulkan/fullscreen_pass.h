@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "render/shader_manifest.h"
 #include "render/vulkan/pipeline.h"
 #include "render/vulkan/shader_programs.h"
 #include "render/vulkan/vulkan_context.h"
@@ -17,9 +18,10 @@
 namespace blue::render::vulkan {
 
 struct FullscreenPassDesc {
-  // Fragment shader file; the vertex shader is shaders/fullscreen.vert.
-  std::string fragment_path;
-  // sampler2D inputs at bindings 0 .. input_count - 1 of set 0.
+  // A full-screen program (shaders/fullscreen.slang's vertex stage).
+  ShaderProgram program{};
+  // Texture inputs at bindings 0 .. input_count - 1 of set 0 (at most
+  // kMaxFullscreenInputs), all sampled with the set's one sampler.
   uint32_t input_count = 1;
   // Independent sets of inputs, chosen per Record() call (e.g. one per mip
   // of a bloom chain).
@@ -42,14 +44,14 @@ struct FullscreenTarget {
   VkAttachmentLoadOp load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   // The pixels to draw (render area and scissor), inside `extent`; pixels
   // outside keep their contents. An empty extent draws the whole target.
-  // The viewport, hence inUv, always spans the whole target.
+  // The viewport, hence the shader's uv, always spans the whole target.
   VkRect2D area{};
 };
 
 // A pass that runs one fragment shader over a whole target: tonemapping,
 // copies, and later bloom, SSAO and FXAA. Owns its descriptor sets and the
 // pipeline (hot-reloaded through `programs`). The fragment shader sees
-// inUv in [0, 1] with (0, 0) at the top-left pixel corner.
+// uv in [0, 1] with (0, 0) at the top-left pixel corner.
 //
 // Image barriers are the caller's job: the inputs must be in the layout
 // given to SetInputs() and the target in COLOR_ATTACHMENT_OPTIMAL when
@@ -58,7 +60,7 @@ struct FullscreenTarget {
 class FullscreenPass {
  public:
   FullscreenPass(const VulkanContext& context, ShaderPrograms& programs,
-                 const std::string& shader_dir, const FullscreenPassDesc& desc);
+                 const FullscreenPassDesc& desc);
   ~FullscreenPass();
 
   FullscreenPass(const FullscreenPass&) = delete;

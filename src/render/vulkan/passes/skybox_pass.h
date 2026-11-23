@@ -23,7 +23,7 @@ namespace blue::render::vulkan {
 class SkyboxPass {
  public:
   SkyboxPass(const VulkanContext& context, ShaderPrograms& programs,
-             const std::string& shader_dir, VkDescriptorSetLayout frame_layout,
+             VkDescriptorSetLayout frame_layout,
              const Environment& environment);
   ~SkyboxPass();
 

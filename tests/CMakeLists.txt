@@ -84,7 +84,9 @@ add_executable(blue_tests
     weapon_modding_test.cc
     inspect_screen_rules_test.cc
     window_pair_test.cc
+    shader_bindings_test.cc
     shader_preprocessor_test.cc
+    spirv_blob_test.cc
     shader_watcher_test.cc
     material_file_test.cc
     image_decoder_test.cc
@@ -112,11 +114,15 @@ add_executable(blue_tests
 # Unit tests of a backend's GPU-free code, built with that backend.
 if(BLUE_RENDERER_VULKAN)
     target_sources(blue_tests PRIVATE
-        vulkan/shader_compiler_test.cc
         vulkan/staging_upload_test.cc
         vulkan/vk_format_test.cc
     )
     target_link_libraries(blue_tests PRIVATE blue_render_vulkan)
+endif()
+
+# The runtime shader compiler (hot reload).
+if(blue_slang_target)
+    target_sources(blue_tests PRIVATE slang_compiler_test.cc)
 endif()
 
 target_include_directories(blue_tests PRIVATE ${CMAKE_SOURCE_DIR})
@@ -125,6 +131,10 @@ target_compile_definitions(blue_tests PRIVATE
     BLUE_SAMPLES_DIR="${CMAKE_SOURCE_DIR}/samples"
     BLUE_ASSETS_DIR="${CMAKE_BINARY_DIR}/bin/assets"
     BLUE_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
+    BLUE_SHADER_BLOB_DIR="${BLUE_SHADER_BLOB_DIR}"
+    BLUE_SHADER_REFLECTION_DIR="${BLUE_SHADER_REFLECTION_DIR}"
+    BLUE_SHADERS_HAVE_SPIRV=$<BOOL:${BLUE_RENDERER_VULKAN}>
+    BLUE_SHADERS_HAVE_DXIL=$<OR:$<BOOL:${BLUE_RENDERER_D3D12}>,$<BOOL:${BLUE_SHADERS_DXIL}>>
     # doctest then includes the standard <ostream> and <string> it otherwise
     # forward-declares, so CHECKs can print std::string_view with MSVC's
     # standard library too.
@@ -136,10 +146,11 @@ blue_target_defaults(blue_tests ALLOW_EXCEPTIONS_AND_RTTI)
 target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_material blue_asset blue_animation blue_input blue_camera blue_input_mapper blue_physics blue_player blue_interact blue_weapon blue_game blue_lighting blue_shader blue_render blue_cook blue_prefab blue_world blue_editor_core blue_mcp blue_image_compare doctest::doctest)
 
 # assimp is a DLL (see cmake/Dependencies.cmake); copy it next to the runner.
-blue_copy_runtime_dlls(blue_tests)
+blue_copy_runtime_dlls(blue_tests SLANG)
 
-# cook_samples_test reads the cooked sample assets.
-add_dependencies(blue_tests blue_sample_assets)
+# cook_samples_test reads the cooked sample assets; shader_bindings_test and
+# spirv_blob_test the compiled shaders and their reflection.
+add_dependencies(blue_tests blue_sample_assets blue_shaders)
 
 add_test(NAME blue_tests COMMAND blue_tests)
 

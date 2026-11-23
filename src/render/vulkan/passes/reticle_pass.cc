@@ -8,6 +8,7 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec4.hpp>
 
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/vulkan/render_targets.h"
 
@@ -15,7 +16,7 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match ReticleConstants in shaders/reticle.glsl.
+// Must match ReticleConstants in shaders/reticle.slang.
 struct ReticleConstants {
   glm::mat4 lens;
   glm::vec4 axis;       // xyz: axis, w: dot angular radius
@@ -40,11 +41,9 @@ constexpr uint32_t kVertexCount = 6;
 }  // namespace
 
 ReticlePass::ReticlePass(const VulkanContext& context, ShaderPrograms& programs,
-                         const std::string& shader_dir,
                          VkDescriptorSetLayout frame_layout)
     : device_(context.device()), frame_layout_(frame_layout) {
-  programs.Add(core::JoinPath(shader_dir, "reticle.vert"),
-               core::JoinPath(shader_dir, "reticle.frag"),
+  programs.Add(ShaderProgram::kReticle,
                [this](std::span<const uint32_t> vertex,
                       std::span<const uint32_t> fragment) {
                  // Additive, depth tested against the scene (equal passes too,

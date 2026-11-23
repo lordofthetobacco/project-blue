@@ -37,24 +37,25 @@ jobs:
           sudo apt-get install -y ninja-build clang lld ccache zlib1g-dev \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev \
             libxkbcommon-dev libwayland-dev libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev \
-            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libvulkan-dev glslang-tools \
-            libshaderc-dev
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
 
       - name: Install macOS packages
         if: runner.os == 'macOS'
-        run: brew install ninja ccache molten-vk vulkan-headers vulkan-loader shaderc
+        run: brew install ninja ccache
 
       - name: Install Windows packages
         if: runner.os == 'Windows'
         run: choco install ninja sccache --no-progress -y
 
-      - name: Install the Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
-        uses: humbletim/setup-vulkan-sdk@v1.2.1
+      # The LunarG SDK provides Vulkan headers/loader (MoltenVK on macOS) and slangc / the Slang
+      # library the shader build needs (VULKAN_SDK is exported by the action).
+      - name: Install the Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
         with:
-          vulkan-query-version: 1.4.309.0
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Tools, Shaderc
-          vulkan-use-cache: true
+          vulkan_version: latest
+          install_runtime: true
+          cache: true
+          stripdown: false
 
       - name: Developer command prompt (Windows)
         if: runner.os == 'Windows'

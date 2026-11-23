@@ -22,7 +22,7 @@
 
 namespace blue::render::vulkan {
 
-// Must match MaterialParams in shaders/mesh.frag (std140).
+// Must match MaterialParams in shaders/material.slang.
 struct MaterialParams {
   glm::vec4 base_color;  // linear RGBA factor
   glm::vec4 emissive;    // rgb: emissive * emissive_strength
@@ -34,7 +34,7 @@ struct MaterialParams {
   glm::uvec4 options;
 };
 
-// MaterialParams::options.y bits; must match shaders/material.glsl.
+// MaterialParams::options.y bits; must match shaders/material.slang.
 inline constexpr uint32_t kMaterialFlagNormalRg = 1;
 inline constexpr uint32_t kMaterialFlagOcclusionInMetallicRoughness = 2;
 

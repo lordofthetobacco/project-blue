@@ -17,8 +17,8 @@
 
 namespace blue::render::vulkan {
 
-// Shades the frame's draw list with the PBR shaders (shaders/mesh.vert/
-// .frag). The depth pre-pass has already written the scene depth, so this
+// Shades the frame's draw list with the PBR shaders (shaders/mesh.slang,
+// one program per MaterialVariant). The depth pre-pass has already written the scene depth, so this
 // pass tests EQUAL without writing depth: every pixel is shaded once. Set 0
 // is FrameGlobals', set 1 the material's; the push constant is the model
 // matrix (the normal matrix is derived in the vertex shader).
@@ -28,7 +28,7 @@ namespace blue::render::vulkan {
 class MeshPass {
  public:
   MeshPass(const VulkanContext& context, ShaderPrograms& programs,
-           const std::string& shader_dir, VkDescriptorSetLayout frame_layout,
+           VkDescriptorSetLayout frame_layout,
            const MaterialSystem& materials, const std::vector<Mesh>& meshes);
 
   MeshPass(const MeshPass&) = delete;

@@ -110,7 +110,8 @@
 // own shaders. It gets the shared state it needs in its constructor
 // (VulkanContext, ShaderPrograms for hot-reloadable pipelines, the
 // FrameGlobals set layout, ...) and records with a FrameContext. To add one:
-//   1. Write passes/<name>_pass.{h,cc} and shaders/<name>.frag. A full-screen
+//   1. Write passes/<name>_pass.{h,cc} and shaders/<name>.slang, and list the
+//      program in shaders/programs.cmake (shaders/README.md). A full-screen
 //      effect wraps a FullscreenPass (render/vulkan/fullscreen_pass.h): it
 //      owns the
 //      input descriptor sets and the pipeline; set its inputs in a
@@ -349,7 +350,6 @@ class VulkanRenderer final : public RendererBackend {
   std::unique_ptr<VulkanContext> context_owner_;
   VulkanContext& context_;
   const platform::Window* window_;  // Null when headless.
-  std::string shader_dir_;
   VkExtent2D headless_extent_;
   bool vsync_ = true;
   bool swapchain_dirty_ = false;

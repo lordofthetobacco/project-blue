@@ -10,6 +10,8 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec4.hpp>
 
+#include "render/binding_layout.h"
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/debug_lines.h"
 #include "render/vulkan/barriers.h"
@@ -20,7 +22,7 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Line vertex input: LineVertex (shaders/line.vert).
+// Line vertex input: LineVertex (shaders/line.slang).
 constexpr std::array<VkVertexInputBindingDescription, 1> kLineBindings{{
     {.binding = 0,
      .stride = sizeof(LineVertex),
@@ -37,8 +39,8 @@ constexpr std::array<VkVertexInputAttributeDescription, 2> kLineAttributes{{
      .offset = offsetof(LineVertex, color)},
 }};
 
-// The selection mask reuses shaders/depth.vert (its invariant gl_Position
-// matches the depth pre-pass exactly, so the visible test can compare
+// The selection mask reuses the vertex stage of shaders/depth.slang (its
+// invariant position matches the depth pre-pass exactly, so the visible test can compare
 // GREATER_OR_EQUAL), which reads position and both uvs.
 constexpr auto kMeshBindings = VertexBindings();
 constexpr auto kMeshAttributes = PositionUvVertexAttributes();
@@ -46,7 +48,7 @@ constexpr auto kMeshAttributes = PositionUvVertexAttributes();
 // Initial line buffer size; grows to the next power of two as needed.
 constexpr VkDeviceSize kInitialLineBufferSize = 64 * 1024;
 
-// Must match OutlineConstants in shaders/selection_outline.frag.
+// Must match OutlineConstants in shaders/selection_outline.slang.
 struct OutlineConstants {
   glm::vec4 color;  // display space, alpha = opacity
 };
@@ -102,23 +104,20 @@ void BeginOverlayRendering(const FrameContext& ctx, VkImageView color,
 }  // namespace
 
 OverlayPass::OverlayPass(const VulkanContext& context, ShaderPrograms& programs,
-                         const std::string& shader_dir,
                          VkDescriptorSetLayout frame_layout,
                          const std::vector<Mesh>& meshes)
     : context_(context),
       frame_layout_(frame_layout),
       meshes_(meshes),
-      outline_(context, programs, shader_dir,
+      outline_(context, programs,
                FullscreenPassDesc{
-                   .fragment_path =
-                       core::JoinPath(shader_dir, "selection_outline.frag"),
+                   .program = ShaderProgram::kSelectionOutline,
                    .input_count = 1,
                    .push_constant_size = sizeof(OutlineConstants),
                    .output_format = RenderTargets::kLdrFormat,
                    .blend = BlendMode::kAlpha,
                }) {
-  programs.Add(core::JoinPath(shader_dir, "line.vert"),
-               core::JoinPath(shader_dir, "line.frag"),
+  programs.Add(ShaderProgram::kLine,
                [this](std::span<const uint32_t> vertex,
                       std::span<const uint32_t> fragment) {
                  const auto make = [&](VkCompareOp compare) {
@@ -143,20 +142,19 @@ OverlayPass::OverlayPass(const VulkanContext& context, ShaderPrograms& programs,
                  tested_lines_ = make(VK_COMPARE_OP_GREATER_OR_EQUAL);
                  top_lines_ = make(VK_COMPARE_OP_ALWAYS);
                });
-  programs.Add(
-      core::JoinPath(shader_dir, "depth.vert"),
-      core::JoinPath(shader_dir, "selection_mask.frag"),
-      [this](std::span<const uint32_t> vertex,
-             std::span<const uint32_t> fragment) {
-        const auto make = [&](bool visible) {
-          // constant_id 0: visible (shaders/selection_mask.frag).
-          const std::array<uint32_t, 1> constants{visible ? 1u : 0u};
-          return std::make_unique<Pipeline>(
+  // Hidden and visible coverage are two programs (define VISIBLE of
+  // shaders/depth.slang).
+  const auto add_mask = [this, &programs](bool visible) {
+    programs.Add(
+        visible ? ShaderProgram::kSelectionMaskVisible
+                : ShaderProgram::kSelectionMaskHidden,
+        [this, visible](std::span<const uint32_t> vertex,
+                        std::span<const uint32_t> fragment) {
+          auto pipeline = std::make_unique<Pipeline>(
               context_.device(),
               GraphicsPipelineDesc{
                   .vertex_spirv = vertex,
                   .fragment_spirv = fragment,
-                  .fragment_constants = constants,
                   .vertex_bindings = kMeshBindings,
                   .vertex_attributes = kMeshAttributes,
                   .set_layouts = {&frame_layout_, 1},
@@ -168,10 +166,11 @@ OverlayPass::OverlayPass(const VulkanContext& context, ShaderPrograms& programs,
                                               : VK_COMPARE_OP_ALWAYS,
                   .depth_write = false,
               });
-        };
-        mask_hidden_ = make(/*visible=*/false);
-        mask_visible_ = make(/*visible=*/true);
-      });
+          (visible ? mask_visible_ : mask_hidden_) = std::move(pipeline);
+        });
+  };
+  add_mask(/*visible=*/false);
+  add_mask(/*visible=*/true);
 }
 
 void OverlayPass::BindTargets(const RenderTargets& targets,

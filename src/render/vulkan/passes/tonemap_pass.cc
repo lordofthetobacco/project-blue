@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/vulkan/barriers.h"
 
@@ -11,7 +12,7 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match TonemapConstants in shaders/tonemap.frag.
+// Must match TonemapConstants in shaders/tonemap.slang.
 struct TonemapConstants {
   float exposure_scale;  // 2^EV
   int32_t tonemapper;    // Tonemapper
@@ -21,10 +22,9 @@ struct TonemapConstants {
 
 }  // namespace
 
-TonemapPass::TonemapPass(const VulkanContext& context, ShaderPrograms& programs,
-                         const std::string& shader_dir)
-    : pass_(context, programs, shader_dir,
-            {.fragment_path = core::JoinPath(shader_dir, "tonemap.frag"),
+TonemapPass::TonemapPass(const VulkanContext& context, ShaderPrograms& programs)
+    : pass_(context, programs,
+            {.program = ShaderProgram::kTonemap,
              .input_count = 2,
              .push_constant_size = sizeof(TonemapConstants),
              .output_format = RenderTargets::kLdrFormat}) {}

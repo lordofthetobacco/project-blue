@@ -10,6 +10,8 @@
 
 #include "core/log.h"
 #include "render/frame_config.h"
+#include "render/binding_layout.h"
+#include "render/vulkan/descriptor_layout.h"
 #include "render/vulkan/vk_check.h"
 
 namespace blue::render::vulkan {
@@ -22,44 +24,22 @@ static_assert(offsetof(MaterialParams, uv_alpha) == 48);
 static_assert(offsetof(MaterialParams, options) == 64);
 static_assert(sizeof(MaterialParams) == 80);
 
-constexpr uint32_t kParamsBinding = 0;
-constexpr uint32_t kTextureCount = 5;  // Bindings 1-5.
+constexpr uint32_t kParamsBinding = BLUE_MATERIAL_PARAMS_BINDING;
+// The textures: bindings 1-5, in material::TextureSlot order.
+constexpr uint32_t kFirstTextureBinding = BLUE_MATERIAL_BASE_COLOR_BINDING;
+constexpr uint32_t kTextureCount = kMaterialTextureCount;
 static_assert(kTextureCount == material::kTextureSlotCount,
               "One texture binding per material::TextureSlot");
+constexpr uint32_t kSamplerBinding = BLUE_MATERIAL_SAMPLER_BINDING;
 constexpr uint32_t kSetsPerPool = 64;
 
-VkDescriptorSetLayout CreateLayout(VkDevice device) {
-  std::array<VkDescriptorSetLayoutBinding, 1 + kTextureCount> bindings{};
-  bindings[0] = {
-      .binding = kParamsBinding,
-      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-      .descriptorCount = 1,
-      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-  };
-  for (uint32_t i = 1; i < bindings.size(); ++i) {
-    bindings[i] = {
-        .binding = i,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-    };
-  }
-  const VkDescriptorSetLayoutCreateInfo create_info{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(bindings.size()),
-      .pBindings = bindings.data(),
-  };
-  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-  CheckVk(vkCreateDescriptorSetLayout(device, &create_info, nullptr, &layout));
-  return layout;
-}
-
 VkDescriptorPool CreatePool(VkDevice device) {
-  const std::array<VkDescriptorPoolSize, 2> pool_sizes{{
+  const std::array<VkDescriptorPoolSize, 3> pool_sizes{{
       {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
        .descriptorCount = kSetsPerPool},
-      {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
        .descriptorCount = kSetsPerPool * kTextureCount},
+      {.type = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = kSetsPerPool},
   }};
   const VkDescriptorPoolCreateInfo create_info{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -113,7 +93,7 @@ MaterialSystem::MaterialSystem(const VulkanContext& context,
     : context_(context),
       textures_(textures),
       samplers_(samplers),
-      layout_(CreateLayout(context.device())) {}
+      layout_(CreateSetLayout(context.device(), kMaterialBindings)) {}
 
 MaterialSystem::~MaterialSystem() {
   const VkDevice device = context_.device();
@@ -245,7 +225,8 @@ void MaterialSystem::Write(const Binding& binding, const Material& material) {
       .range = sizeof(MaterialParams),
   };
   std::array<VkDescriptorImageInfo, kTextureCount> image_infos{};
-  std::array<VkWriteDescriptorSet, 1 + kTextureCount> writes{};
+  const VkDescriptorImageInfo sampler_info{.sampler = samplers_.material()};
+  std::array<VkWriteDescriptorSet, 2 + kTextureCount> writes{};
   writes[0] = {
       .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
       .dstSet = binding.set,
@@ -256,19 +237,13 @@ void MaterialSystem::Write(const Binding& binding, const Material& material) {
   };
   for (uint32_t i = 0; i < kTextureCount; ++i) {
     image_infos[i] = {
-        .sampler = samplers_.material(),
         .imageView = views[i],
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
-    writes[i + 1] = {
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = binding.set,
-        .dstBinding = i + 1,
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = &image_infos[i],
-    };
+    writes[i + 1] =
+        ImageWrite(binding.set, kFirstTextureBinding + i, image_infos[i]);
   }
+  writes.back() = SamplerWrite(binding.set, kSamplerBinding, sampler_info);
   vkUpdateDescriptorSets(context_.device(),
                          static_cast<uint32_t>(writes.size()), writes.data(), 0,
                          nullptr);

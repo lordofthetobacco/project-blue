@@ -28,7 +28,7 @@ struct PresentTarget {
   BarrierScope previous_use;
 };
 
-// Writes the LDR target to an output image (shaders/present.frag),
+// Writes the LDR target to an output image (shaders/present.slang),
 // through FXAA when SceneView::post.fxaa_enabled (using the luma the tonemap
 // pass stored in alpha), else as a plain copy. Borrows `context` and
 // `programs`, which must outlive it. Neither copyable nor movable. Not
@@ -38,7 +38,7 @@ class PresentPass {
   // `output_format` is the format of every image this pass will draw to;
   // an _SRGB format makes the pass decode the LDR image first.
   PresentPass(const VulkanContext& context, ShaderPrograms& programs,
-              const std::string& shader_dir, VkFormat output_format);
+              VkFormat output_format);
 
   PresentPass(const PresentPass&) = delete;
   PresentPass& operator=(const PresentPass&) = delete;

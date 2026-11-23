@@ -78,11 +78,12 @@ class FrameGlobals {
   static size_t Index(size_t frame, FrameView view) {
     return frame * kFrameViewCount + static_cast<size_t>(view);
   }
-  // Points `binding` of every frame's set (only those of `only` when set)
-  // at `view` with `sampler`.
-  void BindImage(uint32_t binding, VkImageView view, VkSampler sampler,
-                 VkImageLayout layout,
+  // Points texture `binding` of every frame's set (only those of `only`
+  // when set) at `view`.
+  void BindImage(uint32_t binding, VkImageView view, VkImageLayout layout,
                  std::optional<FrameView> only = std::nullopt);
+  // Points sampler `binding` of every frame's set at `sampler`.
+  void BindSampler(uint32_t binding, VkSampler sampler);
 
   VkDevice device_;
   const Samplers& samplers_;

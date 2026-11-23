@@ -14,16 +14,15 @@ namespace blue::render::vulkan {
 
 // Threshold-free bloom (the "physically based" variant of the Call of Duty
 // chain): the HDR image is downsampled into the bloom target's mips with a
-// 13-tap filter (shaders/bloom_down.frag; Karis average on the first step),
+// 13-tap filter (shaders/bloom_down.slang; Karis average on the first step),
 // then upsampled back with a tent filter, each level added onto the next
-// larger one (shaders/bloom_up.frag). Mip 0 then holds the sum of all
+// larger one (shaders/bloom_up.slang). Mip 0 then holds the sum of all
 // levels; TonemapPass mixes it into the image (bloom_strength). Borrows
 // `context` and `programs`, which must outlive it. Neither copyable nor
 // movable. Not thread-safe.
 class BloomPass {
  public:
-  BloomPass(const VulkanContext& context, ShaderPrograms& programs,
-            const std::string& shader_dir);
+  BloomPass(const VulkanContext& context, ShaderPrograms& programs);
 
   BloomPass(const BloomPass&) = delete;
   BloomPass& operator=(const BloomPass&) = delete;

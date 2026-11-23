@@ -18,8 +18,8 @@
 namespace blue::render::vulkan {
 
 // Writes the scene depth of the camera view before anything is shaded
-// (shaders/depth.vert; alpha-masked materials add depth_masked.frag and
-// bind their material). SSAO reads the result and the mesh pass tests EQUAL
+// (shaders/depth.slang; alpha-masked materials add its masked fragment
+// stage and bind their material). SSAO reads the result and the mesh pass tests EQUAL
 // against it, so every visible pixel is shaded exactly once.
 //
 // Borrows everything it is given, which must outlive it. Neither copyable
@@ -27,7 +27,6 @@ namespace blue::render::vulkan {
 class DepthPrepass {
  public:
   DepthPrepass(const VulkanContext& context, ShaderPrograms& programs,
-               const std::string& shader_dir,
                VkDescriptorSetLayout frame_layout,
                const MaterialSystem& materials,
                const std::vector<Mesh>& meshes);

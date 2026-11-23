@@ -6,9 +6,12 @@
 #include <cstdio>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
+#include "platform/file_system.h"
 #include "render/backend.h"
 #include "render/renderer.h"
 #include "shader/compile_mode.h"
@@ -16,6 +19,7 @@
 #include "tests/render/image_compare.h"
 #include "tests/render/png_io.h"
 #include "tests/render/scenes.h"
+#include "tests/scratch_directory.h"
 
 namespace blue::render_test {
 namespace {
@@ -32,9 +36,9 @@ std::unique_ptr<render::Renderer> MakeRenderer(render::Backend backend) {
   auto renderer = std::make_unique<render::Renderer>(render::RendererOptions{
       .window = nullptr,
       .backend = backend,
-      .shader_dir = BLUE_SHADER_SOURCE_DIR,
-      // Fixed (not per build type): Debug and Release must render the same.
-      .shader_mode = shader::CompileMode::kRelease,
+      .shader_dir = BLUE_SHADER_BLOB_DIR,
+      // The build's blobs are optimized in every build type, so Debug and
+      // Release render the same; no source directory: no hot reload.
       .adapter = Options().adapter,
       .headless_extent = {kSceneWidth, kSceneHeight},
       .max_anisotropy = 1.0f,
@@ -44,10 +48,9 @@ std::unique_ptr<render::Renderer> MakeRenderer(render::Backend backend) {
   return renderer;
 }
 
-// Draws `scene_name` and reads back its last frame (alpha forced to 255).
-SceneResult RenderScene(std::string_view scene_name, render::Backend backend) {
-  std::unique_ptr<render::Renderer> renderer = MakeRenderer(backend);
-  const std::unique_ptr<TestScene> scene = BuildScene(scene_name, *renderer);
+// Draws `scene` with `renderer` and reads back its last frame (alpha forced
+// to 255).
+SceneResult DrawScene(render::Renderer* renderer, const TestScene* scene) {
   uint64_t ticket = 0;
   for (int frame = 0; frame < scene->frames; ++frame) {
     const bool last = frame + 1 == scene->frames;
@@ -84,6 +87,13 @@ SceneResult RenderScene(std::string_view scene_name, render::Backend backend) {
   }
   result.validation = renderer->validation_stats();
   return result;
+}
+
+// Draws `scene_name` with a fresh renderer.
+SceneResult RenderScene(std::string_view scene_name, render::Backend backend) {
+  const std::unique_ptr<render::Renderer> renderer = MakeRenderer(backend);
+  const std::unique_ptr<TestScene> scene = BuildScene(scene_name, *renderer);
+  return DrawScene(renderer.get(), scene.get());
 }
 
 std::string GoldenPath(std::string_view scene) {
@@ -165,6 +175,129 @@ TEST_CASE("Rendering the same scene twice gives identical images") {
     CHECK_MESSAGE(Passes(metrics, kExact), Describe(metrics));
   }
 }
+
+#if BLUE_SHADER_HOT_RELOAD
+// Copies the shader sources into `dir`.
+void CopyShaderSources(const testing::ScratchDirectory& dir) {
+  const auto names = platform::ListDirectory(BLUE_SHADER_SOURCE_DIR);
+  REQUIRE(names.has_value());
+  for (const std::string& name : *names) {
+    if (!name.ends_with(".slang") && !name.ends_with(".h")) {
+      continue;
+    }
+    const auto bytes = platform::ReadFile(
+        std::string(BLUE_SHADER_SOURCE_DIR) + "/" + name, size_t{1} << 20);
+    REQUIRE(bytes.ok());
+    REQUIRE(platform::WriteFileAtomic(dir.Child(name), bytes.value()).ok());
+  }
+}
+
+// Returns the text of shader `name` in `dir`.
+std::string ReadShader(const testing::ScratchDirectory& dir,
+                       std::string_view name) {
+  const auto bytes = platform::ReadFile(dir.Child(name), size_t{1} << 20);
+  REQUIRE(bytes.ok());
+  return std::string(reinterpret_cast<const char*>(bytes.value().data()),
+                     bytes.value().size());
+}
+
+void WriteShader(const testing::ScratchDirectory& dir, std::string_view name,
+                 std::string_view text) {
+  REQUIRE(platform::WriteFileAtomic(
+              dir.Child(name),
+              std::as_bytes(std::span(text.data(), text.size())))
+              .ok());
+}
+
+// The watcher reports an edit once it is stable across two polls.
+void PollReloads(render::Renderer* renderer) {
+  for (int i = 0; i < 3; ++i) {
+    renderer->ReloadChangedShaders();
+  }
+}
+
+TEST_CASE("An edited shader is reloaded; a broken edit keeps the old one") {
+  constexpr std::string_view kOutput = "return float4(encoded, luma);";
+  for (const render::Backend backend : Options().backends) {
+    if (backend != render::Backend::kVulkan) {
+      continue;  // The Metal backend has its own shader sources.
+    }
+    // A copy of the sources: the test edits them.
+    const testing::ScratchDirectory dir("hot_reload");
+    CopyShaderSources(dir);
+    const std::string original = ReadShader(dir, "tonemap.slang");
+    const size_t at = original.find(kOutput);
+    REQUIRE(at != std::string::npos);
+
+    auto renderer = std::make_unique<render::Renderer>(render::RendererOptions{
+        .window = nullptr,
+        .backend = backend,
+        .shader_dir = BLUE_SHADER_BLOB_DIR,
+        .shader_source_dir = dir.path(),
+        .shader_mode = shader::CompileMode::kRelease,
+        .adapter = Options().adapter,
+        .headless_extent = {kSceneWidth, kSceneHeight},
+        .max_anisotropy = 1.0f,
+    });
+    REQUIRE(renderer->backend() == backend);
+    const std::unique_ptr<TestScene> scene = BuildScene("lit_basic", *renderer);
+    const RgbaImage before = DrawScene(renderer.get(), scene.get()).image;
+
+    // Nothing changed: nothing reloads.
+    PollReloads(renderer.get());
+    CHECK(renderer->last_shader_error().empty());
+    CHECK(Matches(DrawScene(renderer.get(), scene.get()).image, before, kExact));
+
+    // Swap red and blue in the tonemapper's output. Everything after it
+    // (FXAA by luma, the sRGB decode) treats the channels alike, so the
+    // image is the old one with the channels swapped, exactly.
+    std::string swapped = original;
+    swapped.replace(at, kOutput.size(), "return float4(encoded.bgr, luma);");
+    WriteShader(dir, "tonemap.slang", swapped);
+    PollReloads(renderer.get());
+    CHECK_MESSAGE(renderer->last_shader_error().empty(),
+                  renderer->last_shader_error());
+    const RgbaImage edited = DrawScene(renderer.get(), scene.get()).image;
+    RgbaImage expected = before;
+    for (size_t i = 0; i + 3 < expected.rgba.size(); i += 4) {
+      std::swap(expected.rgba[i], expected.rgba[i + 2]);
+    }
+    CHECK_FALSE(Matches(edited, before, kExact));
+    const CompareMetrics metrics = Compare(edited, expected, 0);
+    CHECK_MESSAGE(Passes(metrics, kExact), Describe(metrics));
+
+    // A broken edit: the error is reported and the pipeline stays.
+    std::string broken = original;
+    broken.replace(at, kOutput.size(), "return float4(encoded, luma;");
+    WriteShader(dir, "tonemap.slang", broken);
+    PollReloads(renderer.get());
+    const std::string error(renderer->last_shader_error());
+    CHECK(error.find("tonemap.slang") != std::string::npos);
+    CHECK(Matches(DrawScene(renderer.get(), scene.get()).image, edited, kExact));
+
+    // Fixed: back to the first image, the error cleared.
+    WriteShader(dir, "tonemap.slang", original);
+    PollReloads(renderer.get());
+    CHECK(renderer->last_shader_error().empty());
+    const SceneResult fixed = DrawScene(renderer.get(), scene.get());
+    CHECK(Matches(fixed.image, before, kExact));
+    CHECK(fixed.validation.errors == 0);
+
+    // An edit to a shared file reloads the programs that include it.
+    std::string sanitize = ReadShader(dir, "sanitize.slang");
+    constexpr std::string_view kLimit = "kMaxSceneRadiance = 4096.0;";
+    const size_t limit_at = sanitize.find(kLimit);
+    REQUIRE(limit_at != std::string::npos);
+    sanitize.replace(limit_at, kLimit.size(), "kMaxSceneRadiance = 0.25;");
+    WriteShader(dir, "sanitize.slang", sanitize);
+    PollReloads(renderer.get());
+    CHECK_MESSAGE(renderer->last_shader_error().empty(),
+                  renderer->last_shader_error());
+    CHECK_FALSE(
+        Matches(DrawScene(renderer.get(), scene.get()).image, before, kExact));
+  }
+}
+#endif  // BLUE_SHADER_HOT_RELOAD
 
 TEST_CASE("Headless rendering never starts SDL video") {
   // Runs after the scenes (doctest keeps file order): nothing in them may

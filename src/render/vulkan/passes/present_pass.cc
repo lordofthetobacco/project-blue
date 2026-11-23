@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/vulkan/barriers.h"
 
@@ -10,7 +11,7 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match PresentConstants in shaders/present.frag.
+// Must match PresentConstants in shaders/present.slang.
 struct PresentConstants {
   int32_t decode_srgb;  // 1: the target encodes, so output linear values.
   int32_t fxaa;         // 1: anti-alias.
@@ -25,10 +26,10 @@ bool IsSrgb(VkFormat format) {
 }  // namespace
 
 PresentPass::PresentPass(const VulkanContext& context, ShaderPrograms& programs,
-                         const std::string& shader_dir, VkFormat output_format)
+                         VkFormat output_format)
     : srgb_output_(IsSrgb(output_format)),
-      pass_(context, programs, shader_dir,
-            {.fragment_path = core::JoinPath(shader_dir, "present.frag"),
+      pass_(context, programs,
+            {.program = ShaderProgram::kPresent,
              .input_count = 1,
              .push_constant_size = sizeof(PresentConstants),
              .output_format = output_format}) {}

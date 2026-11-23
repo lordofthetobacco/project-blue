@@ -35,7 +35,7 @@ namespace blue::render::vulkan {
 //   selection_mask: R8_UNORM coverage of the selected draws, which the
 //              overlay pass outlines (editor only; untouched otherwise).
 //   velocity:  A2B10G10R10_UNORM_PACK32 blur vectors of the motion-blurred
-//              draw items (shaders/motion_blur.glsl, EncodeBlur): rg = the
+//              draw items (shaders/motion_blur.slang, EncodeBlur): rg = the
 //              vector over twice the largest blur radius, mapped to [0, 1];
 //              a = coverage (1 on those items). 10 bits give a tenth of a
 //              pixel at 1080p; the 2-bit alpha is all the coverage needs.

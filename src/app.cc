@@ -46,7 +46,7 @@
 #include "prefab/prefab.h"
 #include "prefab/prefab_file.h"
 #include "scene/mscn_serializer.h"
-#include "shader/shader_compiler.h"
+#include "shader/compile_mode.h"
 #include "ui/weapon_inspect_screen.h"
 #include "weapon/dropped_weapons.h"
 #include "weapon/firearm.h"
@@ -184,16 +184,21 @@ constexpr shader::CompileMode kShaderCompileMode = shader::CompileMode::kDebug;
 // How often the shader sources are checked for edits (wall time).
 constexpr std::chrono::milliseconds kShaderPollInterval{250};
 
+// Returns where the build deployed the compiled shaders: next to the
+// executable, so lookups do not depend on the working directory.
 std::string ShaderDirectory() {
+  return core::JoinPath(platform::BasePath(), "shaders");
+}
+
+// Returns the repository's shader sources for hot reload (Debug builds, when
+// they exist on this machine), else "".
+std::string ShaderSourceDirectory() {
 #ifdef BLUE_DEV_SHADER_DIR
-  // Debug builds use the repository sources so that edits apply live.
   if (platform::PathExists(BLUE_DEV_SHADER_DIR)) {
     return BLUE_DEV_SHADER_DIR;
   }
 #endif
-  // Shaders are deployed next to the executable, so lookups do not depend on
-  // the working directory.
-  return core::JoinPath(platform::BasePath(), "shaders");
+  return {};
 }
 
 // Returns the path of the cooked asset `file_name` next to the executable.
@@ -474,6 +479,8 @@ App::App(const CliOptions& options, render::Backend backend,
       renderer_(render::RendererOptions{.window = &window_,
                                         .backend = backend,
                                         .shader_dir = ShaderDirectory(),
+                                        .shader_source_dir =
+                                            ShaderSourceDirectory(),
                                         .shader_mode = kShaderCompileMode}),
       gpu_backend_(renderer_),
       prefab_cache_(gpu_backend_),

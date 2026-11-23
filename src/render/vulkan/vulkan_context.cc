@@ -116,8 +116,11 @@ bool SupportsDeviceExtensions(VkPhysicalDevice device, bool headless) {
 }
 
 bool SupportsRequiredFeatures(VkPhysicalDevice device) {
+  VkPhysicalDeviceVulkan11Features features11{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
   VkPhysicalDeviceVulkan13Features features13{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+      .pNext = &features11};
   VkPhysicalDeviceFeatures2 features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
       .pNext = &features13};
@@ -126,8 +129,11 @@ bool SupportsRequiredFeatures(VkPhysicalDevice device) {
   // Demote-to-helper (what discard compiles to for alpha-masked materials)
   // is mandatory in Vulkan 1.3, but checked like the rest. BC compression
   // is what cooked prefab textures (BC7, BC5) are stored in; every desktop
-  // GPU has it.
-  return features13.dynamicRendering && features13.synchronization2 &&
+  // GPU has it. Draw parameters: the shaders' SV_VertexID is the vertex
+  // index minus the base vertex (as in Direct3D), which Slang compiles to
+  // gl_BaseVertex.
+  return features11.shaderDrawParameters && features13.dynamicRendering &&
+         features13.synchronization2 &&
          features13.shaderDemoteToHelperInvocation &&
          features.features.depthClamp && features.features.textureCompressionBC;
 }
@@ -345,7 +351,8 @@ bool VulkanContext::SelectPhysicalDevice(AdapterPreference adapter) {
   if (!best) {
     core::log::Warn(
         "No GPU supports Vulkan 1.3 with dynamic rendering, synchronization2, "
-        "depth clamp and BC texture compression (textureCompressionBC)");
+        "shader draw parameters, depth clamp and BC texture compression "
+        "(textureCompressionBC)");
     return false;
   }
   physical_device_ = best->device;
@@ -376,8 +383,13 @@ void VulkanContext::CreateDevice() {
       .pQueuePriorities = &priority,
   };
 
+  VkPhysicalDeviceVulkan11Features features11{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+      .shaderDrawParameters = VK_TRUE,
+  };
   VkPhysicalDeviceVulkan13Features features13{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+      .pNext = &features11,
       .shaderDemoteToHelperInvocation = VK_TRUE,
       .synchronization2 = VK_TRUE,
       .dynamicRendering = VK_TRUE,

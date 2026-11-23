@@ -20,7 +20,6 @@ namespace blue::render::vulkan {
 class ReticlePass {
  public:
   ReticlePass(const VulkanContext& context, ShaderPrograms& programs,
-              const std::string& shader_dir,
               VkDescriptorSetLayout frame_layout);
 
   ReticlePass(const ReticlePass&) = delete;

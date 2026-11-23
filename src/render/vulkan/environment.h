@@ -47,7 +47,7 @@ class Environment {
   // specular cube and LUT into `frame_globals` and sets the generated
   // default sky (lighting::MakeDefaultEnvironment) with intensity 1.
   Environment(const VulkanContext& context, ShaderPrograms& programs,
-              const std::string& shader_dir, const Samplers& samplers,
+              const Samplers& samplers,
               FrameGlobals& frame_globals);
 
   Environment(const Environment&) = delete;

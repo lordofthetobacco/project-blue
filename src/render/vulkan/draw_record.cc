@@ -9,7 +9,7 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match DrawConstants in shaders/mesh.vert and shaders/depth.vert.
+// Must match DrawConstants in shaders/mesh.slang and shaders/depth.slang.
 struct DrawConstants {
   glm::mat4 model;
 };

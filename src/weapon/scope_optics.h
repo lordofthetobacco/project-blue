@@ -18,8 +18,8 @@
 // it stays on target whatever the eye's position, and the reticle, which
 // lies in a focal plane, is fixed in the picture.
 //
-// On top of that ideal mapping (all pure functions here; shaders/scope_lens
-// .frag mirrors them):
+// On top of that ideal mapping (all pure functions here;
+// shaders/scope_lens.slang mirrors them):
 // - the field stop: nothing beyond the apparent field |t| > apparent_field;
 // - radial distortion and lateral chromatic aberration growing towards the
 //   field's edge (DistortApparent());

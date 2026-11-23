@@ -12,8 +12,8 @@
 
 namespace blue::render::vulkan {
 
-// Screen-space ambient occlusion at half resolution (shaders/ssao.frag), then
-// a separable depth-aware blur (shaders/ssao_blur.frag) into the R8 target
+// Screen-space ambient occlusion at half resolution (shaders/ssao.slang), then
+// a separable depth-aware blur (shaders/ssao_blur.slang) into the R8 target
 // that FrameGlobals binds as binding 4. Settings come from
 // SceneView::post (ssao_enabled, ssao_radius, ssao_intensity). When SSAO is
 // off the pass costs nothing beyond one clear of the target to white when
@@ -26,8 +26,7 @@ class SsaoPass {
   // a screen-wide one.
   static constexpr float kMaxRadiusScreenFraction = 0.1f;
 
-  SsaoPass(const VulkanContext& context, ShaderPrograms& programs,
-           const std::string& shader_dir);
+  SsaoPass(const VulkanContext& context, ShaderPrograms& programs);
 
   SsaoPass(const SsaoPass&) = delete;
   SsaoPass& operator=(const SsaoPass&) = delete;

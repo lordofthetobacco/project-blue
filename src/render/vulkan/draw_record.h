@@ -55,7 +55,7 @@ void RecordDrawList(VkCommandBuffer cmd, std::span<const DrawEntry> entries,
                     const std::vector<Mesh>& meshes, RenderStats* stats);
 
 // The push constant range every DrawList pipeline declares: the model
-// matrix, read by the vertex stage (shaders/mesh.vert, shaders/depth.vert).
+// matrix, read by the vertex stage (shaders/mesh.slang, shaders/depth.slang).
 inline constexpr VkPushConstantRange kDrawConstantsRange{
     .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
     .offset = 0,

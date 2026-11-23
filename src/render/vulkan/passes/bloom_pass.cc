@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/vulkan/barriers.h"
 
@@ -10,14 +11,14 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match DownsampleConstants in shaders/bloom_down.frag.
+// Must match DownsampleConstants in shaders/bloom_down.slang.
 struct DownsampleConstants {
   float source_texel_x;
   float source_texel_y;
   int32_t karis_average;
 };
 
-// Must match UpsampleConstants in shaders/bloom_up.frag.
+// Must match UpsampleConstants in shaders/bloom_up.slang.
 struct UpsampleConstants {
   float source_texel_x;
   float source_texel_y;
@@ -30,16 +31,15 @@ VkImageSubresourceRange MipRange(uint32_t level) {
 
 }  // namespace
 
-BloomPass::BloomPass(const VulkanContext& context, ShaderPrograms& programs,
-                     const std::string& shader_dir)
+BloomPass::BloomPass(const VulkanContext& context, ShaderPrograms& programs)
     : downsample_(
-          context, programs, shader_dir,
-          {.fragment_path = core::JoinPath(shader_dir, "bloom_down.frag"),
+          context, programs,
+          {.program = ShaderProgram::kBloomDown,
            .input_set_count = RenderTargets::kMaxBloomLevels,
            .push_constant_size = sizeof(DownsampleConstants),
            .output_format = RenderTargets::kBloomFormat}),
-      upsample_(context, programs, shader_dir,
-                {.fragment_path = core::JoinPath(shader_dir, "bloom_up.frag"),
+      upsample_(context, programs,
+                {.program = ShaderProgram::kBloomUp,
                  .input_set_count = RenderTargets::kMaxBloomLevels,
                  .push_constant_size = sizeof(UpsampleConstants),
                  .output_format = RenderTargets::kBloomFormat,

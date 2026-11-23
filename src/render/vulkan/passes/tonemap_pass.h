@@ -12,15 +12,14 @@
 
 namespace blue::render::vulkan {
 
-// Bloom mix, exposure and tonemapping (shaders/tonemap.frag): HDR target
+// Bloom mix, exposure and tonemapping (shaders/tonemap.slang): HDR target
 // (+ bloom mip 0) -> LDR target (sRGB-encoded colour, luma in alpha), with
 // SceneView::post. Borrows
 // `context` and `programs`, which must outlive it. Neither copyable nor
 // movable. Not thread-safe.
 class TonemapPass {
  public:
-  TonemapPass(const VulkanContext& context, ShaderPrograms& programs,
-              const std::string& shader_dir);
+  TonemapPass(const VulkanContext& context, ShaderPrograms& programs);
 
   TonemapPass(const TonemapPass&) = delete;
   TonemapPass& operator=(const TonemapPass&) = delete;

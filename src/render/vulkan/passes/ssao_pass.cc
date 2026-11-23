@@ -5,6 +5,7 @@
 
 #include <glm/vec4.hpp>
 
+#include "render/shader_manifest.h"
 #include "core/path.h"
 #include "render/vulkan/barriers.h"
 
@@ -12,14 +13,14 @@ namespace blue::render::vulkan {
 
 namespace {
 
-// Must match SsaoConstants in shaders/ssao.frag.
+// Must match SsaoConstants in shaders/ssao.slang.
 struct SsaoConstants {
   glm::vec4 projection;  // x: proj[0][0], y: proj[1][1], z: near plane
   glm::vec4 params;      // x: radius, y: intensity, z: max radius (pixels)
   glm::vec4 full_size;   // xy: full-resolution size, zw: reciprocal
 };
 
-// Must match BlurConstants in shaders/ssao_blur.frag.
+// Must match BlurConstants in shaders/ssao_blur.slang.
 struct BlurConstants {
   int32_t axis_x;
   int32_t axis_y;
@@ -44,20 +45,19 @@ void EndWriting(VkCommandBuffer cmd, const Image& image) {
 
 }  // namespace
 
-SsaoPass::SsaoPass(const VulkanContext& context, ShaderPrograms& programs,
-                   const std::string& shader_dir)
-    : occlusion_(context, programs, shader_dir,
-                 {.fragment_path = core::JoinPath(shader_dir, "ssao.frag"),
+SsaoPass::SsaoPass(const VulkanContext& context, ShaderPrograms& programs)
+    : occlusion_(context, programs,
+                 {.program = ShaderProgram::kSsao,
                   .push_constant_size = sizeof(SsaoConstants),
                   .output_format = RenderTargets::kSsaoRawFormat}),
       blur_horizontal_(
-          context, programs, shader_dir,
-          {.fragment_path = core::JoinPath(shader_dir, "ssao_blur.frag"),
+          context, programs,
+          {.program = ShaderProgram::kSsaoBlur,
            .push_constant_size = sizeof(BlurConstants),
            .output_format = RenderTargets::kSsaoRawFormat}),
       blur_vertical_(
-          context, programs, shader_dir,
-          {.fragment_path = core::JoinPath(shader_dir, "ssao_blur.frag"),
+          context, programs,
+          {.program = ShaderProgram::kSsaoBlur,
            .push_constant_size = sizeof(BlurConstants),
            .output_format = RenderTargets::kSsaoFormat}) {}
 

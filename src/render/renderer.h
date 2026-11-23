@@ -48,8 +48,14 @@ struct RendererOptions {
   // The backend to start; another compiled one is used when it has no
   // suitable device (see Renderer()).
   Backend backend = DefaultBackend();
-  // Shader sources (and blobs), compiled with `shader_mode`.
+  // Where the build put the compiled shaders: `<shader_dir>/spirv` (Vulkan)
+  // and `<shader_dir>/dxil` (Direct3D 12), see cmake/Shaders.cmake. (Metal:
+  // its shader sources.)
   std::string shader_dir;
+  // The Slang sources (the repository's shaders/), watched and recompiled
+  // with `shader_mode` when they change (ReloadChangedShaders()). Empty, or
+  // a build without BLUE_SHADER_HOT_RELOAD: no hot reload.
+  std::string shader_source_dir;
   shader::CompileMode shader_mode = shader::CompileMode::kRelease;
   AdapterPreference adapter = AdapterPreference::kHighPerformance;
   // The output image's size when headless (each side at least 1).
@@ -119,10 +125,9 @@ class Renderer {
 
   // Starts options.backend; when it finds no suitable device, the other
   // compiled backends that can draw to options.window are tried (default,
-  // Vulkan, D3D12, Metal), and none is fatal. Compiles the shaders in
-  // options.shader_dir with options.shader_mode and watches them for
-  // changes (see ReloadChangedShaders()). A shader that does not compile at
-  // startup is fatal.
+  // Vulkan, D3D12, Metal), and none is fatal. Loads the compiled shaders
+  // of options.shader_dir (a missing one is fatal) and watches
+  // options.shader_source_dir for changes (see ReloadChangedShaders()).
   explicit Renderer(const RendererOptions& options);
   // Same, with the default backend presenting to `window`.
   Renderer(const platform::Window& window, const std::string& shader_dir,
