@@ -41,16 +41,16 @@ void TonemapPass::Record(const FrameContext& ctx) const {
                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     ldr.Transition(barriers, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
-  // No bloom pass yet (package D3): the bloom input is a null view and its
-  // strength 0, so the shader never reads it.
   const TonemapConstants constants{
       .exposure_scale = std::exp2(ctx.view.post.exposure_ev),
       .tonemapper = static_cast<int32_t>(ctx.view.post.tonemapper),
-      .bloom_strength = 0.0f,
-      .bloom_scale = 1.0f,
+      .bloom_strength = ctx.plan.bloom ? ctx.view.post.bloom_strength : 0.0f,
+      .bloom_scale = 1.0f / static_cast<float>(ctx.targets.bloom_levels()),
   };
-  const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 1> inputs = {
-      ctx.targets.hdr().staging_srv()};
+  // The HDR image is fetched texel by texel; the half-resolution bloom
+  // (mip 0, read only when bloom is on) is upsampled bilinearly.
+  const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> inputs = {
+      ctx.targets.hdr().staging_srv(), ctx.targets.bloom(0).staging_srv()};
   pass_.Record(ctx.cmd, ldr.rtv(), ctx.targets.extent(), inputs,
                samplers_.linear_clamp(),
                std::as_bytes(std::span(&constants, 1)));

@@ -33,9 +33,12 @@
 #include "render/d3d12/image.h"
 #include "render/d3d12/material_system.h"
 #include "render/d3d12/mesh.h"
+#include "render/d3d12/passes/bloom_pass.h"
 #include "render/d3d12/passes/depth_prepass.h"
 #include "render/d3d12/passes/mesh_pass.h"
+#include "render/d3d12/passes/shadow_pass.h"
 #include "render/d3d12/passes/skybox_pass.h"
+#include "render/d3d12/passes/ssao_pass.h"
 #include "render/d3d12/passes/tonemap_pass.h"
 #include "render/d3d12/render_targets.h"
 #include "render/d3d12/root_signature.h"
@@ -59,10 +62,13 @@
 // a GPU timer scope, the same frame as the Vulkan backend's (passes/ holds
 // one class or pair of functions per pass):
 //
+//   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
+//   ssao                 SsaoPass          depth -> ssao (half res, blurred)
 //   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
 //                        SkyboxPass -> EndScenePass
-//   tonemap              TonemapPass       hdr -> ldr (sRGB + luma)
+//   bloom                BloomPass         hdr -> bloom mip chain
+//   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
 //   present              FullscreenPass(present): ldr -> the window output
 //                        (FXAA), or -> the editor viewport image
 //   ui                   ImGui (imgui_impl_dx12) on the window output; the
@@ -70,9 +76,8 @@
 //   readbacks            copies for RequestViewportReadback() /
 //                        RequestOutputReadback()
 //
-// Not yet (packages D3, D4): shadow cascades, SSAO, bloom, the scope
-// picture, the sights, weapon motion blur and the editor overlay; frames
-// that ask for them render without them.
+// Not yet (package D4): the scope picture, the sights, weapon motion blur
+// and the editor overlay; frames that ask for them render without them.
 //
 // The visible submeshes are culled and sorted once per frame by the shared
 // DrawList and recorded by RecordDrawList() (draw_record.h). The frame set
@@ -268,6 +273,9 @@ class D3d12Renderer final : public RendererBackend {
   void DestroyRetiredIfIdle();
   // Blocks until no frame in flight runs on the GPU any more.
   void WaitForFramesInFlight() const;
+  // Points FrameGlobals at the current shadow map and AO target; after the
+  // targets were (re)created.
+  void BindTargets();
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
   void ResizeViewport(core::Extent2D size);
@@ -322,9 +330,12 @@ class D3d12Renderer final : public RendererBackend {
   // World-space bounds of the current frame's draw items (parallel to
   // SceneView::draws); a member to reuse its allocation.
   std::vector<camera::Aabb> world_bounds_;
+  ShadowPass shadow_pass_;
   DepthPrepass depth_prepass_;
+  SsaoPass ssao_pass_;
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
+  BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   FullscreenPass present_pass_;
   // The present pass into the editor viewport image; created by the first

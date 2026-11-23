@@ -32,9 +32,10 @@ class D3d12Context;
 // Borrows `context` and `root_signature`. Neither copyable nor movable.
 class FullscreenPass {
  public:
+  // With `additive`, the result is added to the target (ONE + ONE).
   FullscreenPass(const D3d12Context& context, ShaderPrograms& programs,
                  const RootSignature& root_signature, ShaderProgram program,
-                 DXGI_FORMAT target_format);
+                 DXGI_FORMAT target_format, bool additive = false);
 
   FullscreenPass(const FullscreenPass&) = delete;
   FullscreenPass& operator=(const FullscreenPass&) = delete;

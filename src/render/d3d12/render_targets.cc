@@ -7,12 +7,14 @@
 #include "core/extent.h"
 #include "render/d3d12/d3d12_context.h"
 #include "render/d3d12/image.h"
+#include "render/texture_types.h"
 
 namespace blue::render::d3d12 {
 
 namespace {
 
 constexpr float kBlack[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+constexpr float kWhite[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 // Reversed-Z: infinity is 0 (DepthPrepass clears to it).
 constexpr float kDepthClear = 0.0f;
 
@@ -76,6 +78,25 @@ void RenderTargets::Resize(core::Extent2D extent) {
   ldr_ = MakeColorTarget(context_, extent_, kLdrFormat,
                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kBlack,
                          false, L"blue ldr");
+  half_extent_ = {std::max((extent_.width + 1) / 2, 1u),
+                  std::max((extent_.height + 1) / 2, 1u)};
+  constexpr D3D12_RESOURCE_STATES kRead =
+      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  ssao_raw_ = MakeColorTarget(context_, half_extent_, kSsaoRawFormat, kRead,
+                              kBlack, false, L"blue ssao raw");
+  ssao_blur_ = MakeColorTarget(context_, half_extent_, kSsaoRawFormat, kRead,
+                               kBlack, false, L"blue ssao blur");
+  // White: no occlusion until SSAO runs.
+  ssao_ = MakeColorTarget(context_, half_extent_, kSsaoFormat, kRead, kWhite,
+                          false, L"blue ssao");
+  const uint32_t levels =
+      std::min(kMaxBloomLevels, MipLevelCount(half_extent_));
+  bloom_.clear();
+  for (uint32_t level = 0; level < levels; ++level) {
+    bloom_.push_back(MakeColorTarget(context_, bloom_mip_extent(level),
+                                     kBloomFormat, kRead, kBlack, false,
+                                     L"blue bloom"));
+  }
 }
 
 }  // namespace blue::render::d3d12

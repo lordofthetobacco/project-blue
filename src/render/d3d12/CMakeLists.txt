@@ -91,10 +91,13 @@ add_library(blue_render_d3d12 STATIC
     swapchain.cc
     texture_cache.cc
     upload_ring.cc
+    passes/bloom_pass.cc
     passes/depth_prepass.cc
     passes/mesh_pass.cc
     passes/scene_pass.cc
+    passes/shadow_pass.cc
     passes/skybox_pass.cc
+    passes/ssao_pass.cc
     passes/tonemap_pass.cc
 )
 

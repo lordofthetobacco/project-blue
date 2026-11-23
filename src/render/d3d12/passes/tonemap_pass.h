@@ -12,10 +12,9 @@ class D3d12Context;
 class Samplers;
 
 // Bloom mix, exposure and tonemapping (shaders/tonemap.slang): HDR target
-// (+ bloom, from package D3 on; a null view until then, which the shader
-// does not read with bloom off) -> LDR target (sRGB-encoded colour, luma in
-// alpha), with SceneView::post. Borrows everything it is given. Neither
-// copyable nor movable.
+// (+ bloom mip 0 when bloom is on) -> LDR target (sRGB-encoded colour,
+// luma in alpha), with SceneView::post. Borrows everything it is given.
+// Neither copyable nor movable.
 class TonemapPass {
  public:
   TonemapPass(const D3d12Context& context, ShaderPrograms& programs,

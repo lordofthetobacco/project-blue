@@ -5,7 +5,9 @@
 
 #include <span>
 
+#include "camera/frustum.h"
 #include "core/extent.h"
+#include "lighting/cascades.h"
 #include "render/d3d12/frame_globals.h"
 #include "render/d3d12/render_targets.h"
 #include "render/draw_list.h"
@@ -28,6 +30,11 @@ struct FrameContext {
   FrameBindings frame;
   // The visible submeshes, sorted (DrawList), for the camera passes.
   std::span<const DrawEntry> draw_list;
+  // World-space bounds of view.draws (parallel to it), for the shadow
+  // cascades' culling.
+  std::span<const camera::Aabb> world_bounds;
+  // The sun's shadow cascades; only meaningful when plan.shadows.
+  std::span<const lighting::Cascade> cascades;
   RenderStats& stats;
 };
 

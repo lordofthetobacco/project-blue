@@ -114,6 +114,14 @@ void FrameGlobals::BindEnvironment(const Image& prefiltered_cube,
   textures_[2] = brdf_lut.staging_srv();
 }
 
+void FrameGlobals::BindShadowMap(const Image& shadow_map) {
+  textures_[0] = shadow_map.staging_srv();
+}
+
+void FrameGlobals::BindAmbientOcclusion(const Image& ambient_occlusion) {
+  textures_[3] = ambient_occlusion.staging_srv();
+}
+
 FrameBindings FrameGlobals::Prepare(const FrameUniforms& uniforms,
                                     UploadRing& ring) const {
   FrameBindings bindings;

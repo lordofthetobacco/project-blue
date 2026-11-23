@@ -97,8 +97,12 @@ class Image {
   // Creates the staging shader resource view (every mip and layer) in
   // `format`; with `shader_visible` also one in the shader-visible heap.
   void CreateSrv(DXGI_FORMAT format, bool shader_visible);
-  // Adds a staging shader resource view of mip `mip` alone, every layer, as
-  // a Texture2DArray, and returns its index for mip_srv().
+  // Adds a depth stencil view of layer `layer` alone in `format` and returns
+  // its index for layer_dsv().
+  size_t AddLayerDsv(DXGI_FORMAT format, uint32_t layer);
+  // Adds a staging shader resource view of mip `mip` alone, every layer (a
+  // Texture2DArray; a Texture2D for single-layer images), and returns its
+  // index for mip_srv().
   size_t AddMipSrv(DXGI_FORMAT format, uint32_t mip);
 
   // Adds the barrier that brings the image into `state` (nothing when it is
@@ -125,6 +129,9 @@ class Image {
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE dsv() const { return dsv_.cpu; }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE read_only_dsv() const {
     return read_only_dsv_.cpu;
+  }
+  [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE layer_dsv(size_t index) const {
+    return layer_dsvs_[index].cpu;
   }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE mip_srv(size_t index) const {
     return mip_srvs_[index].cpu;
@@ -157,6 +164,7 @@ class Image {
   Descriptor read_only_dsv_;
   Descriptor staging_srv_;
   std::vector<Descriptor> mip_srvs_;
+  std::vector<Descriptor> layer_dsvs_;
   Descriptor shader_srv_;
 };
 

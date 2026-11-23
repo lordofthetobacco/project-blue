@@ -30,7 +30,8 @@ constexpr uint32_t kSamplerParam = 2;
 FullscreenPass::FullscreenPass(const D3d12Context& context,
                                ShaderPrograms& programs,
                                const RootSignature& root_signature,
-                               ShaderProgram program, DXGI_FORMAT target_format)
+                               ShaderProgram program, DXGI_FORMAT target_format,
+                               bool additive)
     : context_(context), root_signature_(root_signature) {
   const RootLayout& layout = root_signature.layout();
   if (layout.Find(RootParamKind::kTable, kInputSet, 0) != kInputsParam ||
@@ -38,14 +39,22 @@ FullscreenPass::FullscreenPass(const D3d12Context& context,
                   kFullscreenSampler.binding) != kSamplerParam) {
     core::log::Fatal("FullscreenPass needs the full-screen root signature");
   }
-  programs.Add(program, [this, target_format](std::span<const std::byte> vertex,
-                                              std::span<const std::byte> pixel) {
+  programs.Add(program, [this, target_format, additive](
+                            std::span<const std::byte> vertex,
+                            std::span<const std::byte> pixel) {
     GraphicsPipelineDesc desc;
     desc.root_signature = root_signature_.get();
     desc.vertex = vertex;
     desc.pixel = pixel;
     desc.rtv_formats[0] = target_format;
     desc.rtv_count = 1;
+    if (additive) {
+      desc.blend.BlendEnable = TRUE;
+      desc.blend.SrcBlend = D3D12_BLEND_ONE;
+      desc.blend.DestBlend = D3D12_BLEND_ONE;
+      desc.blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+      desc.blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    }
     desc.name = L"blue fullscreen pipeline";
     pipeline_ = CreateGraphicsPipeline(context_.device(), desc);
   });

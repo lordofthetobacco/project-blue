@@ -91,6 +91,7 @@ Image& Image::operator=(Image&& other) noexcept {
     read_only_dsv_ = std::exchange(other.read_only_dsv_, {});
     staging_srv_ = std::exchange(other.staging_srv_, {});
     mip_srvs_ = std::exchange(other.mip_srvs_, {});
+    layer_dsvs_ = std::exchange(other.layer_dsvs_, {});
     shader_srv_ = std::exchange(other.shader_srv_, {});
   }
   return *this;
@@ -112,6 +113,9 @@ void Image::Release() {
     for (const Descriptor& srv : mip_srvs_) {
       heaps.FreeStaging(srv);
     }
+    for (const Descriptor& dsv : layer_dsvs_) {
+      heaps.FreeDsv(dsv);
+    }
     if (shader_srv_.valid()) {
       heaps.FreeSingle(shader_srv_);
     }
@@ -121,6 +125,7 @@ void Image::Release() {
   read_only_dsv_ = {};
   staging_srv_ = {};
   mip_srvs_.clear();
+  layer_dsvs_.clear();
   shader_srv_ = {};
   allocation_.Reset();
   context_ = nullptr;
@@ -160,17 +165,37 @@ void Image::CreateDsv(DXGI_FORMAT format) {
                                              read_only_dsv_.cpu);
 }
 
+size_t Image::AddLayerDsv(DXGI_FORMAT format, uint32_t layer) {
+  const Descriptor dsv = context_->descriptors().AllocateDsv();
+  D3D12_DEPTH_STENCIL_VIEW_DESC desc{};
+  desc.Format = format;
+  desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+  desc.Flags = D3D12_DSV_FLAG_NONE;
+  desc.Texture2DArray = {.MipSlice = 0, .FirstArraySlice = layer, .ArraySize = 1};
+  context_->device()->CreateDepthStencilView(resource(), &desc, dsv.cpu);
+  layer_dsvs_.push_back(dsv);
+  return layer_dsvs_.size() - 1;
+}
+
 size_t Image::AddMipSrv(DXGI_FORMAT format, uint32_t mip) {
   D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
   desc.Format = format;
   desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-  desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-  desc.Texture2DArray = {.MostDetailedMip = mip,
-                         .MipLevels = 1,
-                         .FirstArraySlice = 0,
-                         .ArraySize = layers_,
-                         .PlaneSlice = 0,
-                         .ResourceMinLODClamp = 0.0f};
+  if (layers_ > 1) {
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    desc.Texture2DArray = {.MostDetailedMip = mip,
+                           .MipLevels = 1,
+                           .FirstArraySlice = 0,
+                           .ArraySize = layers_,
+                           .PlaneSlice = 0,
+                           .ResourceMinLODClamp = 0.0f};
+  } else {
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    desc.Texture2D = {.MostDetailedMip = mip,
+                      .MipLevels = 1,
+                      .PlaneSlice = 0,
+                      .ResourceMinLODClamp = 0.0f};
+  }
   const Descriptor srv = context_->descriptors().AllocateStaging();
   context_->device()->CreateShaderResourceView(resource(), &desc, srv.cpu);
   mip_srvs_.push_back(srv);

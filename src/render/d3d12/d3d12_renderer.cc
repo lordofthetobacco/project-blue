@@ -107,12 +107,15 @@ D3d12Renderer::D3d12Renderer(const RendererOptions& options,
       frame_globals_(context_, samplers_),
       environment_(context_, shader_programs_, fullscreen_root_, samplers_,
                    frame_globals_),
+      shadow_pass_(context_, shader_programs_, scene_material_root_, meshes_),
       depth_prepass_(context_, shader_programs_, scene_material_root_,
                      frame_globals_, materials_, meshes_),
+      ssao_pass_(context_, shader_programs_, fullscreen_root_, samplers_),
       mesh_pass_(context_, shader_programs_, scene_material_root_,
                  frame_globals_, materials_, meshes_),
       skybox_pass_(context_, shader_programs_, scene_sky_root_, frame_globals_,
                    environment_, samplers_),
+      bloom_pass_(context_, shader_programs_, fullscreen_root_, samplers_),
       tonemap_pass_(context_, shader_programs_, fullscreen_root_, samplers_),
       present_pass_(context_, shader_programs_, fullscreen_root_,
                     ShaderProgram::kPresent, kOutputFormat),
@@ -124,6 +127,7 @@ D3d12Renderer::D3d12Renderer(const RendererOptions& options,
     core::log::Info("Headless output {} x {}", headless_extent_.width,
                     headless_extent_.height);
   }
+  BindTargets();
   const MaterialId default_material = materials_.Create(DefaultMaterialDesc());
   if (default_material != kDefaultMaterial) {
     core::log::Fatal("The default material must be created first");
@@ -252,6 +256,7 @@ MemoryStats D3d12Renderer::memory_stats() const {
   stats.mesh_bytes = mesh_bytes_;
   stats.mesh_count = mesh_count_;
   stats.render_target_bytes = targets_.size_bytes() +
+                              shadow_pass_.map().size_bytes() +
                               viewport_image_.size_bytes() +
                               output_image_.size_bytes();
   stats.environment_bytes = environment_.size_bytes();
@@ -272,6 +277,12 @@ core::Extent2D D3d12Renderer::output_extent() const {
   return swapchain_ ? swapchain_->extent() : headless_extent_;
 }
 
+void D3d12Renderer::BindTargets() {
+  frame_globals_.BindShadowMap(shadow_pass_.map());
+  frame_globals_.BindAmbientOcclusion(targets_.ssao());
+  ssao_pass_.TargetsRecreated();
+}
+
 void D3d12Renderer::ComputeWorldBounds(const SceneView& view) {
   world_bounds_.clear();
   world_bounds_.reserve(view.draws.size());
@@ -290,6 +301,7 @@ bool D3d12Renderer::RebuildSwapchain() {
   swapchain_->Resize(size);
   if (viewport_.generation == 0) {  // Otherwise they follow the viewport.
     targets_.Resize(swapchain_->extent());
+    BindTargets();
   }
   swapchain_dirty_ = false;
   return true;
@@ -323,6 +335,7 @@ void D3d12Renderer::ResizeViewport(core::Extent2D size) {
                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kUiBackground,
                  /*shader_visible=*/true, L"blue viewport output");
   targets_.Resize(size);
+  BindTargets();
   viewport_ = {
       .texture = static_cast<ImTextureID>(viewport_image_.shader_srv().ptr),
       .extent = size,
@@ -457,8 +470,7 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   materials_.BeginFrame(frame_serial_);
   DestroyRetired();
 
-  // Cull and sort; the frame's uniforms. No shadow cascades yet (package
-  // D3): frames render unshadowed.
+  // Cull and sort; the cascades; the frame's uniforms.
   const FramePlan plan = MakeFramePlan(view, caps());
   ComputeWorldBounds(view);
   const camera::Frustum camera_frustum(view.camera.projection *
@@ -466,9 +478,17 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   stats_ = {};
   draw_list_.Build(view, world_bounds_, camera_frustum,
                    draw_source_.resources(), stats_);
-  const std::array<lighting::Cascade, lighting::kCascadeCount> cascades{};
-  FrameUniforms uniforms = MakeFrameUniforms(view, cascades, /*shadows=*/false,
-                                             targets_.extent());
+  std::array<lighting::Cascade, lighting::kCascadeCount> cascades{};
+  const core::Extent2D scene_extent = targets_.extent();
+  if (plan.shadows) {
+    const float aspect = static_cast<float>(scene_extent.width) /
+                         static_cast<float>(std::max(scene_extent.height, 1u));
+    cascades = lighting::FitCascades(
+        view.camera.view, view.camera.vertical_fov_radians, aspect,
+        view.camera.near_plane, view.sun.direction);
+  }
+  FrameUniforms uniforms =
+      MakeFrameUniforms(view, cascades, plan.shadows, scene_extent);
   environment_.FillUniforms(uniforms);
 
   CheckHr(frame.allocator->Reset());
@@ -484,6 +504,8 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
       .targets = targets_,
       .frame = frame_globals_.Prepare(uniforms, upload_ring_),
       .draw_list = draw_list_.entries(),
+      .world_bounds = world_bounds_,
+      .cascades = cascades,
       .stats = stats_,
   };
   // Times `record` as `scope`.
@@ -492,13 +514,24 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     record();
     gpu_timer_.End(cmd, frame_index_, scope);
   };
+  if (plan.shadows) {
+    timed(GpuScope::kShadow, [&] { shadow_pass_.Record(ctx); });
+  }
   timed(GpuScope::kDepthPrepass, [&] { depth_prepass_.Record(ctx); });
+  if (plan.ssao) {
+    timed(GpuScope::kSsao, [&] { ssao_pass_.Record(ctx); });
+  } else {
+    ssao_pass_.Record(ctx);  // At most a one-time clear to white.
+  }
   timed(GpuScope::kScene, [&] {
     BeginScenePass(ctx);
     mesh_pass_.Draw(ctx);
     skybox_pass_.Draw(ctx);
     EndScenePass(ctx);
   });
+  if (plan.bloom) {
+    timed(GpuScope::kBloom, [&] { bloom_pass_.Record(ctx); });
+  }
   timed(GpuScope::kTonemap, [&] { tonemap_pass_.Record(ctx); });
 
   // The window output: the swapchain buffer, or the headless output image.
@@ -524,17 +557,16 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   // Present: LDR -> the frame's scene output.
   gpu_timer_.Begin(cmd, frame_index_, GpuScope::kPresent);
   {
-    const core::Extent2D extent = targets_.extent();
     const PresentConstants constants{
         .decode_srgb = 1,  // Every output has _SRGB views.
         .fxaa = view.post.fxaa_enabled ? 1 : 0,
-        .texel_size = {1.0f / static_cast<float>(extent.width),
-                       1.0f / static_cast<float>(extent.height)},
+        .texel_size = {1.0f / static_cast<float>(scene_extent.width),
+                       1.0f / static_cast<float>(scene_extent.height)},
     };
     const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 1> inputs = {
         targets_.ldr().staging_srv()};
     if (output == Output::kViewport) {
-      viewport_present_pass_->Record(cmd, viewport_image_.rtv(), extent,
+      viewport_present_pass_->Record(cmd, viewport_image_.rtv(), scene_extent,
                                      inputs, samplers_.linear_clamp(),
                                      std::as_bytes(std::span(&constants, 1)));
     } else {

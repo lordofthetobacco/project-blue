@@ -35,16 +35,16 @@ struct SceneResult {
 };
 
 // Whether `backend` draws everything `scene` asks for. The Direct3D 12
-// backend gains its passes package by package (D2: depth pre-pass, meshes,
-// sky, tonemap, present; no shadows, SSAO, bloom, motion blur, sights,
-// scope or editor overlay yet).
+// backend gains its passes package by package (D3: shadows, depth
+// pre-pass, SSAO, meshes, sky, bloom, tonemap, present; no motion blur,
+// sights, scope or editor overlay yet).
 bool DrawsEverything(render::Backend backend, const TestScene& scene) {
   if (backend != render::Backend::kD3d12) {
     return true;
   }
   const render::FramePlan plan = render::MakeFramePlan(scene.view, {});
-  return !plan.shadows && !plan.ssao && !plan.bloom && !plan.motion_blur &&
-         !plan.overlay && !plan.scope && !scene.view.sight.has_value();
+  return !plan.motion_blur && !plan.overlay && !plan.scope &&
+         !scene.view.sight.has_value();
 }
 
 // A fresh headless renderer for every scene: no state leaks between scenes,
@@ -107,13 +107,10 @@ SceneResult DrawScene(render::Renderer* renderer, const TestScene* scene) {
   return result;
 }
 
-// Turns off what the Direct3D 12 backend does not draw yet (shadows, SSAO,
-// bloom, weapon motion blur, the sights and scope, the editor overlay), so
-// the rest of a scene (materials, sky, tonemapping) can be compared.
-void OnlyD2Features(TestScene& scene) {
-  scene.view.shadows_enabled = false;
-  scene.view.post.ssao_enabled = false;
-  scene.view.post.bloom_enabled = false;
+// Turns off what the Direct3D 12 backend does not draw yet (weapon motion
+// blur, the sights and scope, the editor overlay), so the rest of a scene
+// can be compared.
+void OnlyDrawnFeatures(TestScene& scene) {
   scene.view.post.weapon_motion_blur_enabled = false;
   scene.view.scope.reset();
   scene.view.sight.reset();
@@ -261,23 +258,23 @@ TEST_CASE("Headless scenes match Vulkan on the other backends") {
           continue;
         }
         const SceneResult subset =
-            RenderScene(scene, backend_id, &OnlyD2Features);
+            RenderScene(scene, backend_id, &OnlyDrawnFeatures);
         REQUIRE(subset.complete);
         CHECK(subset.validation.errors == 0);
         const RgbaImage subset_reference =
-            RenderScene(scene, render::Backend::kVulkan, &OnlyD2Features).image;
+            RenderScene(scene, render::Backend::kVulkan, &OnlyDrawnFeatures).image;
         const CompareMetrics subset_metrics = Compare(
             subset.image, subset_reference, tolerance.outlier_threshold);
         const bool subset_passed = Passes(subset_metrics, tolerance);
-        std::printf("%-18s %s vs vulkan  %s  %s (D2 subset)\n",
+        std::printf("%-18s %s vs vulkan  %s  %s (drawn subset)\n",
                     std::string(scene).c_str(), backend.c_str(),
                     subset_passed ? "ok  " : "FAIL",
                     Describe(subset_metrics).c_str());
-        CHECK(WritePng(OutPath(scene, backend + ".d2"), subset.image));
+        CHECK(WritePng(OutPath(scene, backend + ".subset"), subset.image));
         if (!subset_passed) {
-          CHECK(WritePng(OutPath(scene, "vulkan.d2"), subset_reference));
+          CHECK(WritePng(OutPath(scene, "vulkan.subset"), subset_reference));
         }
-        CHECK_MESSAGE(subset_passed, label, " (D2 subset) vs Vulkan (",
+        CHECK_MESSAGE(subset_passed, label, " (drawn subset) vs Vulkan (",
                       tolerance.name, "): ", Describe(subset_metrics));
         continue;
       }

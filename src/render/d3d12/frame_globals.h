@@ -65,6 +65,10 @@ class FrameGlobals {
   // SRVs, read by every later Prepare()); they must be in a pixel shader
   // resource state whenever a frame samples them and outlive this object.
   void BindEnvironment(const Image& prefiltered_cube, const Image& brdf_lut);
+  // Points t1 at the cascaded shadow map and t4 at the ambient occlusion
+  // (same rules; call again when they are recreated).
+  void BindShadowMap(const Image& shadow_map);
+  void BindAmbientOcclusion(const Image& ambient_occlusion);
 
   // Copies `uniforms` into `ring` and writes the frame's texture table, for
   // the frame being recorded.
