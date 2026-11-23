@@ -1,0 +1,385 @@
+--- a/src/render/metal/renderer.mm
++++ b/src/render/metal/renderer.mm
+@@ -18,15 +18,19 @@
+ #include "camera/frustum.h"
+ #include "camera/projection.h"
+ #include "core/log.h"
++#include "core/path.h"
+ #include "lighting/cascades.h"
+ #include "material/material.h"
+ #include "platform/window.h"
++#include "render/backend.h"
++#include "render/frame_plan.h"
+ #include "render/metal/encoders.h"
+ #include "render/frame_uniforms.h"
+ #include "render/metal/metal_check.h"
+ #include "render/metal/passes/scene_pass.h"
+ #include "render/metal/passes/ui_pass.h"
+ #include "render/metal/renderer_impl.h"
++#include "render/renderer_backend.h"
+ #include "render/metal/staging_upload.h"
+ #include "render/temporal_math.h"
+ 
+@@ -743,153 +747,278 @@
+ 
+ void RendererImpl::ShutdownImGuiRenderer() { ui_.Shutdown(); }
+ 
+-Renderer::Renderer(const platform::Window& window,
+-                   const std::string& shader_dir,
+-                   shader::CompileMode shader_mode)
+-    : impl_(std::make_unique<RendererImpl>(window, shader_dir, shader_mode)) {}
++namespace {
++
++// The Metal backend of render::Renderer: each method forwards to
++// RendererImpl, which holds the Metal state (render/metal/renderer_impl.h).
++class MetalRenderer final : public RendererBackend {
++ public:
++  MetalRenderer(const platform::Window& window, const std::string& shader_dir,
++                shader::CompileMode shader_mode)
++      : impl_(std::make_unique<RendererImpl>(window, shader_dir, shader_mode)) {
++  }
++
++  [[nodiscard]] Backend backend() const override { return Backend::kMetal; }
++  [[nodiscard]] BackendCaps caps() const override {
++    return {.temporal_scaler = impl_->temporal_scaler_pass_.supported()};
++  }
++
++  void DrawFrame(const SceneView& view, ImDrawData* ui) override;
++  [[nodiscard]] ViewportImage PrepareViewport(core::Extent2D size) override;
++  [[nodiscard]] const ViewportImage& viewport() const override;
++  void DrawViewportFrame(const SceneView& view, ImDrawData* ui) override;
++  [[nodiscard]] uint64_t RequestViewportReadback() override;
++  [[nodiscard]] uint64_t RequestOutputReadback() override;
++  [[nodiscard]] ReadbackStatus TakeViewportReadback(
++      uint64_t ticket, ViewportPixels& pixels) override;
++
++  [[nodiscard]] MeshId UploadMesh(
++      std::span<const asset::Vertex> vertices,
++      std::span<const asset::Index> indices) override;
++  void ReleaseMesh(MeshId id) override;
++  void ReleaseTextures(std::span<const TextureId> ids) override;
++  void ReleaseMaterial(MaterialId id) override;
++  void FlushReleases() override;
++  [[nodiscard]] ImTextureID ui_texture(TextureId id) const override;
++
++  [[nodiscard]] MaterialId CreateMaterial(
++      const material::MaterialDesc& desc) override;
++  [[nodiscard]] std::vector<TextureId> UploadTextures(
++      std::span<const TextureUpload> textures) override;
++  [[nodiscard]] MaterialId CreateMaterial(
++      const material::MaterialDesc& desc,
++      const MaterialTextures& textures) override;
++  void UpdateMaterial(MaterialId id,
++                      const material::MaterialDesc& desc) override;
++  [[nodiscard]] const material::MaterialDesc& material(
++      MaterialId id) const override;
++  [[nodiscard]] size_t material_count() const override;
++  [[nodiscard]] TextureStats texture_stats() const override;
++  [[nodiscard]] MemoryStats memory_stats() const override;
++
++  void SetEnvironment(const asset::ImageDataF& equirect, float intensity,
++                      float rotation_radians) override;
++  void ResetEnvironment() override;
++  void SetEnvironmentParams(float intensity, float rotation_radians) override;
++
++  void RequestSwapchainRebuild() override;
++  void SetVsync(bool enabled) override;
++  void ReloadChangedShaders() override;
++  [[nodiscard]] std::string_view last_shader_error() const override;
++
++  [[nodiscard]] bool vsync() const override;
++  [[nodiscard]] std::string_view device_name() const override;
++  [[nodiscard]] core::Extent2D output_extent() const override;
++  [[nodiscard]] core::Extent2D render_extent() const override;
++  [[nodiscard]] core::Extent2D scene_output_extent() const override;
++  [[nodiscard]] Upscaling active_upscaling() const override;
++  void WaitIdle() const override;
++
++  [[nodiscard]] std::optional<double> gpu_frame_ms() const override;
++  [[nodiscard]] std::optional<double> gpu_scope_ms(
++      GpuScope scope) const override;
++  [[nodiscard]] RenderStats stats() const override;
++  [[nodiscard]] ValidationStats validation_stats() const override;
++
++  void InitImGuiRenderer() const override;
++  void ShutdownImGuiRenderer() const override;
++
++ private:
++  std::unique_ptr<RendererImpl> impl_;
++};
+ 
+-Renderer::~Renderer() = default;
++}  // namespace
+ 
+-void Renderer::DrawFrame(const SceneView& view, ImDrawData* ui) {
++void MetalRenderer::DrawFrame(const SceneView& view, ImDrawData* ui) {
+   impl_->DrawFrameTo(view, ui, RendererImpl::Output::kSwapchain);
+ }
+ 
+-ViewportImage Renderer::PrepareViewport(core::Extent2D size) {
++ViewportImage MetalRenderer::PrepareViewport(core::Extent2D size) {
+   return impl_->PrepareViewport(size);
+ }
+ 
+-const ViewportImage& Renderer::viewport() const { return impl_->viewport_; }
++const ViewportImage& MetalRenderer::viewport() const {
++  return impl_->viewport_;
++}
+ 
+-void Renderer::DrawViewportFrame(const SceneView& view, ImDrawData* ui) {
++void MetalRenderer::DrawViewportFrame(const SceneView& view, ImDrawData* ui) {
+   if (impl_->viewport_.generation == 0) {
+     core::log::Fatal("DrawViewportFrame() before PrepareViewport()");
+   }
+   impl_->DrawFrameTo(view, ui, RendererImpl::Output::kViewport);
+ }
+ 
+-uint64_t Renderer::RequestViewportReadback() {
++uint64_t MetalRenderer::RequestViewportReadback() {
+   return impl_->RequestViewportReadback();
+ }
+ 
+-ReadbackStatus Renderer::TakeViewportReadback(uint64_t ticket,
+-                                              ViewportPixels& pixels) {
++uint64_t MetalRenderer::RequestOutputReadback() {
++  // Copying the window output is not implemented for Metal yet (package
++  // M1): the ticket is never filled, TakeViewportReadback() reports kUnknown.
++  core::log::Warn("Metal: RequestOutputReadback() is not implemented yet");
++  return impl_->next_readback_ticket_++;
++}
++
++ReadbackStatus MetalRenderer::TakeViewportReadback(uint64_t ticket,
++                                                   ViewportPixels& pixels) {
+   return impl_->TakeViewportReadback(ticket, pixels);
+ }
+ 
+-MeshId Renderer::UploadMesh(std::span<const asset::Vertex> vertices,
+-                            std::span<const asset::Index> indices) {
++MeshId MetalRenderer::UploadMesh(std::span<const asset::Vertex> vertices,
++                                 std::span<const asset::Index> indices) {
+   return impl_->UploadMesh(vertices, indices);
+ }
+ 
+-void Renderer::ReleaseMesh(MeshId id) { impl_->ReleaseMesh(id); }
++void MetalRenderer::ReleaseMesh(MeshId id) { impl_->ReleaseMesh(id); }
+ 
+-void Renderer::ReleaseTextures(std::span<const TextureId> ids) {
++void MetalRenderer::ReleaseTextures(std::span<const TextureId> ids) {
+   impl_->ReleaseTextures(ids);
+ }
+ 
+-void Renderer::ReleaseMaterial(MaterialId id) { impl_->materials_.Release(id); }
++void MetalRenderer::ReleaseMaterial(MaterialId id) {
++  impl_->materials_.Release(id);
++}
+ 
+-void Renderer::FlushReleases() { impl_->FlushReleases(); }
++void MetalRenderer::FlushReleases() { impl_->FlushReleases(); }
+ 
+-ImTextureID Renderer::ui_texture(TextureId id) const {
++ImTextureID MetalRenderer::ui_texture(TextureId id) const {
+   // Non-owning: the texture stays alive until ReleaseTextures() of `id` has
+   // taken effect, because ReleaseTextures() retires the image like any other
+   // GPU object (RendererImpl::retired_images_).
+   return ToImTextureId(impl_->textures_.texture(id));
+ }
+ 
+-MaterialId Renderer::CreateMaterial(const material::MaterialDesc& desc) {
++MaterialId MetalRenderer::CreateMaterial(const material::MaterialDesc& desc) {
+   return impl_->materials_.Create(desc);
+ }
+ 
+-std::vector<TextureId> Renderer::UploadTextures(
++std::vector<TextureId> MetalRenderer::UploadTextures(
+     std::span<const TextureUpload> textures) {
+   return impl_->textures_.Upload(textures);
+ }
+ 
+-MaterialId Renderer::CreateMaterial(const material::MaterialDesc& desc,
+-                                    const MaterialTextures& textures) {
++MaterialId MetalRenderer::CreateMaterial(const material::MaterialDesc& desc,
++                                         const MaterialTextures& textures) {
+   return impl_->materials_.Create(desc, textures);
+ }
+ 
+-void Renderer::UpdateMaterial(MaterialId id,
+-                              const material::MaterialDesc& desc) {
++void MetalRenderer::UpdateMaterial(MaterialId id,
++                                   const material::MaterialDesc& desc) {
+   impl_->materials_.Update(id, desc);
+ }
+ 
+-const material::MaterialDesc& Renderer::material(MaterialId id) const {
++const material::MaterialDesc& MetalRenderer::material(MaterialId id) const {
+   return impl_->materials_.desc(id);
+ }
+ 
+-size_t Renderer::material_count() const { return impl_->materials_.count(); }
++size_t MetalRenderer::material_count() const {
++  return impl_->materials_.count();
++}
+ 
+-TextureStats Renderer::texture_stats() const {
++TextureStats MetalRenderer::texture_stats() const {
+   return impl_->textures_.stats();
+ }
+ 
+-MemoryStats Renderer::memory_stats() const { return impl_->memory_stats(); }
++MemoryStats MetalRenderer::memory_stats() const {
++  return impl_->memory_stats();
++}
+ 
+-void Renderer::SetEnvironment(const asset::ImageDataF& equirect,
+-                              float intensity, float rotation_radians) {
++void MetalRenderer::SetEnvironment(const asset::ImageDataF& equirect,
++                                   float intensity, float rotation_radians) {
+   impl_->context_.WaitIdle();
+   impl_->environment_.Set(equirect, intensity, rotation_radians);
+ }
+ 
+-void Renderer::ResetEnvironment() {
++void MetalRenderer::ResetEnvironment() {
+   impl_->context_.WaitIdle();
+   impl_->environment_.Set({}, 1.0f, 0.0f);
+ }
+ 
+-void Renderer::SetEnvironmentParams(float intensity, float rotation_radians) {
++void MetalRenderer::SetEnvironmentParams(float intensity,
++                                         float rotation_radians) {
+   impl_->environment_.SetParams(intensity, rotation_radians);
+ }
+ 
+-void Renderer::RequestSwapchainRebuild() { impl_->swapchain_dirty_ = true; }
++void MetalRenderer::RequestSwapchainRebuild() {
++  impl_->swapchain_dirty_ = true;
++}
+ 
+-void Renderer::SetVsync(bool enabled) { impl_->SetVsync(enabled); }
++void MetalRenderer::SetVsync(bool enabled) { impl_->SetVsync(enabled); }
+ 
+-void Renderer::ReloadChangedShaders() {
++void MetalRenderer::ReloadChangedShaders() {
+   impl_->shader_programs_.ReloadChanged();
+ }
+ 
+-std::string_view Renderer::last_shader_error() const {
++std::string_view MetalRenderer::last_shader_error() const {
+   return impl_->shader_programs_.last_error();
+ }
+ 
+-bool Renderer::vsync() const { return impl_->vsync_; }
++bool MetalRenderer::vsync() const { return impl_->vsync_; }
+ 
+-std::string_view Renderer::device_name() const {
++std::string_view MetalRenderer::device_name() const {
+   return impl_->context_.device_name();
+ }
+ 
+-core::Extent2D Renderer::output_extent() const {
++core::Extent2D MetalRenderer::output_extent() const {
+   return impl_->swapchain_.extent();
+ }
+ 
+-core::Extent2D Renderer::render_extent() const {
++core::Extent2D MetalRenderer::render_extent() const {
+   return impl_->targets_.render_extent();
+ }
+ 
+-core::Extent2D Renderer::scene_output_extent() const {
++core::Extent2D MetalRenderer::scene_output_extent() const {
+   return impl_->targets_.output_extent();
+ }
+ 
+-Upscaling Renderer::active_upscaling() const { return impl_->upscaling_; }
++Upscaling MetalRenderer::active_upscaling() const { return impl_->upscaling_; }
+ 
+-void Renderer::WaitIdle() const { impl_->context_.WaitIdle(); }
++void MetalRenderer::WaitIdle() const { impl_->context_.WaitIdle(); }
+ 
+-std::optional<double> Renderer::gpu_frame_ms() const {
++std::optional<double> MetalRenderer::gpu_frame_ms() const {
+   return impl_->gpu_timer_.last_frame_ms();
+ }
+ 
+-std::optional<double> Renderer::gpu_scope_ms(GpuScope scope) const {
++std::optional<double> MetalRenderer::gpu_scope_ms(GpuScope scope) const {
+   return impl_->gpu_timer_.last_ms(scope);
+ }
+ 
+-RenderStats Renderer::stats() const { return impl_->stats_; }
++RenderStats MetalRenderer::stats() const { return impl_->stats_; }
++
++ValidationStats MetalRenderer::validation_stats() const {
++  // Metal's API and shader validation are switched on outside the process
++  // (MTL_DEBUG_LAYER, MTL_SHADER_VALIDATION) and report nothing back to it.
++  return {};
++}
+ 
+-void Renderer::InitImGuiRenderer() const { impl_->InitImGuiRenderer(); }
++void MetalRenderer::InitImGuiRenderer() const { impl_->InitImGuiRenderer(); }
+ 
+-void Renderer::ShutdownImGuiRenderer() const { impl_->ShutdownImGuiRenderer(); }
++void MetalRenderer::ShutdownImGuiRenderer() const {
++  impl_->ShutdownImGuiRenderer();
++}
+ 
+ }  // namespace blue::render::metal
++
++namespace blue::render {
++
++std::unique_ptr<RendererBackend> CreateMetalRenderer(
++    const RendererOptions& options) {
++  if (options.window == nullptr) {
++    // The headless output image is not implemented for Metal yet (package
++    // M1); the backend factory falls back to another backend.
++    core::log::Warn("Metal: headless rendering is not implemented yet");
++    return nullptr;
++  }
++  // What MetalContext requires; checked here so that a Mac without Metal 4
++  // falls back instead of failing.
++  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
++  if (device == nil || ![device supportsFamily:MTLGPUFamilyMetal4]) {
++    return nullptr;
++  }
++  // The Metal shaders live in shaders/metal, next to the other backends'.
++  return std::make_unique<metal::MetalRenderer>(
++      *options.window, core::JoinPath(options.shader_dir, "metal"),
++      options.shader_mode);
++}
++
++}  // namespace blue::render
+--- a/src/shader/metal/shader_compiler.h
++++ b/src/shader/metal/shader_compiler.h
+@@ -7,6 +7,7 @@
+ #include <vector>
+ 
+ #include "core/result.h"
++#include "shader/compile_mode.h"
+ #include "shader/shader_preprocessor.h"
+ 
+ // Compiles Metal Shading Language files at run time with a Metal 4 compiler
+@@ -16,10 +17,8 @@
+ 
+ namespace blue::shader::metal {
+ 
+-enum class CompileMode {
+-  kDebug,    // Defines BLUE_SHADER_DEBUG for the shader source.
+-  kRelease,  // No extra macros.
+-};
++// CompileMode is the shared shader::CompileMode: kDebug defines
++// BLUE_SHADER_DEBUG for the shader source, kRelease adds no macros.
+ 
+ // Owns one compiled Metal library (id<MTLLibrary>). Empty when default
+ // constructed or moved from. Move-only.
+--- a/shaders/metal/bindings.h
++++ b/shaders/metal/bindings.h
+@@ -5,7 +5,8 @@
+ // The renderer binds everything through one MTL4ArgumentTable that both the
+ // vertex and the fragment stage see, so an index means the same in both.
+ // Included by MSL (`#include "bindings.h"`) and by C++
+-// (`#include "shaders/bindings.h"`); keep it to what both languages accept.
++// (`#include "shaders/metal/bindings.h"`); keep it to what both languages
++// accept.
+ // The enums are unscoped so that MSL attributes can name them:
+ // `[[buffer(kBufferFrame)]]`.
+ 

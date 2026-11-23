@@ -1,0 +1,53 @@
+#include <metal_stdlib>
+
+using namespace metal;
+
+#include "environment.h"
+#include "sanitize.h"
+
+// Generates the split-sum BRDF lookup table (render::Environment), the GPU
+// twin of lighting::GenerateBrdfLut(): x = NdotV, y = perceptual roughness
+// (row 0 smoothest), rg = (scale, bias) so that the specular IBL term is
+// prefiltered * (F0 * scale + F90 * bias). Importance-sampled GGX with
+// height-correlated Smith visibility.
+
+// Must match FullscreenVaryings in fullscreen.vert.metal.
+struct FullscreenVaryings {
+    float4 position [[position]];
+    float2 uv [[user(loc0)]];
+};
+
+constant uint kSampleCount = 1024u;
+
+static float VisibilitySmithGgxCorrelated(float NdotV, float NdotL, float alpha)
+{
+    const float a2 = alpha * alpha;
+    const float ggxV = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);
+    const float ggxL = NdotV * sqrt(NdotL * NdotL * (1.0 - a2) + a2);
+    return 0.5 / max(ggxV + ggxL, 1.0e-7);
+}
+
+fragment float4 FragmentMain(FullscreenVaryings varyings [[stage_in]])
+{
+    const float NdotV = varyings.uv.x;
+    const float alpha = varyings.uv.y * varyings.uv.y;
+    const float3 v = float3(sqrt(1.0 - NdotV * NdotV), 0.0, NdotV);
+    float2 sum = float2(0.0);
+    for (uint i = 0u; i < kSampleCount; ++i) {
+        const float3 h = ImportanceSampleGgx(Hammersley(i, kSampleCount), alpha);
+        const float VdotH = dot(v, h);
+        const float3 l = 2.0 * VdotH * h - v;
+        const float NdotL = l.z;
+        const float NdotH = h.z;
+        if (NdotL <= 0.0 || VdotH <= 0.0) {
+            continue;
+        }
+        // BRDF * NdotL / pdf, pdf = D * NdotH / (4 VdotH); D cancels.
+        const float g = 4.0 * VisibilitySmithGgxCorrelated(NdotV, NdotL, alpha) *
+                        NdotL * VdotH / max(NdotH, 1.0e-7);
+        const float fc = pow(1.0 - VdotH, 5.0);
+        sum += float2((1.0 - fc) * g, fc * g);
+    }
+    // Scale and bias are fractions of the reflected energy.
+    return float4(SanitizeColor(sum / float(kSampleCount), 1.0), 0.0, 1.0);
+}

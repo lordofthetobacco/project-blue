@@ -1,0 +1,101 @@
+#ifndef BLUE_RENDER_METAL_PASSES_MOTION_BLUR_PASS_H_
+#define BLUE_RENDER_METAL_PASSES_MOTION_BLUR_PASS_H_
+
+#include "render/metal/metal_types.h"
+
+#include <array>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "render/metal/fullscreen_pass.h"
+#include "render/metal/mesh.h"
+#include "render/metal/metal_context.h"
+#include "render/metal/passes/frame_context.h"
+#include "render/metal/pipeline.h"
+#include "render/metal/render_targets.h"
+#include "render/metal/samplers.h"
+#include "render/metal/shader_programs.h"
+
+namespace blue::render::metal {
+
+// Per-object motion blur of the draw items that have a previous_transform
+// and motion_blur (the first-person weapon), on the linear HDR image before
+// bloom, at the render resolution. The world is never blurred: an item's
+// velocity is its motion relative to the camera, so a weapon rigidly
+// following the view stays sharp however fast the player turns. Blur
+// lengths and their frame-rate independence are defined in
+// render/motion_blur_math.h. Four steps, all restricted to `area`
+// (FindArea(): the screen rectangle of the moving items' bounds, clipped to
+// the near plane, grown by the largest blur radius), since nothing outside
+// it can change:
+//
+//   1. velocity   the moving items' entries of the draw list -> velocity
+//                 (shaders/motion_velocity.*): blur vector and coverage,
+//                 depth tested EQUAL against the pre-pass like the mesh
+//                 pass, so only their visible surface writes.
+//   2. tile max   velocity -> motion_tiles
+//                 (shaders/motion_tile_max.frag.metal): the longest blur
+//                 vector per tile of the largest blur radius.
+//   3. copy       hdr -> motion_source, the area only (the blur reads the
+//                 image it writes).
+//   4. blur       motion_source + velocity + motion_tiles -> hdr
+//                 (shaders/motion_blur.frag.metal): a gather along the
+//                 longest blur vector of the 3 x 3 tiles around each pixel.
+//                 Only the moving items' colour spreads, softly past their
+//                 silhouette; a pixel no moving item reaches is copied back
+//                 unchanged, bit for bit.
+//
+// Costs nothing in frames without such an item or with the blur off (the
+// caller skips it, see FindArea()). Draws nothing over the reflex sight:
+// the renderer draws the sight after this pass.
+//
+// Borrows everything it is given, which must outlive it. Neither copyable
+// nor movable. Not thread-safe.
+class MotionBlurPass {
+ public:
+  MotionBlurPass(const MetalContext& context, ShaderPrograms& programs,
+                 const std::string& shader_dir,
+                 const std::vector<Mesh>& meshes);
+
+  MotionBlurPass(const MotionBlurPass&) = delete;
+  MotionBlurPass& operator=(const MotionBlurPass&) = delete;
+
+  // Points the pass at the current targets; call after they were created or
+  // resized.
+  void BindTargets(const RenderTargets& targets, const Samplers& samplers);
+
+  // Returns the pixels the blur may change this frame, or nullopt when there
+  // is nothing to do: the blur is off or its scale is 0 (strength, frame
+  // duration), or no visible draw-list entry is blurred (a
+  // previous_transform and motion_blur).
+  [[nodiscard]] static std::optional<MTLScissorRect> FindArea(
+      const FrameContext& ctx);
+
+  // Records the four steps over `area` (from FindArea()) on ctx.rec, each
+  // in its own encoder (three render passes and a copy), after the scene
+  // encoder was ended (EndScenePass()). Reads the scene depth the pre-pass
+  // wrote and leaves it as it was.
+  void Record(const FrameContext& ctx, const MTLScissorRect& area) const;
+
+ private:
+  // Step 1: clears the velocity target and draws the moving items into it.
+  void RecordVelocity(const FrameContext& ctx) const;
+  // Step 2: the tile max of the velocity in `area`.
+  void RecordTileMax(const FrameContext& ctx, const MTLScissorRect& area) const;
+  // Step 3: copies `area` of the HDR target into motion_source.
+  static void RecordSourceCopy(const FrameContext& ctx,
+                               const MTLScissorRect& area);
+
+  const std::vector<Mesh>& meshes_;
+  // Velocity pipelines, [0] culling back faces, [1] double-sided; replaced
+  // when the shaders are reloaded, never null after construction.
+  std::array<std::unique_ptr<Pipeline>, 2> velocity_pipelines_;
+  FullscreenPass tile_max_;
+  FullscreenPass blur_;
+};
+
+}  // namespace blue::render::metal
+
+#endif  // BLUE_RENDER_METAL_PASSES_MOTION_BLUR_PASS_H_

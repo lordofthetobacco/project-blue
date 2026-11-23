@@ -1,0 +1,3 @@
+# The import script runs under bash and git apply on every platform: no CRLF.
+*.sh text eol=lf
+*.patch -text

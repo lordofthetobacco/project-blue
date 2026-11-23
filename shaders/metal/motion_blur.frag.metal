@@ -1,0 +1,141 @@
+#include <metal_stdlib>
+
+#include "bindings.h"
+
+using namespace metal;
+
+#include "motion_blur.h"
+#include "sanitize.h"
+
+// Weapon motion blur reconstruction (render::MotionBlurPass), after McGuire
+// et al. 2012, "A Reconstruction Filter for Plausible Motion Blur", reduced
+// to one moving layer in front of a static background. Coverage replaces
+// their depth comparison: a covered pixel (a moving item) is always in front
+// of an uncovered one.
+//
+// Each pixel gathers kTapCount jittered taps along the longest blur vector
+// of its 3 x 3 tiles. A covered tap reaches the pixel when the pixel lies on
+// its smear (within half its blur length) and then adds its colour with the
+// density of that smear; uncovered taps never spread. The weight summed over
+// the reaching taps is how much of the exposure the pixel sees the moving
+// items: their mean colour is mixed over the pixel's background by that much
+// (at most 1). The background is the pixel's own colour where it is
+// uncovered; on a covered pixel it is unknown and estimated from the
+// uncovered taps, which is what makes the smear soft on both sides of the
+// silhouette. A pixel no covered tap reaches is returned unchanged, bit for
+// bit.
+
+// Must match BlurConstants in src/render/passes/motion_blur_pass.mm.
+struct BlurConstants {
+    float maxLength;  // Longest blur vector in pixels (DecodeBlur).
+    int tileSize;     // Pixels per tile side of tileMaxImage.
+};
+
+// Must match FullscreenVaryings in fullscreen.vert.metal.
+struct FullscreenVaryings {
+    float4 position [[position]];
+    float2 uv [[user(loc0)]];
+};
+
+constant int kTapCount = 12;
+// Blur vectors shorter than this (in pixels) are not worth gathering for;
+// above the 10-bit encoding error of a still point (DecodeBlur()).
+constant float kMinGatherLength = 0.25;
+
+// Returns the longest blur vector of the tiles around `pixel`.
+static float2 NeighbourMax(texture2d<float> tileMaxImage, int2 pixel, int tileSize)
+{
+    const int2 tile = pixel / tileSize;
+    const int2 lastTile = int2(tileMaxImage.get_width(), tileMaxImage.get_height()) - 1;
+    float2 longest = float2(0.0);
+    float longestSq = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const float2 blur = tileMaxImage.read(uint2(clamp(tile + int2(x, y), int2(0), lastTile))).xy;
+            const float lengthSq = dot(blur, blur);
+            if (lengthSq > longestSq) {
+                longest = blur;
+                longestSq = lengthSq;
+            }
+        }
+    }
+    return longest;
+}
+
+// Interleaved gradient noise (Jimenez 2014): a per-pixel value in [0, 1)
+// that offsets the taps, trading banding for fine noise.
+static float TapJitter(int2 pixel)
+{
+    return fract(52.9829189 * fract(dot(float2(pixel), float2(0.06711056, 0.00583715))));
+}
+
+fragment float4 FragmentMain(FullscreenVaryings varyings [[stage_in]],
+                             texture2d<float> sourceImage [[texture(kTextureInput0)]],    // HDR scene copy
+                             texture2d<float> velocityImage [[texture(kTextureInput0 + 1)]],  // EncodeBlur()
+                             texture2d<float> tileMaxImage [[texture(kTextureInput0 + 2)]],   // rg: pixels
+                             constant BlurConstants& params [[buffer(kBufferPass)]])
+{
+    const int2 pixel = int2(varyings.position.xy);
+    const float4 center = sourceImage.read(uint2(pixel));
+    const float2 dominant = NeighbourMax(tileMaxImage, pixel, params.tileSize);
+    const float dominantLength = length(dominant);
+    if (!(dominantLength >= kMinGatherLength)) {
+        return center;
+    }
+
+    const float2 direction = dominant / dominantLength;
+    // Taps cover [-reach, reach] along the direction, one per `spacing`.
+    const float reach = dominantLength * 0.5;
+    const float spacing = 2.0 * reach / float(kTapCount);
+    const int2 lastPixel = int2(sourceImage.get_width(), sourceImage.get_height()) - 1;
+
+    float3 foregroundSum = float3(0.0);
+    float foregroundWeight = 0.0;
+    float3 backgroundSum = float3(0.0);
+    float backgroundWeight = 0.0;
+
+    const float4 centerVelocity = velocityImage.read(uint2(pixel));
+    const bool centerCovered = IsCovered(centerVelocity);
+    if (centerCovered) {
+        // A covered pixel is its own tap, one pixel wide.
+        const float smear = max(length(DecodeBlur(centerVelocity, params.maxLength)), 1.0);
+        foregroundSum = SanitizeRadiance(center.rgb) / smear;
+        foregroundWeight = 1.0 / smear;
+    }
+
+    const float jitter = TapJitter(pixel);
+    for (int i = 0; i < kTapCount; ++i) {
+        const float offset = -reach + (float(i) + jitter) * spacing;
+        const int2 tapPixel = clamp(int2(floor(varyings.position.xy + direction * offset)), int2(0), lastPixel);
+        if (all(tapPixel == pixel)) {
+            continue;
+        }
+        const float4 tapVelocity = velocityImage.read(uint2(tapPixel));
+        const float3 tapColor = SanitizeRadiance(sourceImage.read(uint2(tapPixel)).rgb);
+        if (IsCovered(tapVelocity)) {
+            // The tap's smear covers this pixel if it is within half its
+            // length; the tap stands for `spacing` pixels of that smear (at
+            // most its whole length), spread over the length.
+            const float smear = max(length(DecodeBlur(tapVelocity, params.maxLength)), 1.0);
+            if (abs(offset) <= smear * 0.5) {
+                const float weight = min(spacing, smear) / smear;
+                foregroundSum += tapColor * weight;
+                foregroundWeight += weight;
+            }
+        } else {
+            backgroundSum += tapColor;
+            backgroundWeight += 1.0;
+        }
+    }
+
+    if (!(foregroundWeight > 0.0)) {
+        return center;  // Nothing moving reaches this pixel.
+    }
+    const float3 foreground = foregroundSum / foregroundWeight;
+    float3 background = SanitizeRadiance(center.rgb);
+    if (centerCovered) {
+        background = backgroundWeight > 0.0 ? backgroundSum / backgroundWeight : foreground;
+    }
+    const float coverage = min(foregroundWeight, 1.0);
+    return float4(SanitizeRadiance(mix(background, foreground, coverage)), center.a);
+}
