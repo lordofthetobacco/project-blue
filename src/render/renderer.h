@@ -210,6 +210,15 @@ class Renderer {
   [[nodiscard]] std::string_view device_name() const;
   // The size in pixels of the window output (the swapchain extent).
   [[nodiscard]] core::Extent2D output_extent() const;
+  // The size the scene is rendered at, and the size it is shown at after
+  // the temporal scaler (the window's or the editor viewport's): equal
+  // unless an upscaling mode is active.
+  [[nodiscard]] core::Extent2D render_extent() const;
+  [[nodiscard]] core::Extent2D scene_output_extent() const;
+  // The upscaling mode of the most recently drawn frame:
+  // SceneView::post.upscaling, or kOff when the device has no temporal
+  // scaler.
+  [[nodiscard]] Upscaling active_upscaling() const;
   // Blocks until the GPU has finished all submitted work.
   void WaitIdle() const;
 

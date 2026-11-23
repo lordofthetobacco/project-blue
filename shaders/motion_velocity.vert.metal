@@ -35,7 +35,10 @@ vertex VelocityVaryings VertexMain(VelocityVertex in [[stage_in]],
     const float4 worldPosition = draw.model * float4(in.position, 1.0);
     VelocityVaryings out;
     out.position = frame.viewProj * worldPosition;
+    // Without the temporal scaler's jitter, which is not motion: the inverse
+    // of render::JitterProjection(), and exactly out.position without jitter.
     out.currentClip = out.position;
+    out.currentClip.xy -= float2(2.0, -2.0) * frame.jitter.xy * frame.screen.zw * out.position.w;
     out.previousClip = frame.previousViewProj * (draw.previousModel * float4(in.position, 1.0));
     return out;
 }

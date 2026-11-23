@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <glm/vec4.hpp>
@@ -27,6 +28,7 @@
 #include "render/passes/ui_pass.h"
 #include "render/renderer_impl.h"
 #include "render/staging_upload.h"
+#include "render/temporal_math.h"
 
 namespace blue::render {
 
@@ -76,9 +78,12 @@ RendererImpl::RendererImpl(const platform::Window& window,
       reticle_pass_(context_, shader_programs_, shader_dir_),
       scope_lens_pass_(context_, shader_programs_, shader_dir_),
       motion_blur_pass_(context_, shader_programs_, shader_dir_, meshes_),
+      motion_vector_pass_(context_, shader_programs_, shader_dir_, meshes_),
+      temporal_scaler_pass_(context_),
       bloom_pass_(context_, shader_programs_, shader_dir_),
       tonemap_pass_(context_, shader_programs_, shader_dir_),
-      overlay_pass_(context_, shader_programs_, shader_dir_, meshes_),
+      overlay_pass_(context_, shader_programs_, shader_dir_, samplers_,
+                    meshes_),
       present_pass_(context_, shader_programs_, shader_dir_,
                     swapchain_.format()),
       gpu_timer_(context_) {
@@ -89,22 +94,53 @@ RendererImpl::RendererImpl(const platform::Window& window,
   for (Frame& frame : frames_) {
     frame.allocator = [context_.device() newCommandAllocator];
     FatalIfNil(frame.allocator, nil, "newCommandAllocator");
-    frame.command_buffer = [context_.device() newCommandBuffer];
-    FatalIfNil(frame.command_buffer, nil, "newCommandBuffer");
-    frame.command_buffer.label = @"frame";
     frame.constants =
         std::make_unique<TransientArena>(context_, "Frame constants");
   }
+  CreateFrameCommandBuffers();
   frame_globals_.BindShadowMap(shadow_pass_.map());
   BindTargets();
 }
 
 RendererImpl::~RendererImpl() { context_.WaitIdle(); }
 
+void RendererImpl::CreateFrameCommandBuffers() {
+  for (Frame& frame : frames_) {
+    frame.command_buffer = [context_.device() newCommandBuffer];
+    FatalIfNil(frame.command_buffer, nil, "newCommandBuffer");
+    frame.command_buffer.label = @"frame";
+  }
+}
+
+void RendererImpl::ConfigureTargets(core::Extent2D output, Upscaling mode) {
+  if (!temporal_scaler_pass_.supported()) {
+    mode = Upscaling::kOff;
+  }
+  const bool temporal = UsesTemporalScaler(mode);
+  const core::Extent2D render =
+      RenderExtent(output, mode, temporal_scaler_pass_.min_scale(),
+                   temporal_scaler_pass_.max_scale());
+  targets_.Resize(output, render, temporal);
+  // A command buffer that recorded the scaler keeps listing the scaler's
+  // own memory (MetalFX holds its history on a heap) even after it is begun
+  // again; committing it once that scaler is gone crashes Metal's GPU
+  // validation (MTL_SHADER_VALIDATION=1, -[MTL4GPUDebugCommandBuffer
+  // preCommit:]). So the frame slots get new command buffers before the
+  // scaler is replaced.
+  CreateFrameCommandBuffers();
+  temporal_scaler_pass_.Configure(targets_);
+  BindTargets();
+  upscaling_ = mode;
+  temporal_history_valid_ = false;
+}
+
 void RendererImpl::BindTargets() {
   frame_globals_.BindAmbientOcclusion(targets_.ssao().texture());
   ssao_pass_.BindTargets(targets_, samplers_);
   motion_blur_pass_.BindTargets(targets_, samplers_);
+  if (targets_.temporal()) {
+    motion_vector_pass_.BindTargets(targets_, samplers_);
+  }
   bloom_pass_.BindTargets(targets_, samplers_);
   tonemap_pass_.BindTargets(targets_, samplers_);
   overlay_pass_.BindTargets(targets_, samplers_);
@@ -237,8 +273,7 @@ bool RendererImpl::RebuildSwapchain() {
     return false;  // Surface has no area; stay dirty and retry next frame.
   }
   if (viewport_.generation == 0) {  // Otherwise they follow the viewport.
-    targets_.Resize(swapchain_.extent());
-    BindTargets();
+    ConfigureTargets(swapchain_.extent(), upscaling_);
   }
   swapchain_dirty_ = false;
   return true;
@@ -287,8 +322,7 @@ void RendererImpl::ResizeViewport(core::Extent2D size) {
                                      .usage = MTLTextureUsageRenderTarget |
                                               MTLTextureUsageShaderRead,
                                      .label = "viewport"});
-  targets_.Resize(size);
-  BindTargets();
+  ConfigureTargets(size, upscaling_);
   viewport_ = {
       .texture = ToImTextureId(viewport_image_.texture()),
       .extent = size,
@@ -373,6 +407,10 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   @autoreleasepool {
     // Before any early return: skipped frames must not hold released memory.
     DestroyRetiredIfIdle();
+    // Until this frame is recorded the scaler's history is nobody's past (a
+    // skipped frame breaks it).
+    const bool history_valid =
+        std::exchange(temporal_history_valid_, false);
     const core::Extent2D window_size = window_.PixelSize();
     if (window_size.width == 0 || window_size.height == 0) {
       return;  // Minimized: nothing to present to.
@@ -384,6 +422,15 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     }
     if (swapchain_dirty_ && !RebuildSwapchain()) {
       return;
+    }
+    // A new upscaling mode needs other targets (and a scaler): like a
+    // resize, once the frames in flight are done.
+    const Upscaling wanted = temporal_scaler_pass_.supported()
+                                 ? view.post.upscaling
+                                 : Upscaling::kOff;
+    if (wanted != upscaling_) {
+      WaitForFramesInFlight();
+      ConfigureTargets(targets_.output_extent(), wanted);
     }
 
     Frame& frame = frames_[frame_index_];
@@ -405,7 +452,19 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
 
     const bool shadows = view.shadows_enabled && view.sun.casts_shadows;
     std::array<lighting::Cascade, lighting::kCascadeCount> cascades{};
-    const core::Extent2D extent = targets_.extent();
+    const core::Extent2D extent = targets_.render_extent();
+    const bool temporal = targets_.temporal();
+    // The scene is rasterized with a different sub-pixel offset each frame;
+    // culling, the cascades and the scope view never see it.
+    const glm::vec2 jitter =
+        temporal
+            ? JitterOffset(temporal_frame_++,
+                           JitterPhaseCount(extent, targets_.output_extent()))
+            : glm::vec2(0.0f);
+    // The scaler's history is this frame's past only if the frame before
+    // was recorded and the app says the camera's history is good.
+    const bool reset_history =
+        !history_valid || !view.camera.previous_valid;
     if (shadows) {
       const float aspect = static_cast<float>(extent.width) /
                            static_cast<float>(std::max(extent.height, 1u));
@@ -420,7 +479,8 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
     stats_ = {};
     draw_list_.Build(view, world_bounds_, camera_frustum, materials_, meshes_,
                      stats_);
-    FrameUniforms uniforms = MakeFrameUniforms(view, cascades, shadows, extent);
+    FrameUniforms uniforms =
+        MakeFrameUniforms(view, cascades, shadows, extent, jitter);
     environment_.FillUniforms(uniforms);
     frame_globals_.Write(frame_index_, uniforms);
     FrameContext ctx{
@@ -429,6 +489,8 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
         .globals = frame_globals_,
         .view = view,
         .targets = targets_,
+        .temporal = temporal,
+        .jitter = jitter,
         .scene_hdr = targets_.hdr(),
         .scene_depth = targets_.depth(),
         .scene_extent = extent,
@@ -494,7 +556,9 @@ void RendererImpl::DrawFrameTo(const SceneView& view, ImDrawData* ui,
           .stats = scope_stats,
       });
     }
-    RecordCommands(ctx, scope_ctx ? &*scope_ctx : nullptr, ui, output);
+    RecordCommands(ctx, scope_ctx ? &*scope_ctx : nullptr, reset_history, ui,
+                   output);
+    temporal_history_valid_ = true;
     stats_.scope_draw_calls = scope_stats.draw_calls;
     [frame.command_buffer endCommandBuffer];
     // Presents the drawable (when one was acquired) through the queue.
@@ -557,8 +621,31 @@ void RendererImpl::DrawSights(const FrameContext& ctx,
   scope_lens_pass_.Draw(ctx, encoder);
 }
 
+void RendererImpl::RecordReactiveMask(const FrameContext& ctx) const {
+  MTL4RenderPassDescriptor* descriptor =
+      [[MTL4RenderPassDescriptor alloc] init];
+  MTLRenderPassColorAttachmentDescriptor* mask = descriptor.colorAttachments[0];
+  mask.texture = ctx.targets.reactive_mask().texture();
+  mask.loadAction = MTLLoadActionClear;
+  mask.storeAction = MTLStoreActionStore;
+  mask.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+  MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
+  depth.texture = ctx.scene_depth.texture();
+  depth.loadAction = MTLLoadActionLoad;
+  depth.storeAction = MTLStoreActionStore;  // Tested only.
+
+  const id<MTL4RenderCommandEncoder> encoder =
+      BeginRenderPass(ctx.rec, descriptor, "reactive mask");
+  SetSceneViewport(encoder, ctx.scene_extent);
+  ctx.globals.Bind(ctx.rec, ctx.frame_index, ctx.frame_view);
+  reticle_pass_.DrawReactive(ctx, encoder);
+  scope_lens_pass_.DrawReactive(ctx, encoder);
+  [encoder endEncoding];
+}
+
 void RendererImpl::RecordCommands(FrameContext& ctx,
-                                  const FrameContext* scope_ctx, ImDrawData* ui,
+                                  const FrameContext* scope_ctx,
+                                  bool reset_history, ImDrawData* ui,
                                   Output output) {
   // Times `record` as `scope`.
   const auto timed = [&](GpuScope scope, const auto& record) {
@@ -567,17 +654,27 @@ void RendererImpl::RecordCommands(FrameContext& ctx,
     gpu_timer_.EndScope(ctx.rec.cmd, scope);
   };
 
+  // Sharper mips for a scene rendered below the output size.
+  const float lod_bias = TextureLodBias(ctx.targets.render_extent(),
+                                        ctx.targets.output_extent());
+  materials_.SetTextureLodBias(lod_bias);
   if (ctx.shadows) {
     timed(GpuScope::kShadow, [&] { shadow_pass_.Record(ctx); });
   }
   timed(GpuScope::kDepthPrepass, [&] { depth_prepass_.Record(ctx); });
+  if (ctx.temporal) {
+    timed(GpuScope::kMotionVectors, [&] { motion_vector_pass_.Record(ctx); });
+  }
   if (ctx.view.post.ssao_enabled) {
     timed(GpuScope::kSsao, [&] { ssao_pass_.Record(ctx); });
   } else {
     ssao_pass_.Record(ctx);  // At most a one-time clear to white.
   }
   if (scope_ctx != nullptr) {
+    // The scope picture is not upscaled: no bias for its materials.
+    materials_.SetTextureLodBias(0.0f);
     timed(GpuScope::kScopeView, [&] { RecordScopeView(*scope_ctx); });
+    materials_.SetTextureLodBias(lod_bias);
   }
   // The weapon motion blur rewrites the HDR image, so the sights are drawn
   // after it: the reflex dot and the scope's picture must stay sharp (the
@@ -602,6 +699,13 @@ void RendererImpl::RecordCommands(FrameContext& ctx,
         DrawSights(ctx, encoder);
         EndScenePass(encoder);
       }
+    });
+  }
+  if (ctx.temporal) {
+    // From here on the frame is at the output extent.
+    timed(GpuScope::kUpscale, [&] {
+      RecordReactiveMask(ctx);
+      temporal_scaler_pass_.Record(ctx, reset_history);
     });
   }
   if (ctx.view.post.bloom_enabled) {
@@ -761,6 +865,16 @@ std::string_view Renderer::device_name() const {
 core::Extent2D Renderer::output_extent() const {
   return impl_->swapchain_.extent();
 }
+
+core::Extent2D Renderer::render_extent() const {
+  return impl_->targets_.render_extent();
+}
+
+core::Extent2D Renderer::scene_output_extent() const {
+  return impl_->targets_.output_extent();
+}
+
+Upscaling Renderer::active_upscaling() const { return impl_->upscaling_; }
 
 void Renderer::WaitIdle() const { impl_->context_.WaitIdle(); }
 

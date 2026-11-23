@@ -23,6 +23,12 @@ namespace blue::render {
 // uniforms (kBufferScopeLens, one buffer per frame in flight) and the
 // picture (kTextureScopePicture).
 //
+// With the temporal scaler on (PostSettings::upscaling) the glass is drawn
+// at the render resolution with the frame's view-projection, jittered like
+// the scene whose depth it is tested against, and marked in the scaler's
+// reactive mask (DrawReactive()). The picture itself is never jittered or
+// scaled: it is a texture on the lens.
+//
 // Borrows `programs`, which must outlive it. Neither copyable nor movable.
 // Not thread-safe.
 class ScopeLensPass {
@@ -49,12 +55,27 @@ class ScopeLensPass {
   void Draw(const FrameContext& ctx,
             id<MTL4RenderCommandEncoder> encoder) const;
 
+  // Records the glass's part of the temporal scaler's reactive mask, if the
+  // view has a scope, on `encoder`: colour
+  // RenderTargets::kReactiveMaskFormat (cleared to 0 by the caller), the
+  // scene depth attachment and viewport, and the main view's globals set,
+  // as for Draw(). Adds 1 over the glass (its antialiased rim as in
+  // Draw()), depth tested like it. What the glass shows follows the weapon
+  // and the aim, not the surface behind it whose motion vector its pixels
+  // carry, so the scaler must ignore its history there. Call after Draw()
+  // of the same frame (it uses the uniforms Draw() wrote); records nothing
+  // before the first BindPicture().
+  void DrawReactive(const FrameContext& ctx,
+                    id<MTL4RenderCommandEncoder> encoder) const;
+
  private:
   // The lens uniforms of each frame in flight.
   std::array<Buffer, kFramesInFlight> uniforms_;
   id<MTLTexture> picture_ = nil;
-  // Replaced when its shaders are reloaded; never null after construction.
+  // Replaced when their shaders are reloaded; never null after
+  // construction.
   std::unique_ptr<Pipeline> pipeline_;
+  std::unique_ptr<Pipeline> reactive_pipeline_;
 };
 
 }  // namespace blue::render

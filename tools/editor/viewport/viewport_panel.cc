@@ -196,7 +196,11 @@ void ViewportPanel::Draw(EditorContext& context) {
   }
 
   // The frame's view: camera and toggles here, content from the client,
-  // then the debug lines (the client may still have added some).
+  // then the debug lines (the client may still have added some). A fresh
+  // view has PostSettings::upscaling off: the editor keeps FXAA, since the
+  // temporal scaler would need the previous frame's transforms of
+  // everything a tool moves (world::DrawHistory) and would soften the
+  // one-pixel overlays' surroundings while the camera orbits.
   view_ = render::SceneView{};
   view_.camera = {.view = camera_.view(),
                   .projection = camera_.projection(aspect()),

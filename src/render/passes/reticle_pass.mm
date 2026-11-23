@@ -33,6 +33,25 @@ static_assert(sizeof(ReticleConstants) <= kMaxPassConstantBytes);
 // The sight quad is generated in the vertex shader from two triangles.
 constexpr NSUInteger kVertexCount = 6;
 
+ReticleConstants MakeConstants(const ReticleSight& sight) {
+  return {
+      .lens = sight.lens,
+      .axis = glm::vec4(sight.axis, sight.dot_angular_radius),
+      .dot_color = glm::vec4(sight.dot_color, sight.min_dot_pixels),
+      .tint = glm::vec4(sight.tint, 0.0f),
+  };
+}
+
+// Binds the constants of `sight` and draws its quad with `pipeline`.
+void DrawSight(const FrameContext& ctx, id<MTL4RenderCommandEncoder> encoder,
+               const Pipeline& pipeline, const ReticleSight& sight) {
+  pipeline.Bind(encoder);
+  BindConstants(ctx.rec, kBufferPass, MakeConstants(sight));
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+              vertexStart:0
+              vertexCount:kVertexCount];
+}
+
 }  // namespace
 
 ReticlePass::ReticlePass(const MetalContext& context, ShaderPrograms& programs,
@@ -64,6 +83,33 @@ ReticlePass::ReticlePass(const MetalContext& context, ShaderPrograms& programs,
         pipeline_ = std::move(pipeline).value();
         return std::nullopt;
       });
+  programs.Add(
+      core::JoinPath(shader_dir, "reticle.vert.metal"),
+      core::JoinPath(shader_dir, "reticle_reactive.frag.metal"),
+      [this, &context](const shader::ShaderLibrary& vertex,
+                       const shader::ShaderLibrary* fragment)
+          -> std::optional<std::string> {
+        // Rasterized and depth tested exactly like the sight. Additive, so
+        // that the quads of several sights never erase each other's mask
+        // (the target saturates at 1).
+        const GraphicsPipelineDesc desc{
+            .vertex = &vertex,
+            .fragment = fragment,
+            .color_format = RenderTargets::kReactiveMaskFormat,
+            .depth_format = RenderTargets::kDepthFormat,
+            .cull_mode = MTLCullModeNone,
+            .depth_compare = MTLCompareFunctionGreaterEqual,
+            .depth_write = false,
+            .blend = BlendMode::kAdditive,
+            .label = "reticle (reactive mask)",
+        };
+        auto pipeline = Pipeline::Create(context, desc);
+        if (!pipeline.ok()) {
+          return pipeline.error();
+        }
+        reactive_pipeline_ = std::move(pipeline).value();
+        return std::nullopt;
+      });
 }
 
 void ReticlePass::Draw(const FrameContext& ctx,
@@ -71,19 +117,17 @@ void ReticlePass::Draw(const FrameContext& ctx,
   if (!ctx.view.sight) {
     return;
   }
-  const ReticleSight& sight = *ctx.view.sight;
-  const ReticleConstants constants{
-      .lens = sight.lens,
-      .axis = glm::vec4(sight.axis, sight.dot_angular_radius),
-      .dot_color = glm::vec4(sight.dot_color, sight.min_dot_pixels),
-      .tint = glm::vec4(sight.tint, 0.0f),
-  };
-  pipeline_->Bind(encoder);
-  BindConstants(ctx.rec, kBufferPass, constants);
-  [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-              vertexStart:0
-              vertexCount:kVertexCount];
+  DrawSight(ctx, encoder, *pipeline_, *ctx.view.sight);
   ++ctx.stats.draw_calls;
+}
+
+void ReticlePass::DrawReactive(const FrameContext& ctx,
+                               id<MTL4RenderCommandEncoder> encoder) const {
+  if (!ctx.view.sight) {
+    return;
+  }
+  // Not counted in the stats: draw_calls are the scene's.
+  DrawSight(ctx, encoder, *reactive_pipeline_, *ctx.view.sight);
 }
 
 }  // namespace blue::render

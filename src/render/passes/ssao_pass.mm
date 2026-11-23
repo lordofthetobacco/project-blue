@@ -77,8 +77,8 @@ void SsaoPass::Record(const FrameContext& ctx) {
 
 void SsaoPass::RecordOcclusion(const FrameContext& ctx) const {
   const RenderTargets& targets = ctx.targets;
-  const core::Extent2D full = targets.extent();
-  const core::Extent2D half = targets.half_extent();
+  const core::Extent2D full = targets.render_extent();
+  const core::Extent2D half = targets.ssao_extent();
   const glm::mat4& projection = ctx.view.camera.projection;
   const auto full_width = static_cast<float>(full.width);
   const auto full_height = static_cast<float>(full.height);

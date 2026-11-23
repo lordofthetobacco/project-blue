@@ -60,6 +60,12 @@ static_assert(sizeof(BlurConstants) == 8);
 // (shaders/motion_blur.h, EncodeBlur).
 constexpr MTLClearColor kNoMotion{0.5, 0.5, 0.0, 0.0};
 
+// Returns true for the items the pass blurs: those that moved and ask for
+// it (the first-person weapon, not what merely moves in the world).
+bool IsBlurred(const DrawItem& item) {
+  return item.previous_transform.has_value() && item.motion_blur;
+}
+
 }  // namespace
 
 MotionBlurPass::MotionBlurPass(const MetalContext& context,
@@ -137,7 +143,7 @@ std::optional<MTLScissorRect> MotionBlurPass::FindArea(
                       ctx.view.frame_seconds) <= 0.0f) {
     return std::nullopt;
   }
-  const core::Extent2D extent = ctx.targets.extent();
+  const core::Extent2D extent = ctx.targets.render_extent();
   const glm::vec2 size(static_cast<float>(extent.width),
                        static_cast<float>(extent.height));
   const glm::mat4 view_proj = ctx.view.camera.projection * ctx.view.camera.view;
@@ -146,8 +152,7 @@ std::optional<MTLScissorRect> MotionBlurPass::FindArea(
   std::optional<ScreenBounds> bounds;
   uint32_t added_item = UINT32_MAX;
   for (const DrawEntry& entry : ctx.draw_list) {
-    if (!ctx.view.draws[entry.item].previous_transform ||
-        entry.item == added_item) {
+    if (!IsBlurred(ctx.view.draws[entry.item]) || entry.item == added_item) {
       continue;
     }
     added_item = entry.item;
@@ -203,7 +208,7 @@ void MotionBlurPass::Record(const FrameContext& ctx,
   // it.
   blur_.Record(ctx.rec,
                {.texture = targets.hdr().texture(),
-                .extent = targets.extent(),
+                .extent = targets.render_extent(),
                 .load_action = MTLLoadActionLoad,
                 .area = area},
                0, ConstantBytes(constants));
@@ -228,7 +233,7 @@ void MotionBlurPass::RecordVelocity(const FrameContext& ctx) const {
   const id<MTL4RenderCommandEncoder> encoder =
       BeginRenderPass(ctx.rec, descriptor, "motion blur velocity");
   // Same viewport as the scene pass.
-  SetSceneViewport(encoder, ctx.targets.extent());
+  SetSceneViewport(encoder, ctx.targets.render_extent());
   ctx.globals.Bind(ctx.rec, ctx.frame_index, ctx.frame_view);
 
   const Pipeline* bound_pipeline = nullptr;
@@ -236,7 +241,7 @@ void MotionBlurPass::RecordVelocity(const FrameContext& ctx) const {
   uint32_t set_item = UINT32_MAX;
   for (const DrawEntry& entry : ctx.draw_list) {
     const DrawItem& item = ctx.view.draws[entry.item];
-    if (!item.previous_transform) {
+    if (!IsBlurred(item)) {
       continue;
     }
     // Bindings survive pipeline changes, so the model matrices stay bound

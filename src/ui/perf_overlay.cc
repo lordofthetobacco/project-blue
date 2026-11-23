@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <format>
 #include <iterator>
 #include <optional>
@@ -20,6 +21,7 @@
 #include "render/gpu_scope.h"
 #include "render/renderer.h"
 #include "render/scene_view.h"
+#include "render/temporal_math.h"
 #include "ui/imgui_layer.h"
 #include "weapon/target_log.h"
 
@@ -189,6 +191,33 @@ void DrawInteractionDot(float opacity) {
       center, radius, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, alpha)));
 }
 
+// Emits the temporal upscaling mode and FXAA, which is shown inactive while
+// the temporal scaler does the anti-aliasing.
+void DrawAntiAliasingSettings(render::PostSettings& post) {
+  ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
+  if (ImGui::BeginCombo("Upscaling", render::UpscalingName(post.upscaling))) {
+    for (int32_t i = 0; i < render::kUpscalingModeCount; ++i) {
+      const auto mode = static_cast<render::Upscaling>(i);
+      const bool selected = mode == post.upscaling;
+      if (ImGui::Selectable(render::UpscalingName(mode), selected)) {
+        post.upscaling = mode;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::PopItemWidth();
+  const bool temporal = render::UsesTemporalScaler(post.upscaling);
+  ImGui::BeginDisabled(temporal);
+  // One widget whichever label it shows (the id follows ###).
+  ImGui::Checkbox(temporal ? "FXAA (replaced by temporal AA)###fxaa"
+                           : "FXAA###fxaa",
+                  &post.fxaa_enabled);
+  ImGui::EndDisabled();
+}
+
 // Emits the exposure and post-processing controls (applied live, reset by a
 // scene reload).
 void DrawPostSettings(render::PostSettings& post) {
@@ -213,7 +242,7 @@ void DrawPostSettings(render::PostSettings& post) {
                      kMaxBloomStrength, "%.3f");
   ImGui::PopItemWidth();
   ImGui::Checkbox("SSAO", &post.ssao_enabled);
-  ImGui::Checkbox("FXAA", &post.fxaa_enabled);
+  DrawAntiAliasingSettings(post);
   ImGui::Checkbox("Weapon motion blur", &post.weapon_motion_blur_enabled);
   ImGui::PushItemWidth(ImGui::GetFontSize() * 10.0f);
   ImGui::SliderFloat("Blur strength", &post.weapon_motion_blur_strength, 0.0f,
@@ -469,9 +498,19 @@ void PerfOverlay::DrawTimings(float cpu_frame_ms) const {
 
 void PerfOverlay::DrawDeviceInfo() const {
   const core::Extent2D output = renderer_.output_extent();
+  const core::Extent2D render = renderer_.render_extent();
+  const char* const vsync = renderer_.vsync() ? "vsync" : "no vsync";
   TextView(renderer_.device_name());
-  ImGui::Text("%u x %u  |  %s", output.width, output.height,
-              renderer_.vsync() ? "vsync" : "no vsync");
+  if (render::UsesTemporalScaler(renderer_.active_upscaling())) {
+    // What the scene is rendered at, and what the scaler turns it into.
+    const core::Extent2D scaled = renderer_.scene_output_extent();
+    ImGui::Text("%u x %u -> %u x %u  |  %s", render.width, render.height,
+                scaled.width, scaled.height, vsync);
+    ImGui::Text("Upscaling: %s",
+                render::UpscalingName(renderer_.active_upscaling()));
+  } else {
+    ImGui::Text("%u x %u  |  %s", output.width, output.height, vsync);
+  }
   const render::TextureStats textures = renderer_.texture_stats();
   ImGui::Text("Materials %zu  textures %zu (%.1f MiB)",
               renderer_.material_count(), textures.count,

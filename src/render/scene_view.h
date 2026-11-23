@@ -29,10 +29,18 @@ struct Camera {
   float vertical_fov_radians = 1.0f;
   float near_plane = 0.1f;
   // Last frame's projection * view; read with DrawItem::previous_transform
-  // (weapon motion blur). A surface point's screen velocity is its position
-  // this frame minus its position under the previous model and previous
+  // (weapon motion blur) and for the scene's motion vectors (temporal
+  // upscaling). A surface point's screen velocity is its position this frame
+  // minus its position under the previous model and previous
   // view-projection, so an item rigidly following the camera does not move.
   glm::mat4 previous_view_projection{1.0f};
+  // True: previous_view_projection really is the previous frame's. False
+  // (the default; the first frame, after a camera cut such as a scene load,
+  // respawn, teleport or another view mode, after a resize): the previous
+  // frame says nothing about this one, and the temporal scaler starts its
+  // history over (the scene's motion vectors are not used that frame). The
+  // weapon motion blur does not read it: it goes by previous_transform.
+  bool previous_valid = false;
 };
 
 // Light intensities follow one convention throughout the renderer: color *
@@ -87,11 +95,16 @@ struct DrawItem {
   // Replaces the material of every submesh when set, e.g. a builtin cube
   // drawn as a tracer.
   std::optional<MaterialId> material_override;
-  // The item's `transform` in the previous frame. Set: the item writes
-  // motion vectors and is motion-blurred along its screen motion (the
-  // first-person weapon). Unset (the default): static as far as motion blur
-  // goes; leave it unset for an item that was not drawn last frame or jumped.
+  // The item's `transform` in the previous frame. Set: the item moved, so it
+  // writes its own motion vectors (temporal upscaling) and, with
+  // `motion_blur`, is blurred along its screen motion. Unset (the default):
+  // it stands still as far as both go; leave it unset for an item that was
+  // not drawn last frame or jumped, so nothing smears.
   std::optional<glm::mat4> previous_transform;
+  // Only read with a previous_transform: the weapon motion blur blurs the
+  // item (the first-person weapon). False for the items that merely move in
+  // the world (world::DrawHistory): the world is never blurred.
+  bool motion_blur = true;
   // Not drawn into a scope's picture (SceneView::scope): the first-person
   // weapon, which carries the scope.
   bool hidden_in_scope = false;
@@ -197,6 +210,23 @@ enum class Tonemapper : int32_t {
   kClamp = 2,       // No curve, clipped at 1: for comparison only.
 };
 
+// How the scene gets from the resolution it is rendered at to the output
+// resolution. Every mode but kOff runs the MetalFX temporal scaler on the
+// linear HDR image (after the weapon motion blur, before bloom and
+// tonemapping): the projection is jittered by a sub-pixel offset each frame
+// and the scaler accumulates the frames along the scene's motion vectors,
+// which anti-aliases the image, so FXAA is not applied then. The ratios are
+// output / render per axis, clamped to what the device's scaler supports
+// (render/temporal_math.h). A scope's picture is never jittered or scaled.
+enum class Upscaling : int32_t {
+  kOff = 0,          // No scaler; anti-aliasing is PostSettings::fxaa_enabled.
+  kNative = 1,       // Rendered at the output resolution: temporal AA only.
+  kQuality = 2,      // 1.5x
+  kBalanced = 3,     // 1.7x
+  kPerformance = 4,  // 2x
+};
+inline constexpr int32_t kUpscalingModeCount = 5;
+
 // Settings of the passes after the scene pass.
 struct PostSettings {
   // Exposure in stops: the HDR image is scaled by 2^exposure_ev before
@@ -216,8 +246,11 @@ struct PostSettings {
   bool ssao_enabled = true;
   float ssao_radius = 0.5f;     // m, world-space sampling radius
   float ssao_intensity = 1.0f;  // occlusion exponent: ao = pow(ao, intensity)
-  // FXAA on the tonemapped image; off = plain copy to the swapchain.
+  // FXAA on the tonemapped image; off = plain copy to the swapchain. Not
+  // applied while `upscaling` is on (FxaaActive() in render/temporal_math.h).
   bool fxaa_enabled = true;
+  // Temporal anti-aliasing and upscaling of the scene, see Upscaling.
+  Upscaling upscaling = Upscaling::kOff;
   // Motion blur of the draw items with a previous_transform (the weapon),
   // along their motion on screen; the world is never blurred. The blur
   // length is the motion over 1/60 s times the strength, whatever the frame

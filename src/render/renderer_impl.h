@@ -34,6 +34,7 @@
 #include "render/passes/frame_context.h"
 #include "render/passes/mesh_pass.h"
 #include "render/passes/motion_blur_pass.h"
+#include "render/passes/motion_vector_pass.h"
 #include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/reticle_pass.h"
@@ -41,6 +42,7 @@
 #include "render/passes/shadow_pass.h"
 #include "render/passes/skybox_pass.h"
 #include "render/passes/ssao_pass.h"
+#include "render/passes/temporal_scaler_pass.h"
 #include "render/passes/tonemap_pass.h"
 #include "render/passes/ui_pass.h"
 #include "render/recording.h"
@@ -69,6 +71,9 @@
 //   shadow cascades      ShadowPass        sun depth, one encoder per
 //                                          cascade layer (4)
 //   depth pre-pass       DepthPrepass      draw list -> depth
+//   motion vectors       MotionVectorPass  temporal scaler only: depth and
+//                                          the moving items -> where each
+//                                          pixel was last frame
 //   ssao                 SsaoPass          depth -> ssao, half res:
 //                                          occlusion + two blur encoders
 //   scope picture        RecordScopeView() SceneView::scope only: the same
@@ -89,6 +94,10 @@
 //                                          with weapon motion blur, where
 //                                          the sights move here from the
 //                                          scene pass.
+//   upscale              TemporalScalerPass  temporal scaler only: the
+//                                          sights' reactive mask, then
+//                                          MetalFX: hdr + depth + motion
+//                                          vectors -> upscaled hdr
 //   bloom                BloomPass         hdr -> bloom mips, an encoder per
 //                                          down- and up-sample step
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
@@ -98,6 +107,16 @@
 //                                          the editor viewport image (plus
 //                                          a copy per viewport readback)
 //   ui                   RecordUiPass()    ImGui on the drawable
+//
+// Two sizes: everything up to the weapon motion blur renders at the render
+// extent, everything from bloom on at the output extent (RenderTargets).
+// They differ only while an upscaling mode is on (SceneView::post.upscaling,
+// render/temporal_math.h); then the scene is rasterized with a sub-pixel
+// jitter that changes every frame, and the scaler turns the jittered frames
+// into the anti-aliased image the post chain reads
+// (RenderTargets::post_hdr()). With Upscaling::kOff nothing of this exists
+// and the frame is recorded exactly as before. A mode or size change
+// recreates the targets and the scaler with the GPU idle (ConfigureTargets()).
 //
 // The visible submeshes are culled and sorted once per frame (DrawList) and
 // shared by the depth pre-pass and the mesh pass. Disabled effects
@@ -212,6 +231,14 @@ struct RendererImpl {
   void WaitForFramesInFlight() const;
   // Recreates the viewport image and the render targets at `size`.
   void ResizeViewport(core::Extent2D size);
+  // Gives every frame slot a new command buffer. No slot may be recording
+  // or in flight.
+  void CreateFrameCommandBuffers();
+  // Recreates the render targets for an output of `output` pixels in
+  // upscaling mode `mode` (kOff when unsupported), with the scaler, the
+  // texture LOD bias and every pass's bindings to match, and starts a new
+  // temporal history. The GPU must be idle.
+  void ConfigureTargets(core::Extent2D output, Upscaling mode);
   // Points every pass at the current render targets; call after they were
   // created or resized.
   void BindTargets();
@@ -225,13 +252,16 @@ struct RendererImpl {
   // file); `scope_ctx` is the scope picture's, or null. Acquires the
   // drawable on the way.
   void RecordCommands(FrameContext& ctx, const FrameContext* scope_ctx,
-                      ImDrawData* ui, Output output);
+                      bool reset_history, ImDrawData* ui, Output output);
   // Creates the scope picture and its depth (kMaxScopeResolution square) the
   // first time a frame has a scope; they live as long as the renderer.
   void EnsureScopeTargets();
   // Records the scope picture: depth pre-pass, meshes and sky of
   // `scope_ctx`.
   void RecordScopeView(const FrameContext& scope_ctx);
+  // Records the reactive mask of the sights of `ctx` for the temporal
+  // scaler.
+  void RecordReactiveMask(const FrameContext& ctx) const;
   // Draws the sights (reflex dot, scope eyepiece) of `ctx` on `encoder`, the
   // scene pass's.
   void DrawSights(const FrameContext& ctx,
@@ -284,6 +314,8 @@ struct RendererImpl {
   ReticlePass reticle_pass_;
   ScopeLensPass scope_lens_pass_;
   MotionBlurPass motion_blur_pass_;
+  MotionVectorPass motion_vector_pass_;
+  TemporalScalerPass temporal_scaler_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;
   OverlayPass overlay_pass_;
@@ -301,6 +333,14 @@ struct RendererImpl {
   uint64_t viewport_resized_at_ = 0;
   std::vector<Readback> readbacks_;
   uint64_t next_readback_ticket_ = 1;
+
+  // The upscaling mode the targets are configured for.
+  Upscaling upscaling_ = Upscaling::kOff;
+  // Counts the frames recorded with the scaler: the jitter phase.
+  uint64_t temporal_frame_ = 0;
+  // False until a frame was recorded with the current targets, and after a
+  // frame was skipped: the scaler's history is not the next frame's past.
+  bool temporal_history_valid_ = false;
 
   std::array<Frame, kFramesInFlight> frames_;
   size_t frame_index_ = 0;

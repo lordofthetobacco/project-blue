@@ -1,5 +1,7 @@
 #include "render/samplers.h"
 
+#include <cstddef>
+
 #include "render/metal_check.h"
 
 namespace blue::render {
@@ -42,7 +44,10 @@ Samplers::Samplers(const MetalContext& context) {
   MTLSamplerDescriptor* const material = SamplerDescriptor(
       MTLSamplerMinMagFilterLinear, MTLSamplerAddressModeRepeat, @"Material");
   material.maxAnisotropy = kMaterialAnisotropy;
-  material_ = CreateSampler(device, material);
+  for (size_t step = 0; step < kTextureLodBiasStepCount; ++step) {
+    material.lodBias = TextureLodBiasOfStep(step);  // Step 0: 0, the default.
+    material_[step] = CreateSampler(device, material);
+  }
 
   linear_clamp_ = CreateSampler(
       device, SamplerDescriptor(MTLSamplerMinMagFilterLinear,

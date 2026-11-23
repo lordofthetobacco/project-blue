@@ -40,6 +40,8 @@ struct GpuPointLight {
 // in src/render/frame_uniforms.h (the C++ side asserts every offset; float4
 // and float4x4 members leave no padding, so the layouts are identical).
 struct FrameUniforms {
+    // viewProj, projection and their inverses are what is rasterized: with the
+    // temporal scaler they carry the frame's sub-pixel jitter.
     metal::float4x4 viewProj;
     metal::float4x4 view;                       // World to camera view space.
     metal::float4x4 projection;                 // Reversed-Z, infinite far.
@@ -60,11 +62,13 @@ struct FrameUniforms {
                                                 // z: max prefiltered mip, w: 1 if bound
     uint4 pointLightCount;                      // x: valid entries of pointLights
     GpuPointLight pointLights[kMaxPointLights]; // Culled on the CPU, unshadowed.
-    metal::float4x4 previousViewProj;           // Last frame's viewProj (motion blur).
+    metal::float4x4 previousViewProj;           // Last frame's unjitteredViewProj (motion).
     float4 motionBlur;                          // x: blur scale (0: off), y: max blur
                                                 // length (px), z: max radius (px)
+    metal::float4x4 unjitteredViewProj;         // viewProj without the jitter (motion).
+    float4 jitter;                              // xy: jitter, render pixels (x right, y down)
 };
-static_assert(sizeof(FrameUniforms) == 1984,
+static_assert(sizeof(FrameUniforms) == 2064,
               "FrameUniforms must match src/render/frame_uniforms.h");
 
 // The frame's resources, gathered by the entry point (see the top of this

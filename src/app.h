@@ -52,6 +52,7 @@
 #include "weapon/weapon_def.h"
 #include "weapon/weapon_item.h"
 #include "weapon/weapon_throw.h"
+#include "world/draw_history.h"
 #include "world/gpu_backend.h"
 #include "world/prefab_cache.h"
 #include "world/prefab_pose.h"
@@ -434,6 +435,10 @@ class App {
   std::optional<weapon::ScopeViewState> scope_state_;
   // This frame's weapon draw transforms for weapon_motion_; reused.
   std::vector<glm::mat4> weapon_transforms_;
+  // Last frame's camera and transforms of what moves in the world (physics
+  // bodies, animated prefabs, dropped weapons), for the motion vectors of
+  // the temporal scaler. Cut whenever the view jumps.
+  world::DrawHistory draw_history_;
   EffectMesh effect_cube_;
   // Ring buffer of the transforms of the most recent bullet holes on static
   // surfaces, each a small tile of the effect cube: the first

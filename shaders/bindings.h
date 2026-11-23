@@ -68,6 +68,10 @@ enum FunctionConstantIndex {
   kConstantAlphaMask = 0,         // mesh.frag.metal: alpha-tested material.
   kConstantDoubleSided = 1,       // mesh.frag.metal: flip back-face normals.
   kConstantSelectionVisible = 2,  // selection_mask.frag.metal: depth tested.
+  // line.frag.metal, selection_mask.frag.metal: the depth test is done in
+  // the shader against the scene depth texture (kTextureInput0), for an
+  // overlay whose target is not the size of the scene depth.
+  kConstantSampledDepth = 3,
 };
 
 // Vertex attribute indices of asset::Vertex (and of LineVertex, which has a

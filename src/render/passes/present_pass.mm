@@ -45,10 +45,11 @@ void PresentPass::BindTargets(const RenderTargets& targets,
 
 void PresentPass::Record(const FrameContext& ctx,
                          const PresentTarget& target) const {
-  const core::Extent2D extent = ctx.targets.extent();
+  const core::Extent2D extent = ctx.targets.output_extent();
   const PresentConstants constants{
       .decode_srgb = srgb_output_ ? 1 : 0,
-      .fxaa = ctx.view.post.fxaa_enabled ? 1 : 0,
+      // Not after the temporal scaler: it is the anti-aliasing then.
+      .fxaa = ctx.view.post.fxaa_enabled && !ctx.temporal ? 1 : 0,
       .texel_width = 1.0f / static_cast<float>(extent.width),
       .texel_height = 1.0f / static_cast<float>(extent.height),
   };

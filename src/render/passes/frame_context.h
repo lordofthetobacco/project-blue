@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <span>
 
+#include <glm/vec2.hpp>
+
 #include "camera/frustum.h"
 #include "core/extent.h"
 #include "lighting/cascades.h"
@@ -35,6 +37,15 @@ struct FrameContext {
   FrameView frame_view = FrameView::kMain;
   const SceneView& view;
   const RenderTargets& targets;
+  // Whether the temporal scaler runs in this frame (never for the scope
+  // view): the scene is then rendered with `jitter`, motion vectors and the
+  // reactive mask are written, and targets.post_hdr() is the scaler's
+  // output.
+  bool temporal = false;
+  // The sub-pixel offset the scene is rasterized with, in pixels of the
+  // render target (x right, y down; render/temporal_math.h). Zero unless
+  // `temporal`.
+  glm::vec2 jitter{0.0f};
   // What the camera passes (DepthPrepass, the scene pass and what is drawn
   // inside it) render into, from the top-left corner: targets.hdr(),
   // targets.depth() and targets.extent() for the main view; a scope's

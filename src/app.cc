@@ -75,6 +75,17 @@ constexpr float kNearPlane = 0.02f;
 constexpr float kMaxSimulationStep = 0.1f;
 constexpr float kSensitivityStep = 1.15f;
 
+// The runs of draw items draw_history_ follows from frame to frame.
+enum class DrawRun : uint64_t {
+  kWorld = 1,          // Every draw of the world; id: World::draw_layout().
+  kDroppedWeapon = 2,  // One dropped weapon's draws; id: DroppedWeapon::id.
+};
+
+// Returns the key of run `id` of `kind` for world::DrawHistory::Track().
+constexpr uint64_t DrawRunKey(DrawRun kind, uint64_t id) {
+  return (static_cast<uint64_t>(kind) << 56) | (id & ((uint64_t{1} << 56) - 1));
+}
+
 constexpr float kPushReach = 100.0f;   // m
 constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
 // How far below the player start the floor is looked for when placing the
@@ -102,6 +113,13 @@ constexpr std::array<StartingWeapon, 2> kStartingWeapons{{
     {"glock17.pbo", "glock17"},
     {"m16.pbo", "m16"},
 }};
+
+// The game's anti-aliasing unless changed in the overlay: the temporal
+// scaler at the output resolution (TAA). It resolves the sub-pixel detail
+// FXAA can only blur (thin weapon edges, distant geometry) and costs no
+// resolution; the upscaling modes trade sharpness for speed and are a
+// choice for whoever needs the frame time.
+constexpr render::Upscaling kDefaultUpscaling = render::Upscaling::kNative;
 
 // Constant ambient light added to the image-based lighting (the value
 // scenes had before .mscn).
@@ -478,6 +496,7 @@ App::App(const CliOptions& options,
   effect_cube_ = {.id = renderer_.UploadMesh(cube), .bounds = cube.bounds};
   tracer_material_ = renderer_.CreateMaterial(TracerMaterial());
   impact_material_ = renderer_.CreateMaterial(ImpactMaterial());
+  post_settings_.upscaling = kDefaultUpscaling;
   settings_ = input::LoadInputSettings(settings_path_);
   input_.set_bindings(settings_.bindings);
   help_text_ = BuildHelpText(settings_.bindings);
@@ -803,6 +822,7 @@ void App::PlacePlayerAtStart() {
                   glm::vec3(0.0f, player_.tuning().eye_height_standing, 0.0f);
 
   weapon_motion_.Invalidate();  // The view jumps.
+  draw_history_.Cut();
   if (player_.spawned()) {
     player_.Teleport(feet, look);
     return;
@@ -822,6 +842,7 @@ void App::PlaceDebugCameraAtStart() {
   const scene::PlayerStart& start = scene_.player_start;
   camera_.SetPose(start.position,
                   {.yaw = start.yaw_radians, .pitch = start.pitch_radians});
+  draw_history_.Cut();  // The view jumps (when it is the debug camera's).
 }
 
 void App::RebuildPhysics() {
@@ -1639,6 +1660,7 @@ void App::CycleViewMode() {
       break;
   }
   camera_.set_mode(CameraModeFor(view_mode_));
+  draw_history_.Cut();  // Another camera, or the same one from elsewhere.
 }
 
 App::ViewPose App::CurrentView() const {
@@ -1831,6 +1853,8 @@ void App::AppendDroppedWeaponDraws() {
     AppendRestWeaponDraws(weapon_library_.def(item.weapon.def),
                           view_of(item.weapon.def),
                           weapon::DroppedWeapons::Matrix(item));
+    draw_history_.Track(DrawRunKey(DrawRun::kDroppedWeapon, item.id),
+                        std::span(draws_).subspan(first));
     if (focus && focus->kind == interact::InteractableKind::kDroppedWeapon &&
         focus->id == item.id) {
       for (size_t i = first; i < draws_.size(); ++i) {
@@ -1927,8 +1951,13 @@ render::SceneView App::BuildSceneView(float frame_seconds) {
   const float aspect = static_cast<float>(extent.width) /
                        static_cast<float>(std::max(extent.height, 1u));
 
+  draw_history_.BeginFrame();
   draws_.clear();
   world_.AppendDraws(draws_);
+  // What moves in the world (physics bodies, playing clips) gets its
+  // previous transform, for the motion vectors of the temporal scaler.
+  draw_history_.Track(DrawRunKey(DrawRun::kWorld, world_.draw_layout()),
+                      draws_);
   // The focused scene weapon is outlined like a dropped one.
   scene_selection_.clear();
   if (const std::optional<interact::Focus>& focus = interaction_focus_.focus();
@@ -1955,8 +1984,9 @@ render::SceneView App::BuildSceneView(float frame_seconds) {
   view.camera.near_plane = kNearPlane;
   view.camera.projection = camera::ReversedInfinitePerspective(
       view.camera.vertical_fov_radians, aspect, kNearPlane);
-  view.camera.previous_view_projection =
-      view.camera.projection * view.camera.view;
+  // Sets the previous view-projection; the weapon's history, when valid,
+  // sets the same one again below.
+  draw_history_.TrackCamera(view.camera, extent);
   if (weapon_drawn) {
     ApplyWeaponMotion(std::span(draws_).subspan(weapon_first, weapon_count),
                       frame_seconds, extent, view.camera);

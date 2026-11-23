@@ -10,6 +10,8 @@ const char* GpuScopeName(GpuScope scope) {
       return "shadow";
     case GpuScope::kDepthPrepass:
       return "depth";
+    case GpuScope::kMotionVectors:
+      return "vectors";
     case GpuScope::kSsao:
       return "ssao";
     case GpuScope::kScopeView:
@@ -18,6 +20,8 @@ const char* GpuScopeName(GpuScope scope) {
       return "scene";
     case GpuScope::kMotionBlur:
       return "motion";
+    case GpuScope::kUpscale:
+      return "upscale";
     case GpuScope::kBloom:
       return "bloom";
     case GpuScope::kTonemap:

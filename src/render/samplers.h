@@ -3,9 +3,12 @@
 
 #include "render/metal_types.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 #include "render/metal_context.h"
+#include "render/temporal_math.h"
 
 namespace blue::render {
 
@@ -24,7 +27,14 @@ class Samplers {
   Samplers& operator=(const Samplers&) = delete;
 
   // Material textures: trilinear, repeating, anisotropic.
-  [[nodiscard]] id<MTLSamplerState> material() const { return material_; }
+  [[nodiscard]] id<MTLSamplerState> material() const { return material_[0]; }
+  // Same, with the mip level shifted by the supported bias nearest to
+  // `lod_bias` (TextureLodBiasStep() in render/temporal_math.h): negative
+  // biases sample sharper mips, for a scene rendered below the resolution
+  // it is shown at (TextureLodBias()).
+  [[nodiscard]] id<MTLSamplerState> material(float lod_bias) const {
+    return material_[TextureLodBiasStep(lod_bias)];
+  }
   // Full-screen inputs and render targets: bilinear (and linear between
   // mips), clamped to the edge.
   [[nodiscard]] id<MTLSamplerState> linear_clamp() const {
@@ -41,7 +51,8 @@ class Samplers {
   [[nodiscard]] id<MTLSamplerState> shadow() const { return shadow_; }
 
  private:
-  id<MTLSamplerState> material_ = nil;
+  // By TextureLodBiasStep().
+  std::array<id<MTLSamplerState>, kTextureLodBiasStepCount> material_{};
   id<MTLSamplerState> linear_clamp_ = nil;
   id<MTLSamplerState> nearest_clamp_ = nil;
   id<MTLSamplerState> shadow_ = nil;

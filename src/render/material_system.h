@@ -123,9 +123,18 @@ class MaterialSystem {
   // nothing; it stays so that the renderer's frame protocol is unchanged.
   void BeginFrame(uint64_t /*frame_serial*/) {}
 
+  // Sets the LOD bias of the material sampler that later Bind() calls
+  // bind (Samplers::material(float)): 0, the default, or the negative bias
+  // of a view rendered below the resolution it is shown at
+  // (TextureLodBias() in render/temporal_math.h). The renderer sets it
+  // before recording each view.
+  void SetTextureLodBias(float lod_bias) { lod_bias_ = lod_bias; }
+  [[nodiscard]] float texture_lod_bias() const { return lod_bias_; }
+
   // Binds the parameters, the five slot textures and the material sampler
-  // (kSamplerMaterial) of material Resolve(`id`) in the argument table of
-  // `rec`. kDefaultMaterial must have been created.
+  // (kSamplerMaterial, with the bias of SetTextureLodBias()) of material
+  // Resolve(`id`) in the argument table of `rec`. kDefaultMaterial must
+  // have been created.
   void Bind(const Recording& rec, MaterialId id) const;
 
   // The accessors below take a valid id (< count()); not checked. A
@@ -164,6 +173,7 @@ class MaterialSystem {
   const TextureCache& textures_;
   const Samplers& samplers_;
   std::vector<Material> materials_;
+  float lod_bias_ = 0.0f;
 };
 
 }  // namespace blue::render

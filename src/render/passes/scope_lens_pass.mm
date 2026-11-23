@@ -121,6 +121,33 @@ ScopeLensPass::ScopeLensPass(const MetalContext& context,
         pipeline_ = std::move(pipeline).value();
         return std::nullopt;
       });
+  programs.Add(
+      core::JoinPath(shader_dir, "scope_lens.vert.metal"),
+      core::JoinPath(shader_dir, "scope_lens_reactive.frag.metal"),
+      [this, &context](const shader::ShaderLibrary& vertex,
+                       const shader::ShaderLibrary* fragment)
+          -> std::optional<std::string> {
+        // Rasterized and depth tested exactly like the glass. Additive, so
+        // that the quad never erases another sight's mask (the target
+        // saturates at 1).
+        const GraphicsPipelineDesc desc{
+            .vertex = &vertex,
+            .fragment = fragment,
+            .color_format = RenderTargets::kReactiveMaskFormat,
+            .depth_format = RenderTargets::kDepthFormat,
+            .cull_mode = MTLCullModeNone,
+            .depth_compare = MTLCompareFunctionGreaterEqual,
+            .depth_write = false,
+            .blend = BlendMode::kAdditive,
+            .label = "scope lens (reactive mask)",
+        };
+        auto pipeline = Pipeline::Create(context, desc);
+        if (!pipeline.ok()) {
+          return pipeline.error();
+        }
+        reactive_pipeline_ = std::move(pipeline).value();
+        return std::nullopt;
+      });
 }
 
 void ScopeLensPass::BindPicture(id<MTLTexture> picture) { picture_ = picture; }
@@ -141,6 +168,20 @@ void ScopeLensPass::Draw(const FrameContext& ctx,
               vertexStart:0
               vertexCount:kVertexCount];
   ++ctx.stats.draw_calls;
+}
+
+void ScopeLensPass::DrawReactive(const FrameContext& ctx,
+                                 id<MTL4RenderCommandEncoder> encoder) const {
+  if (!ctx.view.scope || picture_ == nil) {
+    return;
+  }
+  // The lens matrix is in the uniforms Draw() wrote for this frame. Not
+  // counted in the stats: draw_calls are the scene's.
+  reactive_pipeline_->Bind(encoder);
+  BindBuffer(ctx.rec, kBufferScopeLens, uniforms_[ctx.frame_index].handle());
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+              vertexStart:0
+              vertexCount:kVertexCount];
 }
 
 }  // namespace blue::render

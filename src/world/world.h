@@ -121,6 +121,12 @@ class World {
   // Appends the draw items of every visible placement. Does not allocate
   // once `out` has grown to its steady size.
   void AppendDraws(std::vector<render::DrawItem>& out) const;
+  // Changes whenever AppendDraws() may append other items, or the same
+  // ones in another order, than before (Build(), HideInstance()); while it
+  // stays the same, the n-th item appended is the same mesh of the same
+  // placement every frame. The key under which a DrawHistory follows the
+  // world's draws from frame to frame. Never 0.
+  [[nodiscard]] uint64_t draw_layout() const { return draw_layout_; }
   // Appends to `out` the indices (into the vector AppendDraws() appended to,
   // whose size was `first_draw` before) of the draws that belong to the
   // instances in `selection` or their descendants. Allocates nothing but
@@ -217,6 +223,7 @@ class World {
   std::vector<uint32_t> light_offsets_;
   // Placements with a playing clip (indices), rebuilt when clips start.
   std::vector<uint32_t> animated_;
+  uint64_t draw_layout_ = 1;  // See draw_layout().
 };
 
 }  // namespace blue::world

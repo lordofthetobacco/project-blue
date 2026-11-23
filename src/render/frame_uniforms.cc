@@ -13,6 +13,7 @@
 
 #include "camera/frustum.h"
 #include "render/motion_blur_math.h"
+#include "render/temporal_math.h"
 
 namespace blue::render {
 
@@ -43,7 +44,10 @@ static_assert(offsetof(FrameUniforms, previous_view_proj) ==
               880 + 32 * kMaxPointLights);
 static_assert(offsetof(FrameUniforms, motion_blur) ==
               944 + 32 * kMaxPointLights);
-static_assert(sizeof(FrameUniforms) == 960 + 32 * kMaxPointLights);
+static_assert(offsetof(FrameUniforms, unjittered_view_proj) ==
+              960 + 32 * kMaxPointLights);
+static_assert(offsetof(FrameUniforms, jitter) == 1024 + 32 * kMaxPointLights);
+static_assert(sizeof(FrameUniforms) == 1040 + 32 * kMaxPointLights);
 
 // Shadow lookups move along the surface normal by this many shadow texels.
 constexpr float kShadowNormalOffsetTexels = 1.5f;
@@ -118,15 +122,25 @@ glm::vec4 MotionBlurUniform(const SceneView& view, core::Extent2D extent) {
 
 FrameUniforms MakeFrameUniforms(const SceneView& view,
                                 std::span<const lighting::Cascade> cascades,
-                                bool shadows, core::Extent2D extent) {
-  const glm::mat4 view_proj = view.camera.projection * view.camera.view;
+                                bool shadows, core::Extent2D extent,
+                                glm::vec2 jitter_pixels) {
+  const glm::mat4 unjittered_view_proj =
+      view.camera.projection * view.camera.view;
+  // Without jitter the very matrices of the camera, not a product that
+  // could differ from them in the last bit.
+  const bool jittered = jitter_pixels != glm::vec2(0.0f);
+  const glm::mat4 projection =
+      jittered ? JitterProjection(view.camera.projection, jitter_pixels, extent)
+               : view.camera.projection;
+  const glm::mat4 view_proj =
+      jittered ? projection * view.camera.view : unjittered_view_proj;
   const glm::vec2 size(static_cast<float>(extent.width),
                        static_cast<float>(extent.height));
   FrameUniforms uniforms{
       .view_proj = view_proj,
       .view = view.camera.view,
-      .projection = view.camera.projection,
-      .inverse_projection = glm::inverse(view.camera.projection),
+      .projection = projection,
+      .inverse_projection = glm::inverse(projection),
       .inverse_view_proj = glm::inverse(view_proj),
       .camera_position = glm::vec4(view.camera.position, 1.0f),
       .ambient_color = glm::vec4(view.ambient, 0.0f),
@@ -145,8 +159,11 @@ FrameUniforms MakeFrameUniforms(const SceneView& view,
       .point_lights = {},
       .previous_view_proj = view.camera.previous_view_projection,
       .motion_blur = MotionBlurUniform(view, extent),
+      .unjittered_view_proj = unjittered_view_proj,
+      .jitter = glm::vec4(jitter_pixels, 0.0f, 0.0f),
   };
-  FillPointLights(view.point_lights, camera::Frustum(view_proj),
+  // Culled like everything else: without the jitter.
+  FillPointLights(view.point_lights, camera::Frustum(unjittered_view_proj),
                   view.camera.position, uniforms);
   if (shadows) {
     for (size_t i = 0; i < cascades.size() && i < lighting::kCascadeCount;

@@ -50,7 +50,7 @@ void BloomPass::BindTargets(const RenderTargets& targets,
                             const Samplers& samplers) {
   for (uint32_t level = 0; level < targets.bloom_levels(); ++level) {
     const std::array<id<MTLTexture>, 1> source{
-        level == 0 ? targets.hdr().texture()
+        level == 0 ? targets.post_hdr().texture()
                    : targets.bloom_mip_view(level - 1)};
     downsample_.SetInputs(level, source, samplers.linear_clamp());
     if (level > 0) {
@@ -68,7 +68,8 @@ void BloomPass::Record(const FrameContext& ctx) const {
 
   for (uint32_t level = 0; level < levels; ++level) {
     const core::Extent2D source =
-        level == 0 ? targets.extent() : targets.bloom_mip_extent(level - 1);
+        level == 0 ? targets.output_extent()
+                   : targets.bloom_mip_extent(level - 1);
     const DownsampleConstants constants{
         .source_texel_x = 1.0f / static_cast<float>(source.width),
         .source_texel_y = 1.0f / static_cast<float>(source.height),

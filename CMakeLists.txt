@@ -426,12 +426,14 @@ add_library(blue_render STATIC
     src/render/samplers.mm
     src/render/shader_programs.mm
     src/render/staging_upload.mm
+    src/render/temporal_math.cc
     src/render/swapchain.mm
     src/render/texture_cache.mm
     src/render/texture_types.cc
     src/render/passes/bloom_pass.mm
     src/render/passes/depth_prepass.mm
     src/render/passes/mesh_pass.mm
+    src/render/passes/motion_vector_pass.mm
     src/render/passes/motion_blur_pass.mm
     src/render/passes/overlay_pass.mm
     src/render/passes/present_pass.mm
@@ -441,6 +443,7 @@ add_library(blue_render STATIC
     src/render/passes/shadow_pass.mm
     src/render/passes/skybox_pass.mm
     src/render/passes/ssao_pass.mm
+    src/render/passes/temporal_scaler_pass.mm
     src/render/passes/tonemap_pass.mm
     src/render/passes/ui_pass.mm
 )
@@ -466,6 +469,7 @@ target_link_libraries(blue_render PUBLIC
     glm::glm
     imgui
     "-framework Metal"
+    "-framework MetalFX"
     "-framework QuartzCore"
     "-framework CoreGraphics"
     "-framework Foundation"
@@ -486,6 +490,7 @@ target_link_libraries(blue_ui PUBLIC blue_render imgui)
 # upload per .pbo), scenes resolved into posed prefabs with overrides, lights,
 # draw items, picking, and physics bodies from cooked shapes.
 add_library(blue_world STATIC
+    src/world/draw_history.cc
     src/world/gpu_backend.cc
     src/world/prefab_cache.cc
     src/world/prefab_pose.cc

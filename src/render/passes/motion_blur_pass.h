@@ -21,11 +21,12 @@
 namespace blue::render {
 
 // Per-object motion blur of the draw items that have a previous_transform
-// (the first-person weapon), on the linear HDR image before bloom. The world
-// is never blurred: an item's velocity is its motion relative to the camera,
-// so a weapon rigidly following the view stays sharp however fast the
-// player turns. Blur lengths and their frame-rate independence are defined
-// in render/motion_blur_math.h. Four steps, all restricted to `area`
+// and motion_blur (the first-person weapon), on the linear HDR image before
+// bloom, at the render resolution. The world is never blurred: an item's
+// velocity is its motion relative to the camera, so a weapon rigidly
+// following the view stays sharp however fast the player turns. Blur
+// lengths and their frame-rate independence are defined in
+// render/motion_blur_math.h. Four steps, all restricted to `area`
 // (FindArea(): the screen rectangle of the moving items' bounds, clipped to
 // the near plane, grown by the largest blur radius), since nothing outside
 // it can change:
@@ -67,7 +68,8 @@ class MotionBlurPass {
 
   // Returns the pixels the blur may change this frame, or nullopt when there
   // is nothing to do: the blur is off or its scale is 0 (strength, frame
-  // duration), or no visible draw-list entry has a previous_transform.
+  // duration), or no visible draw-list entry is blurred (a
+  // previous_transform and motion_blur).
   [[nodiscard]] static std::optional<MTLScissorRect> FindArea(
       const FrameContext& ctx);
 

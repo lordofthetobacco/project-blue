@@ -135,7 +135,7 @@ void MaterialSystem::Bind(const Recording& rec, MaterialId id) const {
   for (NSUInteger slot = 0; slot < kMaterialTextureCount; ++slot) {
     BindTexture(rec, kTextureBaseColor + slot, gpu.textures[slot]);
   }
-  BindSampler(rec, kSamplerMaterial, samplers_.material());
+  BindSampler(rec, kSamplerMaterial, samplers_.material(lod_bias_));
 }
 
 std::array<id<MTLTexture>, kMaterialTextureCount> MaterialSystem::SlotTextures(

@@ -25,8 +25,8 @@
 //   texture after the encoder that rendered or copied into it. Both Begin*()
 //   functions therefore encode a consumer barrier first: the fragment stage
 //   of a render encoder, and the copies of a copy encoder, wait until all
-//   fragment, blit and dispatch work of the encoders opened earlier on the
-//   queue has finished and is visible (barrierAfterQueueStages:
+//   fragment, blit, dispatch and machine-learning work of the encoders
+//   opened earlier on the queue has finished and is visible (barrierAfterQueueStages:
 //   beforeStages:visibilityOptions:MTL4VisibilityOptionDevice). This covers
 //   every case the renderer has: an attachment loaded after another pass
 //   wrote it, a render target sampled by a later pass, a copy from a render
@@ -75,6 +75,16 @@ namespace blue::render {
 // null.
 [[nodiscard]] id<MTL4ComputeCommandEncoder> BeginCopy(const Recording& rec,
                                                       const char* label);
+
+// Makes everything recorded so far on the queue visible to work that is NOT
+// encoded through this header and so has no consumer barrier of its own: an
+// effect that records its own encoders into the command buffer (the MetalFX
+// scaler). Records a small encoder that waits for all earlier work, holds
+// back every stage of the encoders after it until then, and updates `fence`
+// (handed to the effect, which waits on it) when non-nil. `label` must not
+// be null.
+void SyncForExternalEncoding(const Recording& rec, id<MTLFence> fence,
+                             const char* label);
 
 // Binds `texture` at texture index `index` (shaders/bindings.h).
 inline void BindTexture(const Recording& rec, NSUInteger index,

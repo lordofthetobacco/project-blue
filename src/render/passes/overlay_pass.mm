@@ -16,6 +16,7 @@
 #include "core/path.h"
 #include "render/debug_lines.h"
 #include "render/encoders.h"
+#include "render/frame_uniforms.h"
 #include "render/passes/scene_pass.h"
 #include "shaders/bindings.h"
 
@@ -50,12 +51,22 @@ MTLVertexDescriptor* LineVertexDescriptor() {
   return descriptor;
 }
 
-// Begins rendering into `color` (loaded, or cleared to 0) with the scene
-// depth as a depth attachment that nothing writes, on the scene viewport so
-// that lines and the mask land on the same pixels as the scene depth.
+// Fragment function constants of the overlay shaders: element i is function
+// constant i.
+using OverlayConstants = std::array<bool, kConstantSampledDepth + 1>;
+
+// Begins rendering into `color` (loaded, or cleared to 0), an image of the
+// output extent. Without the temporal scaler the scene depth is its depth
+// attachment (which nothing writes) and the frame's globals are bound, so
+// that lines and the mask land on the same pixels as the scene depth. With
+// it the scene depth has another size and is jittered: there is no depth
+// attachment, the globals' uniforms are replaced by unjittered ones for the
+// output extent, and the scene depth is bound at kTextureInput0 for the
+// shaders to test against (pipelines with kConstantSampledDepth).
 id<MTL4RenderCommandEncoder> BeginOverlayRendering(const FrameContext& ctx,
                                                    id<MTLTexture> color,
                                                    MTLLoadAction color_load,
+                                                   const Samplers& samplers,
                                                    const char* label) {
   MTL4RenderPassDescriptor* descriptor =
       [[MTL4RenderPassDescriptor alloc] init];
@@ -65,16 +76,27 @@ id<MTL4RenderCommandEncoder> BeginOverlayRendering(const FrameContext& ctx,
   color_attachment.loadAction = color_load;
   color_attachment.storeAction = MTLStoreActionStore;
   color_attachment.clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
-  MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
-  depth.texture = ctx.targets.depth().texture();
-  depth.loadAction = MTLLoadActionLoad;
-  // Unchanged by the overlay; kept for its next encoder.
-  depth.storeAction = MTLStoreActionStore;
+  if (!ctx.temporal) {
+    MTLRenderPassDepthAttachmentDescriptor* depth = descriptor.depthAttachment;
+    depth.texture = ctx.targets.depth().texture();
+    depth.loadAction = MTLLoadActionLoad;
+    // Unchanged by the overlay; kept for its next encoder.
+    depth.storeAction = MTLStoreActionStore;
+  }
 
   const id<MTL4RenderCommandEncoder> encoder =
       BeginRenderPass(ctx.rec, descriptor, label);
-  SetSceneViewport(encoder, ctx.targets.extent());
+  const core::Extent2D extent = ctx.targets.output_extent();
+  SetSceneViewport(encoder, extent);
   ctx.globals.Bind(ctx.rec, ctx.frame_index);
+  if (ctx.temporal) {
+    // Only the camera matrices and the screen size are read by the overlay
+    // shaders.
+    BindConstants(ctx.rec, kBufferFrame,
+                  MakeFrameUniforms(ctx.view, {}, /*shadows=*/false, extent));
+    BindTexture(ctx.rec, kTextureInput0, ctx.targets.depth().texture());
+    BindSampler(ctx.rec, kSamplerInput, samplers.nearest_clamp());
+  }
   return encoder;
 }
 
@@ -82,9 +104,11 @@ id<MTL4RenderCommandEncoder> BeginOverlayRendering(const FrameContext& ctx,
 
 OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
                          const std::string& shader_dir,
+                         const Samplers& samplers,
                          const std::vector<Mesh>& meshes)
     : context_(context),
       meshes_(meshes),
+      samplers_(samplers),
       outline_(context, programs, shader_dir,
                FullscreenPassDesc{
                    .fragment_path = core::JoinPath(
@@ -101,34 +125,50 @@ OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
       [this, &context](
           const shader::ShaderLibrary& vertex,
           const shader::ShaderLibrary* fragment) -> std::optional<std::string> {
-        const auto make = [&](MTLCompareFunction compare, const char* label) {
+        // `depth`: with the scene depth attached; else for the encoder
+        // without one (temporal scaler), where `tested` is done in the
+        // shader.
+        const auto make = [&](bool depth, bool tested, const char* label) {
+          OverlayConstants constants{};
+          constants[kConstantSampledDepth] = !depth && tested;
           return Pipeline::Create(
-              context, GraphicsPipelineDesc{
-                           .vertex = &vertex,
-                           .fragment = fragment,
-                           .vertex_descriptor = LineVertexDescriptor(),
-                           .color_format = RenderTargets::kLdrFormat,
-                           .depth_format = RenderTargets::kDepthFormat,
-                           .cull_mode = MTLCullModeNone,
-                           .depth_compare = compare,
-                           .depth_write = false,
-                           .blend = BlendMode::kAlpha,
-                           .topology = MTLPrimitiveTopologyClassLine,
-                           .label = label,
-                       });
+              context,
+              GraphicsPipelineDesc{
+                  .vertex = &vertex,
+                  .fragment = fragment,
+                  .fragment_constants = constants,
+                  .vertex_descriptor = LineVertexDescriptor(),
+                  .color_format = RenderTargets::kLdrFormat,
+                  .depth_format = depth ? RenderTargets::kDepthFormat
+                                        : MTLPixelFormatInvalid,
+                  .cull_mode = MTLCullModeNone,
+                  // Reversed Z: nearer is greater.
+                  .depth_compare = tested ? MTLCompareFunctionGreaterEqual
+                                          : MTLCompareFunctionAlways,
+                  .depth_write = false,
+                  .blend = BlendMode::kAlpha,
+                  .topology = MTLPrimitiveTopologyClassLine,
+                  .label = label,
+              });
         };
-        // Reversed Z: nearer is greater.
-        auto tested =
-            make(MTLCompareFunctionGreaterEqual, "debug lines (depth tested)");
-        if (!tested.ok()) {
-          return tested.error();
+        // All of them are created before any is replaced.
+        std::array<std::unique_ptr<Pipeline>, 2> tested;
+        std::array<std::unique_ptr<Pipeline>, 2> top;
+        for (const bool depth : {false, true}) {
+          auto tested_lines = make(depth, /*tested=*/true,
+                                   "debug lines (depth tested)");
+          if (!tested_lines.ok()) {
+            return tested_lines.error();
+          }
+          auto top_lines = make(depth, /*tested=*/false, "debug lines (on top)");
+          if (!top_lines.ok()) {
+            return top_lines.error();
+          }
+          tested[depth ? 1 : 0] = std::move(tested_lines).value();
+          top[depth ? 1 : 0] = std::move(top_lines).value();
         }
-        auto top = make(MTLCompareFunctionAlways, "debug lines (on top)");
-        if (!top.ok()) {
-          return top.error();
-        }
-        tested_lines_ = std::move(tested).value();
-        top_lines_ = std::move(top).value();
+        tested_lines_ = std::move(tested);
+        top_lines_ = std::move(top);
         return std::nullopt;
       });
   programs.Add(
@@ -137,11 +177,10 @@ OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
       [this, &context](
           const shader::ShaderLibrary& vertex,
           const shader::ShaderLibrary* fragment) -> std::optional<std::string> {
-        const auto make = [&](bool visible) {
-          // Element i is function constant i; only kConstantSelectionVisible
-          // is declared by selection_mask.frag.metal.
-          std::array<bool, kConstantSelectionVisible + 1> constants{};
+        const auto make = [&](bool depth, bool visible) {
+          OverlayConstants constants{};
           constants[kConstantSelectionVisible] = visible;
+          constants[kConstantSampledDepth] = !depth && visible;
           // depth.vert.metal's invariant position matches the depth pre-pass
           // exactly, so the visible test can compare GreaterEqual.
           return Pipeline::Create(
@@ -152,7 +191,8 @@ OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
                   .fragment_constants = constants,
                   .vertex_descriptor = MeshVertexDescriptor(),
                   .color_format = RenderTargets::kSelectionMaskFormat,
-                  .depth_format = RenderTargets::kDepthFormat,
+                  .depth_format = depth ? RenderTargets::kDepthFormat
+                                        : MTLPixelFormatInvalid,
                   .cull_mode = MTLCullModeNone,
                   .depth_compare = visible ? MTLCompareFunctionGreaterEqual
                                            : MTLCompareFunctionAlways,
@@ -161,16 +201,22 @@ OverlayPass::OverlayPass(const MetalContext& context, ShaderPrograms& programs,
                                    : "selection mask (hidden)",
               });
         };
-        auto hidden = make(/*visible=*/false);
-        if (!hidden.ok()) {
-          return hidden.error();
+        std::array<std::unique_ptr<Pipeline>, 2> hidden;
+        std::array<std::unique_ptr<Pipeline>, 2> visible;
+        for (const bool depth : {false, true}) {
+          auto mask_hidden = make(depth, /*visible=*/false);
+          if (!mask_hidden.ok()) {
+            return mask_hidden.error();
+          }
+          auto mask_visible = make(depth, /*visible=*/true);
+          if (!mask_visible.ok()) {
+            return mask_visible.error();
+          }
+          hidden[depth ? 1 : 0] = std::move(mask_hidden).value();
+          visible[depth ? 1 : 0] = std::move(mask_visible).value();
         }
-        auto visible = make(/*visible=*/true);
-        if (!visible.ok()) {
-          return visible.error();
-        }
-        mask_hidden_ = std::move(hidden).value();
-        mask_visible_ = std::move(visible).value();
+        mask_hidden_ = std::move(hidden);
+        mask_visible_ = std::move(visible);
         return std::nullopt;
       });
 }
@@ -201,7 +247,7 @@ void OverlayPass::Record(const FrameContext& ctx) {
     const OutlineConstants constants{.color = ctx.view.selection_color};
     outline_.Record(ctx.rec,
                     {.texture = ctx.targets.ldr().texture(),
-                     .extent = ctx.targets.extent(),
+                     .extent = ctx.targets.output_extent(),
                      .load_action = MTLLoadActionLoad},
                     0, ConstantBytes(constants));
     ++ctx.stats.draw_calls;
@@ -235,8 +281,9 @@ void OverlayPass::UploadLines(const FrameContext& ctx) {
 }
 
 void OverlayPass::RecordLines(const FrameContext& ctx) const {
-  const id<MTL4RenderCommandEncoder> encoder = BeginOverlayRendering(
-      ctx, ctx.targets.ldr().texture(), MTLLoadActionLoad, "debug lines");
+  const id<MTL4RenderCommandEncoder> encoder =
+      BeginOverlayRendering(ctx, ctx.targets.ldr().texture(),
+                            MTLLoadActionLoad, samplers_, "debug lines");
   BindBuffer(ctx.rec, kBufferVertices,
              line_buffers_[ctx.frame_index].handle());
   const auto draw = [&](const Pipeline& pipeline, size_t first, size_t count) {
@@ -250,17 +297,21 @@ void OverlayPass::RecordLines(const FrameContext& ctx) const {
     ++ctx.stats.draw_calls;
   };
   const size_t tested_count = ctx.view.lines.size();
-  draw(*tested_lines_, 0, tested_count);
-  draw(*top_lines_, tested_count, ctx.view.overlay_lines.size());
+  // Index 1: the pipelines for an encoder with the scene depth attached.
+  const size_t with_depth = ctx.temporal ? 0 : 1;
+  draw(*tested_lines_[with_depth], 0, tested_count);
+  draw(*top_lines_[with_depth], tested_count, ctx.view.overlay_lines.size());
   [encoder endEncoding];
 }
 
 void OverlayPass::RecordSelectionMask(const FrameContext& ctx) const {
   const id<MTL4RenderCommandEncoder> encoder =
       BeginOverlayRendering(ctx, ctx.targets.selection_mask().texture(),
-                            MTLLoadActionClear, "selection mask");
+                            MTLLoadActionClear, samplers_, "selection mask");
+  const size_t with_depth = ctx.temporal ? 0 : 1;
   // Hidden parts first (0.5), then the visible ones overwrite them (1).
-  for (const Pipeline* pipeline : {mask_hidden_.get(), mask_visible_.get()}) {
+  for (const Pipeline* pipeline : {mask_hidden_[with_depth].get(),
+                                   mask_visible_[with_depth].get()}) {
     pipeline->Bind(encoder);
     for (const uint32_t index : ctx.view.selected_draws) {
       if (index >= ctx.view.draws.size()) {
