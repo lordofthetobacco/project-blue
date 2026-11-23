@@ -19,6 +19,7 @@
 #include "lighting/cascades.h"
 #include "material/material.h"
 #include "platform/window.h"
+#include "render/barriers.h"
 #include "render/buffer.h"
 #include "render/draw_list.h"
 #include "render/environment.h"
@@ -83,6 +84,12 @@
 //   present              PresentPass       ldr -> swapchain (FXAA), or ->
 //                                          the editor viewport image
 //   ui                   RecordUiPass      ImGui on the swapchain, -> present
+//   readbacks            (copies)          RequestViewportReadback() /
+//                                          RequestOutputReadback() copies
+//
+// Headless (RendererOptions::window null) there is no surface and no
+// swapchain: an offscreen output image of RendererOptions::headless_extent
+// stands in for the swapchain image (same passes, no acquire, no present).
 //
 // The visible submeshes are culled and sorted once per frame (DrawList) and
 // shared by the depth pre-pass and the mesh pass. Disabled effects
@@ -114,6 +121,23 @@
 
 namespace blue::render {
 
+// How Renderer is created.
+struct RendererOptions {
+  // The window to present to, which must outlive the renderer. Null:
+  // headless (no surface, no swapchain, SDL's video subsystem untouched);
+  // DrawFrame() renders into an offscreen output image instead.
+  const platform::Window* window = nullptr;
+  // GLSL sources, compiled with `shader_mode` (see Renderer()).
+  std::string shader_dir;
+  shader::CompileMode shader_mode = shader::CompileMode::kRelease;
+  AdapterPreference adapter = AdapterPreference::kHighPerformance;
+  // The output image's size when headless (each side at least 1).
+  VkExtent2D headless_extent{1280, 720};
+  // Caps the material sampler's anisotropy; 1 turns anisotropic filtering
+  // off (render tests: it legitimately differs between vendors).
+  float max_anisotropy = kMaterialAnisotropy;
+};
+
 // The editor viewport's offscreen image (Renderer::PrepareViewport()): the
 // tonemapped scene, R8G8B8A8 (_SRGB when the swapchain is), in
 // SHADER_READ_ONLY_OPTIMAL whenever the UI pass samples it.
@@ -125,8 +149,8 @@ struct ViewportImage {
   uint64_t generation = 0;
 };
 
-// A copy of the editor viewport image read back to the CPU
-// (Renderer::RequestViewportReadback()).
+// A copy of the editor viewport image or the window output read back to the
+// CPU (Renderer::RequestViewportReadback(), RequestOutputReadback()).
 struct ViewportPixels {
   uint32_t width = 0;
   uint32_t height = 0;
@@ -143,9 +167,10 @@ enum class ReadbackStatus {
 };
 
 // Draws scenes with a forward PBR pipeline into an HDR target, tonemaps and
-// presents them to a window. Owns meshes, materials and textures. Borrows
-// `window`, which must outlive the renderer. Startup failures are fatal.
-// Neither copyable nor movable. Not thread-safe.
+// presents them to a window (or, headless, into an offscreen output image).
+// Owns meshes, materials and textures. Borrows the window, which must
+// outlive the renderer. Startup failures are fatal. Neither copyable nor
+// movable. Not thread-safe.
 //
 // Two outputs: DrawFrame() presents the scene to the window (the game);
 // PrepareViewport() + DrawViewportFrame() render it into an offscreen image
@@ -159,9 +184,12 @@ class Renderer {
   // stretched, so dragging a panel edge does not stall every frame.
   static constexpr uint64_t kViewportResizeFrames = 4;
 
-  // Compiles the GLSL shaders in `shader_dir` with `shader_mode` and watches
-  // them for changes (see ReloadChangedShaders()). A shader that does not
-  // compile at startup is fatal.
+  // Compiles the GLSL shaders in `options.shader_dir` with
+  // `options.shader_mode` and watches them for changes (see
+  // ReloadChangedShaders()). A shader that does not compile at startup is
+  // fatal.
+  explicit Renderer(const RendererOptions& options);
+  // Same, presenting to `window`.
   Renderer(const platform::Window& window, const std::string& shader_dir,
            shader::CompileMode shader_mode);
   ~Renderer();
@@ -169,7 +197,8 @@ class Renderer {
   Renderer(const Renderer&) = delete;
   Renderer& operator=(const Renderer&) = delete;
 
-  // Renders and presents one frame. `ui` is drawn on top when non-null.
+  // Renders and presents one frame (headless: renders it into the output
+  // image). `ui` is drawn on top when non-null.
   void DrawFrame(const SceneView& view, ImDrawData* ui);
 
   // Editor output. Makes the scene render into an offscreen image of `size`
@@ -195,8 +224,15 @@ class Renderer {
   // device wait; the host-visible buffer lives only until the pixels are
   // taken. A skipped frame (minimized window) delays the copy.
   [[nodiscard]] uint64_t RequestViewportReadback();
-  // Moves the pixels of `ticket` into `pixels` when they are ready
-  // (kReady); otherwise leaves `pixels` alone.
+  // Like RequestViewportReadback(), but copies the final window output of
+  // the next DrawFrame() / DrawViewportFrame() (scene, overlays and UI): the
+  // swapchain image, or the output image when headless. The pixels are
+  // R8G8B8A8 whatever the swapchain's channel order.
+  [[nodiscard]] uint64_t RequestOutputReadback();
+  // Moves the pixels of `ticket` (from either request) into `pixels` when
+  // the GPU has finished the frame that copied them (kReady); otherwise
+  // leaves `pixels` alone. Does not wait: after WaitIdle() a recorded copy
+  // is ready without drawing more frames.
   [[nodiscard]] ReadbackStatus TakeViewportReadback(uint64_t ticket,
                                                     ViewportPixels& pixels);
 
@@ -287,7 +323,8 @@ class Renderer {
     environment_.SetParams(intensity, rotation_radians);
   }
 
-  // Rebuilds the swapchain before the next frame, e.g. after a resize.
+  // Rebuilds the swapchain before the next frame, e.g. after a resize
+  // (ignored when headless).
   void RequestSwapchainRebuild() { swapchain_dirty_ = true; }
   void SetVsync(bool enabled);
 
@@ -306,7 +343,15 @@ class Renderer {
 
   [[nodiscard]] bool vsync() const { return vsync_; }
   [[nodiscard]] const VulkanContext& context() const { return context_; }
-  [[nodiscard]] const Swapchain& swapchain() const { return swapchain_; }
+  [[nodiscard]] bool headless() const { return !swapchain_.has_value(); }
+  // The swapchain; only with a window (not headless()).
+  [[nodiscard]] const Swapchain& swapchain() const { return *swapchain_; }
+  // The size and format of the window output: the swapchain's, or the
+  // output image's when headless.
+  [[nodiscard]] VkExtent2D output_extent() const;
+  [[nodiscard]] VkFormat output_format() const;
+  // Waits until the GPU has finished everything submitted.
+  void WaitIdle() const { context_.WaitIdle(); }
   [[nodiscard]] std::optional<double> gpu_frame_ms() const {
     return gpu_timer_.last_frame_ms();
   }
@@ -334,6 +379,12 @@ class Renderer {
     kViewport,   // viewport_image_, with the UI alone on the window.
   };
 
+  // What a readback copies.
+  enum class ReadbackSource : uint8_t {
+    kViewport,  // viewport_image_ (RequestViewportReadback()).
+    kOutput,    // The window output (RequestOutputReadback()).
+  };
+
   void CreateFrames();
   // Destroys the retired meshes and images no frame in flight can use any
   // more. Call after the current frame's fence was waited on.
@@ -356,8 +407,10 @@ class Renderer {
   // Acquires the next swapchain image for `frame`. Returns nullopt, marking
   // the swapchain dirty, when it is out of date and nothing can be drawn.
   [[nodiscard]] std::optional<uint32_t> AcquireImage(const Frame& frame);
-  // Submits the recorded commands of `frame` and presents `image_index`.
-  void SubmitAndPresent(const Frame& frame, uint32_t image_index);
+  // Submits the recorded commands of `frame` and presents `image_index`
+  // (headless, nullopt: only submits).
+  void SubmitAndPresent(const Frame& frame,
+                        std::optional<uint32_t> image_index);
   // Records every pass of the frame described by `ctx` (see the top of this
   // file); `scope_ctx` is the scope picture's, or null.
   void RecordCommands(const Frame& frame, const FrameContext& ctx,
@@ -372,19 +425,31 @@ class Renderer {
   // Draws the sights (reflex dot, scope eyepiece) of `ctx`; inside the
   // scene pass.
   void DrawSights(const FrameContext& ctx) const;
-  // Records the copy of the viewport image (COLOR_ATTACHMENT_OPTIMAL after
-  // the present pass, and again afterwards) for every readback not recorded
+  // The image a readback copies, in `layout` (left so afterwards) after
+  // `last_write`.
+  struct ReadbackImage {
+    VkImage image = VK_NULL_HANDLE;
+    VkExtent2D extent{};
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    BarrierScope last_write;
+    // B8G8R8A8 (a swapchain): channels are swapped when taken.
+    bool bgra = false;
+  };
+  // Records the copy of `image` for every readback of `source` not recorded
   // yet.
-  void RecordViewportReadbacks(VkCommandBuffer cmd);
+  void RecordReadbacks(VkCommandBuffer cmd, ReadbackSource source,
+                       const ReadbackImage& image);
   // Computes the world-space bounds of every draw item into world_bounds_.
   void ComputeWorldBounds(const SceneView& view);
 
-  const platform::Window& window_;
+  const platform::Window* window_;  // Null when headless.
   std::string shader_dir_;
+  VkExtent2D headless_extent_;
   VulkanContext context_;
   bool vsync_ = true;
   bool swapchain_dirty_ = false;
-  Swapchain swapchain_;
+  // Empty when headless.
+  std::optional<Swapchain> swapchain_;
   Samplers samplers_;
   RenderTargets targets_;
   FrameGlobals frame_globals_;
@@ -430,17 +495,24 @@ class Renderer {
   // PrepareViewport().
   std::optional<PresentPass> viewport_present_pass_;
 
+  // The window output when headless (stands in for the swapchain image):
+  // TRANSFER_SRC_OPTIMAL between frames.
+  Image output_image_;
   // Editor viewport output (PrepareViewport()); empty in the game.
   Image viewport_image_;
   ViewportImage viewport_;
   // frame_serial_ at the last viewport recreation.
   uint64_t viewport_resized_at_ = 0;
-  // Requested viewport copies (RequestViewportReadback()).
+  // Requested copies (RequestViewportReadback(), RequestOutputReadback()).
   struct Readback {
     uint64_t ticket = 0;
-    // The frame that records the copy; 0 until recorded.
+    ReadbackSource source = ReadbackSource::kViewport;
+    // The frame that records the copy (0 until recorded) and its slot in
+    // frames_, whose fence tells when the copy is done.
     uint64_t frame_serial = 0;
+    size_t frame_slot = 0;
     VkExtent2D extent{};
+    bool bgra = false;
     Buffer buffer;
   };
   std::vector<Readback> readbacks_;

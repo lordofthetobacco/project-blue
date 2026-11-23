@@ -32,6 +32,8 @@ class Swapchain {
   [[nodiscard]] VkExtent2D extent() const { return extent_; }
   [[nodiscard]] VkPresentModeKHR present_mode() const { return present_mode_; }
   [[nodiscard]] uint32_t min_image_count() const { return min_image_count_; }
+  // Whether the images can be copied from (TRANSFER_SRC usage).
+  [[nodiscard]] bool readable() const { return readable_; }
   [[nodiscard]] uint32_t image_count() const {
     return static_cast<uint32_t>(images_.size());
   }
@@ -60,6 +62,7 @@ class Swapchain {
   VkExtent2D extent_{};
   VkPresentModeKHR present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
   uint32_t min_image_count_ = 0;
+  bool readable_ = false;
   std::vector<VkImage> images_;
   std::vector<VkImageView> image_views_;
   std::vector<VkSemaphore> render_finished_;

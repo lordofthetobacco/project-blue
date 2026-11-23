@@ -15,14 +15,16 @@ inline constexpr float kMaterialAnisotropy = 8.0f;
 // Thread-safe to read.
 class Samplers {
  public:
-  explicit Samplers(const VulkanContext& context);
+  // `max_anisotropy` caps the material sampler's anisotropy (further capped
+  // by the device); 1 or less disables anisotropic filtering.
+  Samplers(const VulkanContext& context, float max_anisotropy);
   ~Samplers();
 
   Samplers(const Samplers&) = delete;
   Samplers& operator=(const Samplers&) = delete;
 
   // Material textures: trilinear, repeating, anisotropic when the device
-  // supports it.
+  // supports it and the constructor allowed it.
   [[nodiscard]] VkSampler material() const { return material_; }
   // Full-screen inputs and render targets: bilinear (and linear between
   // mips), clamped to the edge.

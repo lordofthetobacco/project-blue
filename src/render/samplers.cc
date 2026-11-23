@@ -33,13 +33,14 @@ VkSamplerCreateInfo SamplerInfo(VkFilter filter, VkSamplerAddressMode address) {
 
 }  // namespace
 
-Samplers::Samplers(const VulkanContext& context) : device_(context.device()) {
+Samplers::Samplers(const VulkanContext& context, float max_anisotropy)
+    : device_(context.device()) {
   VkSamplerCreateInfo material =
       SamplerInfo(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-  if (context.sampler_anisotropy()) {
+  if (context.sampler_anisotropy() && max_anisotropy > 1.0f) {
     material.anisotropyEnable = VK_TRUE;
     material.maxAnisotropy = std::min(
-        kMaterialAnisotropy, context.properties().limits.maxSamplerAnisotropy);
+        max_anisotropy, context.properties().limits.maxSamplerAnisotropy);
   }
   material_ = CreateSampler(device_, material);
   linear_clamp_ = CreateSampler(

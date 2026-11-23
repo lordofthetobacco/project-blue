@@ -38,6 +38,9 @@ inline constexpr BarrierScope kDepthAttachment{
 inline constexpr BarrierScope kFragmentSampledRead{
     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+// Read by a copy command (readbacks).
+inline constexpr BarrierScope kCopySourceRead{
+    VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
 
 // Returns the range covering every mip level and layer of `aspect`.
 [[nodiscard]] constexpr VkImageSubresourceRange WholeImage(

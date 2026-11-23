@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "core/log.h"
@@ -56,19 +57,24 @@ struct DeviceCandidate {
   int score = 0;
 };
 
+// `user_data` is the VulkanContext::ValidationCounts to update.
 VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageTypeFlagsEXT /*types*/,
-    const VkDebugUtilsMessengerCallbackDataEXT* data, void* /*user_data*/) {
+    const VkDebugUtilsMessengerCallbackDataEXT* data, void* user_data) {
+  auto* counts = static_cast<VulkanContext::ValidationCounts*>(user_data);
   if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
     core::log::Error("[vulkan] {}", data->pMessage);
+    ++counts->errors;
   } else {
     core::log::Warn("[vulkan] {}", data->pMessage);
+    ++counts->warnings;
   }
   return VK_FALSE;
 }
 
-VkDebugUtilsMessengerCreateInfoEXT DebugMessengerInfo() {
+VkDebugUtilsMessengerCreateInfoEXT DebugMessengerInfo(
+    VulkanContext::ValidationCounts* counts) {
   return {
       .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
       .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
@@ -77,6 +83,7 @@ VkDebugUtilsMessengerCreateInfoEXT DebugMessengerInfo() {
                      VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                      VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
       .pfnUserCallback = DebugCallback,
+      .pUserData = counts,
   };
 }
 
@@ -90,10 +97,20 @@ bool IsLayerAvailable(const char* name) {
   });
 }
 
-bool SupportsDeviceExtensions(VkPhysicalDevice device) {
-  return std::ranges::all_of(kDeviceExtensions, [device](const char* name) {
-    return HasDeviceExtension(device, name);
-  });
+// The device extensions the renderer needs: none beyond Vulkan 1.3 when
+// headless, the swapchain with a window.
+std::span<const char* const> RequiredDeviceExtensions(bool headless) {
+  if (headless) {
+    return {};
+  }
+  return kDeviceExtensions;
+}
+
+bool SupportsDeviceExtensions(VkPhysicalDevice device, bool headless) {
+  return std::ranges::all_of(RequiredDeviceExtensions(headless),
+                             [device](const char* name) {
+                               return HasDeviceExtension(device, name);
+                             });
 }
 
 bool SupportsRequiredFeatures(VkPhysicalDevice device) {
@@ -113,8 +130,8 @@ bool SupportsRequiredFeatures(VkPhysicalDevice device) {
          features.features.depthClamp && features.features.textureCompressionBC;
 }
 
-// Returns a family that can both render and present; true for every desktop
-// GPU we target.
+// Returns a family that can both render and present to `surface` (only
+// render when `surface` is null); true for every desktop GPU we target.
 std::optional<uint32_t> FindGraphicsPresentFamily(VkPhysicalDevice device,
                                                   VkSurfaceKHR surface) {
   uint32_t count = 0;
@@ -123,8 +140,10 @@ std::optional<uint32_t> FindGraphicsPresentFamily(VkPhysicalDevice device,
   vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.data());
 
   for (uint32_t i = 0; i < count; ++i) {
-    VkBool32 can_present = VK_FALSE;
-    vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &can_present);
+    VkBool32 can_present = VK_TRUE;
+    if (surface != VK_NULL_HANDLE) {
+      vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &can_present);
+    }
     if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && can_present) {
       return i;
     }
@@ -133,8 +152,11 @@ std::optional<uint32_t> FindGraphicsPresentFamily(VkPhysicalDevice device,
 }
 
 // Returns how much a device of `type` is preferred: discrete over integrated
-// over everything else.
-int DeviceTypeScore(VkPhysicalDeviceType type) {
+// over everything else; for kSoftware, CPU devices only (-1: never).
+int DeviceTypeScore(VkPhysicalDeviceType type, AdapterPreference adapter) {
+  if (adapter == AdapterPreference::kSoftware) {
+    return type == VK_PHYSICAL_DEVICE_TYPE_CPU ? 0 : -1;
+  }
   switch (type) {
     case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
       return 2;
@@ -147,22 +169,26 @@ int DeviceTypeScore(VkPhysicalDeviceType type) {
 
 // Returns the candidate description of `device`, or nullopt if it cannot run
 // the renderer (old API version, no graphics+present queue, missing
-// extensions or features).
+// extensions or features, or a type `adapter` excludes).
 std::optional<DeviceCandidate> RateDevice(VkPhysicalDevice device,
-                                          VkSurfaceKHR surface) {
+                                          VkSurfaceKHR surface,
+                                          AdapterPreference adapter) {
   VkPhysicalDeviceProperties properties{};
   vkGetPhysicalDeviceProperties(device, &properties);
 
+  const int score = DeviceTypeScore(properties.deviceType, adapter);
+  const bool headless = surface == VK_NULL_HANDLE;
   const std::optional<uint32_t> family =
       FindGraphicsPresentFamily(device, surface);
-  if (properties.apiVersion < VulkanContext::kApiVersion || !family ||
-      !SupportsDeviceExtensions(device) || !SupportsRequiredFeatures(device)) {
+  if (score < 0 || properties.apiVersion < VulkanContext::kApiVersion ||
+      !family || !SupportsDeviceExtensions(device, headless) ||
+      !SupportsRequiredFeatures(device)) {
     return std::nullopt;
   }
   return DeviceCandidate{.device = device,
                          .properties = properties,
                          .queue_family = *family,
-                         .score = DeviceTypeScore(properties.deviceType)};
+                         .score = score};
 }
 
 // Returns the number of valid timestamp bits of `queue_family` on `device`.
@@ -177,10 +203,13 @@ uint32_t QueryTimestampValidBits(VkPhysicalDevice device,
 
 }  // namespace
 
-VulkanContext::VulkanContext(const platform::Window& window) {
+VulkanContext::VulkanContext(const platform::Window* window,
+                             AdapterPreference adapter) {
   CreateInstance(window);
-  surface_ = window.CreateSurface(instance_);
-  SelectPhysicalDevice();
+  if (window != nullptr) {
+    surface_ = window->CreateSurface(instance_);
+  }
+  SelectPhysicalDevice(adapter);
   CreateDevice();
   CreateAllocator();
 
@@ -196,7 +225,9 @@ VulkanContext::~VulkanContext() {
   vkDestroyCommandPool(device_, immediate_pool_, nullptr);
   vmaDestroyAllocator(allocator_);
   vkDestroyDevice(device_, nullptr);
-  vkDestroySurfaceKHR(instance_, surface_, nullptr);
+  if (surface_ != VK_NULL_HANDLE) {
+    vkDestroySurfaceKHR(instance_, surface_, nullptr);
+  }
   if (debug_messenger_ != VK_NULL_HANDLE) {
     // Extension entry points are only reachable as untyped function pointers.
     const auto destroy_messenger =
@@ -208,7 +239,7 @@ VulkanContext::~VulkanContext() {
   vkDestroyInstance(instance_, nullptr);
 }
 
-void VulkanContext::CreateInstance(const platform::Window& window) {
+void VulkanContext::CreateInstance(const platform::Window* window) {
   uint32_t loader_version = 0;
   CheckVk(vkEnumerateInstanceVersion(&loader_version));
   if (loader_version < kApiVersion) {
@@ -217,10 +248,14 @@ void VulkanContext::CreateInstance(const platform::Window& window) {
                      VK_API_VERSION_MINOR(loader_version));
   }
 
-  const std::span<const char* const> window_extensions =
-      window.RequiredInstanceExtensions();
-  std::vector<const char*> extensions(window_extensions.begin(),
-                                      window_extensions.end());
+  // Headless: no surface extensions (asking SDL for them would start its
+  // video subsystem).
+  std::vector<const char*> extensions;
+  if (window != nullptr) {
+    const std::span<const char* const> window_extensions =
+        window->RequiredInstanceExtensions();
+    extensions.assign(window_extensions.begin(), window_extensions.end());
+  }
   std::vector<const char*> layers;
 
   const bool validation =
@@ -245,7 +280,7 @@ void VulkanContext::CreateInstance(const platform::Window& window) {
 
   // Chained so that instance creation/destruction itself is also validated.
   const VkDebugUtilsMessengerCreateInfoEXT messenger_info =
-      DebugMessengerInfo();
+      DebugMessengerInfo(&validation_counts_);
 
   const VkInstanceCreateInfo create_info{
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -268,7 +303,7 @@ void VulkanContext::CreateInstance(const platform::Window& window) {
   }
 }
 
-void VulkanContext::SelectPhysicalDevice() {
+void VulkanContext::SelectPhysicalDevice(AdapterPreference adapter) {
   uint32_t count = 0;
   CheckVk(vkEnumeratePhysicalDevices(instance_, &count, nullptr));
   std::vector<VkPhysicalDevice> devices(count);
@@ -278,12 +313,16 @@ void VulkanContext::SelectPhysicalDevice() {
   std::optional<DeviceCandidate> best;
   for (VkPhysicalDevice device : devices) {
     const std::optional<DeviceCandidate> candidate =
-        RateDevice(device, surface_);
+        RateDevice(device, surface_, adapter);
     if (candidate && (!best || candidate->score > best->score)) {
       best = candidate;
     }
   }
 
+  if (!best && adapter == AdapterPreference::kSoftware) {
+    core::log::Fatal(
+        "No software Vulkan 1.3 device (lavapipe / llvmpipe) is installed");
+  }
   if (!best) {
     core::log::Fatal(
         "No GPU supports Vulkan 1.3 with dynamic rendering, synchronization2, "
@@ -331,8 +370,9 @@ void VulkanContext::CreateDevice() {
                    .textureCompressionBC = VK_TRUE},
   };
 
-  std::vector<const char*> extensions(kDeviceExtensions.begin(),
-                                      kDeviceExtensions.end());
+  const std::span<const char* const> required =
+      RequiredDeviceExtensions(headless());
+  std::vector<const char*> extensions(required.begin(), required.end());
   if (memory_budget_) {
     extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
   }

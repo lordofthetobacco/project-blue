@@ -1,6 +1,20 @@
 # Third-party dependencies, pinned to release tags.
 include(FetchContent)
 
+# Re-configuring must not touch the network: tags are immutable by convention, so the git
+# update step (a `git fetch` per dependency) is skipped once a source tree exists. Delete the
+# dependency's directory under _deps (or configure with -DBLUE_FETCH_UPDATES=ON) after changing
+# a pinned tag.
+option(BLUE_FETCH_UPDATES "Check the network for dependency updates on every configure" OFF)
+if(NOT BLUE_FETCH_UPDATES)
+    set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
+endif()
+# Populate directly instead of through a nested sub-build per dependency (CMake 3.30+): much
+# faster cold configure.
+if(POLICY CMP0168)
+    cmake_policy(SET CMP0168 NEW)
+endif()
+
 set(FETCHCONTENT_QUIET OFF)
 
 # The whole project links statically.
@@ -135,6 +149,15 @@ FetchContent_Declare(JoltPhysics
     SYSTEM)
 
 FetchContent_MakeAvailable(SDL3 glm VulkanMemoryAllocator imgui imguizmo stb)
+
+# SDL compiles SDL_mslibc.c with an explicit /GL- on MSVC; our link-time optimisation default
+# (/GL) would make cl print a D9025 override note and a C4652 warning for it. SDL is thin glue
+# around system calls, nothing there benefits from cross-module inlining.
+if(MSVC)
+    set_target_properties(SDL3-static PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF
+        INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL OFF)
+endif()
 
 # The asset-cooking dependencies are compiled optimised even in Debug: assimp
 # parses m16.obj in ~1.7 s at /Od, and BC7 encoding is far too slow without

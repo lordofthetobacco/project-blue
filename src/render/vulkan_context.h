@@ -12,23 +12,34 @@
 
 namespace blue::render {
 
+// Which physical devices VulkanContext may pick.
+enum class AdapterPreference : uint8_t {
+  kHighPerformance,  // Discrete over integrated over anything else.
+  kSoftware,         // CPU implementations only (lavapipe, llvmpipe).
+};
+
 // Core Vulkan objects shared by the whole renderer: instance, surface,
-// device, the single graphics+present queue and the memory allocator. Startup
-// failures (no suitable GPU, ...) are fatal. The window owns the native
-// handle behind the surface and must outlive the context. Neither copyable
-// nor movable. Not thread-safe.
+// device, the single graphics(+present) queue and the memory allocator.
+// Startup failures (no suitable GPU, ...) are fatal. With a window, the
+// window owns the native handle behind the surface and must outlive the
+// context; without one (headless) there is no surface, no swapchain
+// extension and SDL's video subsystem is never touched. Neither copyable nor
+// movable. Not thread-safe.
 class VulkanContext {
  public:
   static constexpr uint32_t kApiVersion = VK_API_VERSION_1_3;
 
-  explicit VulkanContext(const platform::Window& window);
+  // `window` null: headless.
+  VulkanContext(const platform::Window* window, AdapterPreference adapter);
   ~VulkanContext();
 
   VulkanContext(const VulkanContext&) = delete;
   VulkanContext& operator=(const VulkanContext&) = delete;
 
   [[nodiscard]] VkInstance instance() const { return instance_; }
+  // VK_NULL_HANDLE when headless.
   [[nodiscard]] VkSurfaceKHR surface() const { return surface_; }
+  [[nodiscard]] bool headless() const { return surface_ == VK_NULL_HANDLE; }
   [[nodiscard]] VkPhysicalDevice physical_device() const {
     return physical_device_;
   }
@@ -52,6 +63,21 @@ class VulkanContext {
   // then reports the driver's per-process heap usage and budget.
   [[nodiscard]] bool memory_budget() const { return memory_budget_; }
 
+  // Whether the Khronos validation layer is active (Debug builds, when the
+  // layer is installed).
+  [[nodiscard]] bool validation() const {
+    return debug_messenger_ != VK_NULL_HANDLE;
+  }
+  // Validation messages reported so far, by severity (0 without
+  // validation).
+  struct ValidationCounts {
+    uint32_t errors = 0;
+    uint32_t warnings = 0;
+  };
+  [[nodiscard]] ValidationCounts validation_counts() const {
+    return validation_counts_;
+  }
+
   // Upload staging memory allocated right now and its high-water mark, in
   // bytes (see StagingUploader).
   struct StagingUsage {
@@ -73,8 +99,8 @@ class VulkanContext {
   void WaitIdle() const;
 
  private:
-  void CreateInstance(const platform::Window& window);
-  void SelectPhysicalDevice();
+  void CreateInstance(const platform::Window* window);
+  void SelectPhysicalDevice(AdapterPreference adapter);
   void CreateDevice();
   void CreateAllocator();
 
@@ -89,6 +115,8 @@ class VulkanContext {
   uint32_t timestamp_valid_bits_ = 0;
   bool sampler_anisotropy_ = false;
   bool memory_budget_ = false;
+  // Written by the debug messenger callback (pUserData is this object).
+  ValidationCounts validation_counts_;
   // Statistics only; uploads update them through a const context.
   mutable StagingUsage staging_usage_;
   VmaAllocator allocator_ = VK_NULL_HANDLE;

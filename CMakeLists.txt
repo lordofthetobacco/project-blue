@@ -389,10 +389,6 @@ add_library(blue_shader STATIC
     src/shader/shader_watcher.cc
 )
 
-if(MSVC)
-    add_compile_options(/MP)
-endif()
-
 target_include_directories(blue_shader PUBLIC src)
 
 blue_target_defaults(blue_shader)

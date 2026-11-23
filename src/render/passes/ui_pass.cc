@@ -7,16 +7,13 @@
 namespace blue::render {
 
 void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
-                  UiBackground background) {
+                  UiBackground background, const UiOutputUse& use) {
   const bool clear = background == UiBackground::kClear;
   if (clear) {
-    // Nothing to wait for but the acquire semaphore, which the submission
-    // waits for at the color attachment output stage.
-    ImageBarrier(
-        ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
-        {VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_NONE},
-        kColorAttachmentWrite, VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    ImageBarrier(ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
+                 use.previous_use, kColorAttachmentWrite,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
   } else if (ui != nullptr) {
     // Rendering scopes do not order attachment accesses between them.
     ImageBarrier(ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -48,9 +45,8 @@ void RecordUiPass(const FrameContext& ctx, ImDrawData* ui,
     vkCmdEndRendering(ctx.cmd);
   }
   ImageBarrier(ctx.cmd, ctx.swapchain_image, VK_IMAGE_ASPECT_COLOR_BIT,
-               kColorAttachmentWrite, kNoAccess,
-               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+               kColorAttachmentWrite, use.next_use,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, use.final_layout);
 }
 
 }  // namespace blue::render

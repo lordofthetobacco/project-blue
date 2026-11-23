@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <glm/vec4.hpp>
@@ -40,6 +41,20 @@ material::MaterialDesc DefaultMaterialDesc() {
   return desc;
 }
 
+// The headless output image's format: what the swapchain usually is.
+constexpr VkFormat kHeadlessOutputFormat = VK_FORMAT_R8G8B8A8_SRGB;
+
+// Returns the swapchain for `window`, or none when headless.
+std::optional<Swapchain> MakeSwapchain(const VulkanContext& context,
+                                       const platform::Window* window,
+                                       bool vsync) {
+  if (window == nullptr) {
+    return std::nullopt;
+  }
+  return std::optional<Swapchain>(std::in_place, context, window->PixelSize(),
+                                  vsync);
+}
+
 // Returns the format of the editor viewport image: like the swapchain, sRGB
 // or not, so the UI shows it with the same encoding as the game window.
 VkFormat ViewportFormat(VkFormat swapchain_format) {
@@ -54,39 +69,56 @@ VkFormat ViewportFormat(VkFormat swapchain_format) {
 Renderer::Renderer(const platform::Window& window,
                    const std::string& shader_dir,
                    shader::CompileMode shader_mode)
-    : window_(window),
-      shader_dir_(shader_dir),
-      context_(window),
-      swapchain_(context_, window.PixelSize(), vsync_),
-      samplers_(context_),
-      targets_(context_, swapchain_.extent()),
+    : Renderer(RendererOptions{.window = &window,
+                               .shader_dir = shader_dir,
+                               .shader_mode = shader_mode}) {}
+
+Renderer::Renderer(const RendererOptions& options)
+    : window_(options.window),
+      shader_dir_(options.shader_dir),
+      headless_extent_{std::max(options.headless_extent.width, 1u),
+                       std::max(options.headless_extent.height, 1u)},
+      context_(options.window, options.adapter),
+      swapchain_(MakeSwapchain(context_, options.window, vsync_)),
+      samplers_(context_, options.max_anisotropy),
+      targets_(context_, output_extent()),
       frame_globals_(context_, samplers_),
       textures_(context_),
       materials_(context_, textures_, samplers_),
-      shader_programs_(context_.device(), shader_mode),
-      environment_(context_, shader_programs_, shader_dir, samplers_,
+      shader_programs_(context_.device(), options.shader_mode),
+      environment_(context_, shader_programs_, shader_dir_, samplers_,
                    frame_globals_),
-      shadow_pass_(context_, shader_programs_, shader_dir, meshes_),
-      depth_prepass_(context_, shader_programs_, shader_dir,
+      shadow_pass_(context_, shader_programs_, shader_dir_, meshes_),
+      depth_prepass_(context_, shader_programs_, shader_dir_,
                      frame_globals_.set_layout(), materials_, meshes_),
-      ssao_pass_(context_, shader_programs_, shader_dir),
-      mesh_pass_(context_, shader_programs_, shader_dir,
+      ssao_pass_(context_, shader_programs_, shader_dir_),
+      mesh_pass_(context_, shader_programs_, shader_dir_,
                  frame_globals_.set_layout(), materials_, meshes_),
-      skybox_pass_(context_, shader_programs_, shader_dir,
+      skybox_pass_(context_, shader_programs_, shader_dir_,
                    frame_globals_.set_layout(), environment_),
-      reticle_pass_(context_, shader_programs_, shader_dir,
+      reticle_pass_(context_, shader_programs_, shader_dir_,
                     frame_globals_.set_layout()),
-      scope_lens_pass_(context_, shader_programs_, shader_dir,
+      scope_lens_pass_(context_, shader_programs_, shader_dir_,
                        frame_globals_.set_layout()),
-      motion_blur_pass_(context_, shader_programs_, shader_dir,
+      motion_blur_pass_(context_, shader_programs_, shader_dir_,
                         frame_globals_.set_layout(), meshes_),
-      bloom_pass_(context_, shader_programs_, shader_dir),
-      tonemap_pass_(context_, shader_programs_, shader_dir),
-      overlay_pass_(context_, shader_programs_, shader_dir,
+      bloom_pass_(context_, shader_programs_, shader_dir_),
+      tonemap_pass_(context_, shader_programs_, shader_dir_),
+      overlay_pass_(context_, shader_programs_, shader_dir_,
                     frame_globals_.set_layout(), meshes_),
-      present_pass_(context_, shader_programs_, shader_dir,
-                    swapchain_.format()),
+      present_pass_(context_, shader_programs_, shader_dir_, output_format()),
       gpu_timer_(context_) {
+  if (!swapchain_) {
+    // Left in UNDEFINED: every frame's present pass discards it.
+    output_image_ =
+        Image(context_, {.extent = headless_extent_,
+                         .format = kHeadlessOutputFormat,
+                         .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                         .dedicated = true});
+    core::log::Info("Headless output {} x {}", headless_extent_.width,
+                    headless_extent_.height);
+  }
   const MaterialId default_material = materials_.Create(DefaultMaterialDesc());
   if (default_material != kDefaultMaterial) {
     core::log::Fatal("The default material must be created first");
@@ -251,6 +283,7 @@ MemoryStats Renderer::memory_stats() const {
   stats.mesh_count = mesh_count_;
   stats.render_target_bytes =
       targets_.size_bytes() + viewport_image_.size_bytes() +
+      output_image_.size_bytes() +
       shadow_pass_.map_bytes() + scope_picture_.size_bytes() +
       scope_depth_.size_bytes();
   stats.environment_bytes = environment_.size_bytes();
@@ -275,13 +308,21 @@ void Renderer::SetVsync(bool enabled) {
   }
 }
 
+VkExtent2D Renderer::output_extent() const {
+  return swapchain_ ? swapchain_->extent() : headless_extent_;
+}
+
+VkFormat Renderer::output_format() const {
+  return swapchain_ ? swapchain_->format() : kHeadlessOutputFormat;
+}
+
 bool Renderer::RebuildSwapchain() {
   context_.WaitIdle();
-  if (!swapchain_.Recreate(window_.PixelSize(), vsync_)) {
+  if (!swapchain_->Recreate(window_->PixelSize(), vsync_)) {
     return false;  // Surface has no area; stay dirty and retry next frame.
   }
   if (viewport_.generation == 0) {  // Otherwise they follow the viewport.
-    targets_.Resize(swapchain_.extent());
+    targets_.Resize(swapchain_->extent());
     BindTargets();
   }
   swapchain_dirty_ = false;
@@ -301,7 +342,7 @@ ViewportImage Renderer::PrepareViewport(VkExtent2D size) {
   size = {std::max(size.width, 1u), std::max(size.height, 1u)};
   if (!viewport_present_pass_) {
     viewport_present_pass_.emplace(context_, shader_programs_, shader_dir_,
-                                   ViewportFormat(swapchain_.format()));
+                                   ViewportFormat(output_format()));
     viewport_present_pass_->BindTargets(targets_, samplers_);
   }
   const bool changed = size.width != viewport_.extent.width ||
@@ -319,7 +360,7 @@ void Renderer::ResizeViewport(VkExtent2D size) {
   WaitForFramesInFlight();
   viewport_image_ =
       Image(context_, {.extent = size,
-                       .format = ViewportFormat(swapchain_.format()),
+                       .format = ViewportFormat(output_format()),
                        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                 VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -353,7 +394,16 @@ void Renderer::DrawViewportFrame(const SceneView& view, ImDrawData* ui) {
 
 uint64_t Renderer::RequestViewportReadback() {
   const uint64_t ticket = next_readback_ticket_++;
-  readbacks_.push_back({.ticket = ticket});
+  readbacks_.push_back({.ticket = ticket, .source = ReadbackSource::kViewport});
+  return ticket;
+}
+
+uint64_t Renderer::RequestOutputReadback() {
+  if (swapchain_ && !swapchain_->readable()) {
+    core::log::Fatal("The swapchain images cannot be copied (no TRANSFER_SRC)");
+  }
+  const uint64_t ticket = next_readback_ticket_++;
+  readbacks_.push_back({.ticket = ticket, .source = ReadbackSource::kOutput});
   return ticket;
 }
 
@@ -363,10 +413,17 @@ ReadbackStatus Renderer::TakeViewportReadback(uint64_t ticket,
   if (it == readbacks_.end()) {
     return ReadbackStatus::kUnknown;
   }
+  if (it->frame_serial == 0) {
+    return ReadbackStatus::kPending;
+  }
   // The fence of a frame is waited on kFramesInFlight frames later (as for
-  // DestroyRetired()).
-  if (it->frame_serial == 0 ||
-      it->frame_serial + kFramesInFlight > frame_serial_) {
+  // DestroyRetired()); until then its slot was not reused, so its fence
+  // tells whether the GPU is done.
+  const bool done =
+      it->frame_serial + kFramesInFlight <= frame_serial_ ||
+      vkGetFenceStatus(context_.device(), frames_[it->frame_slot].in_flight) ==
+          VK_SUCCESS;
+  if (!done) {
     return ReadbackStatus::kPending;
   }
   it->buffer.InvalidateForRead();
@@ -374,27 +431,33 @@ ReadbackStatus Renderer::TakeViewportReadback(uint64_t ticket,
   pixels.width = it->extent.width;
   pixels.height = it->extent.height;
   pixels.rgba.assign(source, source + it->buffer.size());
+  if (it->bgra) {
+    for (size_t i = 0; i + 3 < pixels.rgba.size(); i += 4) {
+      std::swap(pixels.rgba[i], pixels.rgba[i + 2]);
+    }
+  }
   readbacks_.erase(it);
   return ReadbackStatus::kReady;
 }
 
-void Renderer::RecordViewportReadbacks(VkCommandBuffer cmd) {
-  constexpr BarrierScope kTransferRead{VK_PIPELINE_STAGE_2_COPY_BIT,
-                                       VK_ACCESS_2_TRANSFER_READ_BIT};
-  bool transitioned = false;
+void Renderer::RecordReadbacks(VkCommandBuffer cmd, ReadbackSource source,
+                               const ReadbackImage& image) {
+  const bool transition = image.layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  bool recorded = false;
   for (Readback& readback : readbacks_) {
-    if (readback.frame_serial != 0) {
+    if (readback.frame_serial != 0 || readback.source != source) {
       continue;
     }
-    if (!transitioned) {
-      ImageBarrier(cmd, viewport_image_.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
-                   kColorAttachmentWrite, kTransferRead,
-                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    if (!recorded && transition) {
+      ImageBarrier(cmd, image.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                   image.last_write, kCopySourceRead, image.layout,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-      transitioned = true;
     }
-    readback.extent = viewport_.extent;
+    recorded = true;
+    readback.extent = image.extent;
+    readback.bgra = image.bgra;
     readback.frame_serial = frame_serial_;
+    readback.frame_slot = frame_index_;
     readback.buffer =
         Buffer(context_.allocator(),
                VkDeviceSize{readback.extent.width} * readback.extent.height * 4,
@@ -407,11 +470,11 @@ void Renderer::RecordViewportReadbacks(VkCommandBuffer cmd) {
         .imageOffset = {0, 0, 0},
         .imageExtent = {readback.extent.width, readback.extent.height, 1},
     };
-    vkCmdCopyImageToBuffer(cmd, viewport_image_.handle(),
+    vkCmdCopyImageToBuffer(cmd, image.image,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            readback.buffer.handle(), 1, &region);
   }
-  if (!transitioned) {
+  if (!recorded) {
     return;
   }
   // The host reads the buffers after the frame's fence.
@@ -428,22 +491,25 @@ void Renderer::RecordViewportReadbacks(VkCommandBuffer cmd) {
       .pMemoryBarriers = &host_barrier,
   };
   vkCmdPipelineBarrier2(cmd, &dependency);
-  ImageBarrier(cmd, viewport_image_.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
-               kTransferRead, kColorAttachmentWrite,
-               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+  if (transition) {
+    ImageBarrier(cmd, image.image, VK_IMAGE_ASPECT_COLOR_BIT, kCopySourceRead,
+                 image.last_write, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 image.layout);
+  }
 }
 
 void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
                            Output output) {
   // Before any early return: skipped frames must not hold released memory.
   DestroyRetiredIfIdle();
-  const VkExtent2D window_size = window_.PixelSize();
-  if (window_size.width == 0 || window_size.height == 0) {
-    return;  // Minimized: nothing to present to.
-  }
-  if (swapchain_dirty_ && !RebuildSwapchain()) {
-    return;
+  if (swapchain_) {
+    const VkExtent2D window_size = window_->PixelSize();
+    if (window_size.width == 0 || window_size.height == 0) {
+      return;  // Minimized: nothing to present to.
+    }
+    if (swapchain_dirty_ && !RebuildSwapchain()) {
+      return;
+    }
   }
 
   const Frame& frame = frames_[frame_index_];
@@ -451,9 +517,13 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
                           UINT64_MAX));
   gpu_timer_.Collect(frame_index_);
 
-  const std::optional<uint32_t> image_index = AcquireImage(frame);
-  if (!image_index) {
-    return;
+  // The swapchain image; headless, the output image stands in for it.
+  std::optional<uint32_t> image_index;
+  if (swapchain_) {
+    image_index = AcquireImage(frame);
+    if (!image_index) {
+      return;
+    }
   }
 
   // Reset only once we know work will be submitted, otherwise the next wait
@@ -496,9 +566,11 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
       .scene_hdr = targets_.hdr(),
       .scene_depth = targets_.depth(),
       .scene_extent = extent,
-      .swapchain_image = swapchain_.image(*image_index),
-      .swapchain_view = swapchain_.image_view(*image_index),
-      .swapchain_extent = swapchain_.extent(),
+      .swapchain_image = image_index ? swapchain_->image(*image_index)
+                                     : output_image_.handle(),
+      .swapchain_view = image_index ? swapchain_->image_view(*image_index)
+                                    : output_image_.view(),
+      .swapchain_extent = output_extent(),
       .world_bounds = world_bounds_,
       .camera_frustum = camera_frustum,
       .cascades = cascades,
@@ -563,7 +635,7 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   }
   RecordCommands(frame, ctx, scope_ctx ? &*scope_ctx : nullptr, ui, output);
   stats_.scope_draw_calls = scope_stats.draw_calls;
-  SubmitAndPresent(frame, *image_index);
+  SubmitAndPresent(frame, image_index);
 
   frame_index_ = (frame_index_ + 1) % kFramesInFlight;
 }
@@ -571,7 +643,7 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
 std::optional<uint32_t> Renderer::AcquireImage(const Frame& frame) {
   uint32_t image_index = 0;
   const VkResult result =
-      vkAcquireNextImageKHR(context_.device(), swapchain_.handle(), UINT64_MAX,
+      vkAcquireNextImageKHR(context_.device(), swapchain_->handle(), UINT64_MAX,
                             frame.image_acquired, VK_NULL_HANDLE, &image_index);
   if (result == VK_ERROR_OUT_OF_DATE_KHR) {
     swapchain_dirty_ = true;
@@ -585,8 +657,23 @@ std::optional<uint32_t> Renderer::AcquireImage(const Frame& frame) {
   return image_index;
 }
 
-void Renderer::SubmitAndPresent(const Frame& frame, uint32_t image_index) {
-  const VkSemaphore render_finished = swapchain_.render_finished(image_index);
+void Renderer::SubmitAndPresent(const Frame& frame,
+                                std::optional<uint32_t> image_index) {
+  const VkCommandBufferSubmitInfo cmd_info{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = frame.command_buffer,
+  };
+  if (!image_index) {  // Headless: nothing to acquire or present.
+    const VkSubmitInfo2 submit_info{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .commandBufferInfoCount = 1,
+        .pCommandBufferInfos = &cmd_info,
+    };
+    CheckVk(vkQueueSubmit2(context_.queue(), 1, &submit_info, frame.in_flight));
+    return;
+  }
+
+  const VkSemaphore render_finished = swapchain_->render_finished(*image_index);
   const VkSemaphoreSubmitInfo wait_info{
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
       .semaphore = frame.image_acquired,
@@ -596,10 +683,6 @@ void Renderer::SubmitAndPresent(const Frame& frame, uint32_t image_index) {
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
       .semaphore = render_finished,
       .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-  };
-  const VkCommandBufferSubmitInfo cmd_info{
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-      .commandBuffer = frame.command_buffer,
   };
   const VkSubmitInfo2 submit_info{
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
@@ -612,14 +695,14 @@ void Renderer::SubmitAndPresent(const Frame& frame, uint32_t image_index) {
   };
   CheckVk(vkQueueSubmit2(context_.queue(), 1, &submit_info, frame.in_flight));
 
-  const VkSwapchainKHR swapchain = swapchain_.handle();
+  const VkSwapchainKHR swapchain = swapchain_->handle();
   const VkPresentInfoKHR present_info{
       .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
       .waitSemaphoreCount = 1,
       .pWaitSemaphores = &render_finished,
       .swapchainCount = 1,
       .pSwapchains = &swapchain,
-      .pImageIndices = &image_index,
+      .pImageIndices = &*image_index,
   };
   const VkResult present_result =
       vkQueuePresentKHR(context_.queue(), &present_info);
@@ -759,18 +842,20 @@ void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
   if (OverlayPass::HasWork(ctx.view)) {
     timed(GpuScope::kOverlay, [&] { overlay_pass_.Record(ctx); });
   }
+  // Window: the swapchain image was just acquired (only the acquire
+  // semaphore to wait for); headless: the output image was last copied.
+  const UiOutputUse& output_use = swapchain_ ? kUiPresent : kUiCopy;
   if (output == Output::kSwapchain) {
-    // Nothing to wait for but the acquire semaphore, which the submission
-    // waits for at the color attachment output stage.
     const PresentTarget target{
         .image = ctx.swapchain_image,
         .view = ctx.swapchain_view,
         .extent = ctx.swapchain_extent,
-        .previous_use = {VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         VK_ACCESS_2_NONE},
+        .previous_use = output_use.previous_use,
     };
     timed(GpuScope::kPresent, [&] { present_pass_.Record(ctx, target); });
-    timed(GpuScope::kUi, [&] { RecordUiPass(ctx, ui, UiBackground::kScene); });
+    timed(GpuScope::kUi, [&] {
+      RecordUiPass(ctx, ui, UiBackground::kScene, output_use);
+    });
   } else {
     // The previous frame's UI pass sampled the image.
     const PresentTarget target{
@@ -781,14 +866,28 @@ void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
     };
     timed(GpuScope::kPresent, [&] {
       viewport_present_pass_->Record(ctx, target);
-      RecordViewportReadbacks(cmd);
+      RecordReadbacks(cmd, ReadbackSource::kViewport,
+                      {.image = target.image,
+                       .extent = target.extent,
+                       .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                       .last_write = kColorAttachmentWrite});
       ImageBarrier(cmd, target.image, VK_IMAGE_ASPECT_COLOR_BIT,
                    kColorAttachmentWrite, kFragmentSampledRead,
                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     });
-    timed(GpuScope::kUi, [&] { RecordUiPass(ctx, ui, UiBackground::kClear); });
+    timed(GpuScope::kUi, [&] {
+      RecordUiPass(ctx, ui, UiBackground::kClear, output_use);
+    });
   }
+  const VkFormat format = output_format();
+  RecordReadbacks(cmd, ReadbackSource::kOutput,
+                  {.image = ctx.swapchain_image,
+                   .extent = ctx.swapchain_extent,
+                   .layout = output_use.final_layout,
+                   .last_write = kColorAttachmentWrite,
+                   .bgra = format == VK_FORMAT_B8G8R8A8_SRGB ||
+                           format == VK_FORMAT_B8G8R8A8_UNORM});
 
   gpu_timer_.End(cmd, frame_index_, GpuScope::kTotal);
   CheckVk(vkEndCommandBuffer(cmd));

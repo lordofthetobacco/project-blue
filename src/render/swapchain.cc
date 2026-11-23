@@ -134,6 +134,14 @@ void Swapchain::Create(const VkSurfaceCapabilitiesKHR& capabilities,
     min_image_count_ = std::min(min_image_count_, capabilities.maxImageCount);
   }
 
+  // Copies of the window output (Renderer::RequestOutputReadback()) need
+  // TRANSFER_SRC; every desktop driver offers it.
+  readable_ = (capabilities.supportedUsageFlags &
+               VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+  const VkImageUsageFlags usage =
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      (readable_ ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : VkImageUsageFlags{0});
+
   const VkSwapchainCreateInfoKHR create_info{
       .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
       .surface = context_.surface(),
@@ -142,7 +150,7 @@ void Swapchain::Create(const VkSurfaceCapabilitiesKHR& capabilities,
       .imageColorSpace = color_space_,
       .imageExtent = extent_,
       .imageArrayLayers = 1,
-      .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      .imageUsage = usage,
       .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
       .preTransform = capabilities.currentTransform,
       .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
