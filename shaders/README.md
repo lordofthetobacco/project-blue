@@ -50,6 +50,9 @@ MSL in `metal/` (unchanged from the Metal branch) until it is moved to Slang too
   compute the position with `ClipPosition()` (`common.slang`). Slang has no `invariant`
   qualifier for SPIR-V, so the Vulkan loader adds the `Invariant` decoration to every vertex
   shader's position (`shader::MarkPositionInvariant`); `precise` covers Direct3D.
+- **`BLUE_DXIL`** is defined (to 1) only when compiling DXIL, by the build and the runtime
+  compiler alike. Use it with `#ifdef` and only where Direct3D genuinely differs from Vulkan
+  (today: the full-screen triangle's y in `fullscreen.slang`); SPIR-V never sees it.
 - **Clip space** is the same on every backend: reversed Z, depth in [0, 1], the scene drawn
   with a Y-up viewport. `SV_Position.xy` in a fragment shader is the pixel centre, y down.
 - **Warnings are errors**, and the same sources must compile for both targets (the build

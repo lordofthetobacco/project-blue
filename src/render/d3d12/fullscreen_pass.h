@@ -25,12 +25,9 @@ class D3d12Context;
 // inputs are copied into a transient descriptor table each time, so render
 // targets can be recreated freely between frames.
 //
-// Note for the passes of package D2: the shared vertex stage puts uv (0, 0)
-// at clip (-1, -1), the top row on Vulkan (whose full-screen viewport is
-// not flipped) but the bottom row on Direct3D. Programs that read
-// SV_Position (present) agree on both; programs that read `uv` (bloom,
-// environment filtering) see it flipped on Direct3D 12 until the vertex
-// stage accounts for the API.
+// The vertex stage puts uv (0, 0) at the top-left pixel on Direct3D as on
+// Vulkan (its DXIL build mirrors clip y, see BLUE_DXIL in
+// shaders/README.md), so programs that read `uv` match the Vulkan backend.
 //
 // Borrows `context` and `root_signature`. Neither copyable nor movable.
 class FullscreenPass {

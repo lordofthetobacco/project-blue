@@ -13,6 +13,7 @@
 #include "render/d3d12/buffer.h"
 #include "render/d3d12/descriptor_heaps.h"
 #include "render/d3d12/image.h"
+#include "render/d3d12/samplers.h"
 #include "render/d3d12/texture_cache.h"
 #include "render/draw_list.h"
 #include "render/material_params.h"
@@ -31,7 +32,7 @@ class D3d12Context;
 // defaults for empty slots). The parameters live in one upload-heap buffer,
 // kParamsStride bytes per table slot (the table's slot number is the
 // parameter block's), written once per version. The sampler is
-// Samplers::material().
+// Samplers::material() (sampler()).
 //
 // Updating a material gives it a fresh table (and parameter block) and
 // retires the old one until no frame in flight can read it (BeginFrame()):
@@ -44,7 +45,8 @@ class MaterialSystem {
   static constexpr uint64_t kParamsStride =
       D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
 
-  MaterialSystem(const D3d12Context& context, const TextureCache& textures);
+  MaterialSystem(const D3d12Context& context, const TextureCache& textures,
+                 const Samplers& samplers);
   ~MaterialSystem();
 
   MaterialSystem(const MaterialSystem&) = delete;
@@ -88,6 +90,10 @@ class MaterialSystem {
     return materials_[static_cast<size_t>(id)].desc;
   }
   [[nodiscard]] size_t count() const { return materials_.size(); }
+  // The sampler table every material's textures are read with.
+  [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE sampler() const {
+    return samplers_.material();
+  }
 
  private:
   struct Material {
@@ -106,6 +112,7 @@ class MaterialSystem {
 
   const D3d12Context& context_;
   const TextureCache& textures_;
+  const Samplers& samplers_;
   // kParamsStride bytes per table slot of the descriptor heaps.
   Buffer params_;
   std::vector<Material> materials_;

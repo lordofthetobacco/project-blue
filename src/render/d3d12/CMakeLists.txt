@@ -70,13 +70,17 @@ add_library(blue_render_d3d12 STATIC
     d3d12_context.cc
     d3d12_renderer.cc
     descriptor_heaps.cc
+    draw_record.cc
+    environment.cc
     format.cc
+    frame_globals.cc
     fullscreen_pass.cc
     gpu_timer.cc
     image.cc
     material_system.cc
     mesh.cc
     pipeline.cc
+    render_targets.cc
     ring_allocator.cc
     root_layout.cc
     root_signature.cc
@@ -87,6 +91,11 @@ add_library(blue_render_d3d12 STATIC
     swapchain.cc
     texture_cache.cc
     upload_ring.cc
+    passes/depth_prepass.cc
+    passes/mesh_pass.cc
+    passes/scene_pass.cc
+    passes/skybox_pass.cc
+    passes/tonemap_pass.cc
 )
 
 target_include_directories(blue_render_d3d12 PUBLIC ${PROJECT_SOURCE_DIR}/src)

@@ -23,10 +23,6 @@ namespace blue::render::d3d12 {
 
 namespace {
 
-constexpr D3D12_RESOURCE_STATES kSampledState =
-    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-
 // One texture to create and fill.
 struct MipChain {
   TextureFormat format = TextureFormat::kRgba8Unorm;
@@ -88,6 +84,39 @@ Image MakeSolidTexture(const D3d12Context& context, std::array<uint8_t, 4> rgba,
 }
 
 }  // namespace
+
+Image CreateSampledImage(
+    const D3d12Context& context, const ImageDesc& desc, CopyBlock block,
+    std::span<const std::span<const std::byte>> subresources) {
+  if (subresources.size() != size_t{desc.mip_levels} * desc.layers) {
+    core::log::Fatal("Texture of {} mips x {} layers given {} subresources",
+                     desc.mip_levels, desc.layers, subresources.size());
+  }
+  ImageDesc sampled = desc;
+  sampled.flags = D3D12_RESOURCE_FLAG_NONE;
+  sampled.initial_state = D3D12_RESOURCE_STATE_COPY_DEST;
+  sampled.clear_value.reset();
+  Image image(context, sampled);
+  image.CreateSrv(desc.format, /*shader_visible=*/false);
+  uint64_t total_bytes = 0;
+  for (const std::span<const std::byte> bytes : subresources) {
+    total_bytes += AlignUp(bytes.size_bytes(), kPlacementAlignment) * 2;
+  }
+  StagingUploader uploader(context, total_bytes);
+  for (uint32_t layer = 0; layer < desc.layers; ++layer) {
+    for (uint32_t mip = 0; mip < desc.mip_levels; ++mip) {
+      uploader.CopyToTexture(subresources[image.subresource(mip, layer)],
+                             image.resource(), desc.format, block, desc.extent,
+                             mip, layer, desc.mip_levels);
+    }
+  }
+  {
+    BarrierBatch barriers(uploader.cmd());
+    image.Transition(barriers, kSampledState);
+  }
+  uploader.Finish();
+  return image;
+}
 
 TextureCache::TextureCache(const D3d12Context& context) : context_(context) {
   defaults_[static_cast<size_t>(DefaultTexture::kWhite)] =

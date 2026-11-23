@@ -1,6 +1,6 @@
-// Direct3D 12 backend tests that need a device (package D1): uploads through
+// Direct3D 12 backend tests that need a device (its internals): uploads through
 // the backend's staging path read back exactly ("clear_and_upload"), the
-// frame's clear + present path, readbacks, footprints against the device,
+// frame's output and viewport paths, readbacks, footprints against the device,
 // shader hot reload to DXIL. Run on the hardware adapter and on WARP
 // (--adapter=software); --gpu-validation adds the debug layer with GPU-based
 // validation, whose errors fail the tests.
@@ -441,20 +441,29 @@ bool Uniform(const RgbaImage& image, std::array<uint8_t, 4> rgba) {
   return !image.rgba.empty();
 }
 
-constexpr std::array<uint8_t, 4> kPlaceholderPixel = {32, 40, 56, 255};
+// Returns `image` with red and blue swapped.
+RgbaImage SwapRedBlue(RgbaImage image) {
+  for (size_t i = 0; i + 3 < image.rgba.size(); i += 4) {
+    std::swap(image.rgba[i], image.rgba[i + 2]);
+  }
+  return image;
+}
 
-TEST_CASE("The d3d12 frame clears and presents to the output and viewport") {
+bool Same(const RgbaImage& a, const RgbaImage& b) {
+  return Passes(Compare(a, b, 0), kExact);
+}
+
+TEST_CASE("The d3d12 frame presents to the output and the viewport alike") {
   if (!Testing()) {
     return;
   }
   TestRenderer renderer = MakeD3d12Renderer(HeadlessOptions());
-  for (const bool fxaa : {false, true}) {
-    INFO("fxaa ", fxaa);
-    const RgbaImage output = DrawAndRead(*renderer.backend, false, fxaa);
-    CHECK(output.width == kSceneWidth);
-    CHECK(output.height == kSceneHeight);
-    CHECK(Uniform(output, kPlaceholderPixel));
-  }
+  // An empty scene: the default sky, tonemapped.
+  const RgbaImage output = DrawAndRead(*renderer.backend, false, false);
+  CHECK(output.width == kSceneWidth);
+  CHECK(output.height == kSceneHeight);
+  CHECK_FALSE(Uniform(output, {output.rgba[0], output.rgba[1], output.rgba[2],
+                               255}));  // The sky has a gradient.
   CHECK(renderer.backend->output_extent().width == kSceneWidth);
   CHECK(renderer.backend->gpu_frame_ms().has_value());
   CHECK(renderer.backend->gpu_scope_ms(render::GpuScope::kPresent).has_value());
@@ -463,7 +472,7 @@ TEST_CASE("The d3d12 frame clears and presents to the output and viewport") {
   // cleared window output.
   const RgbaImage viewport = DrawAndRead(*renderer.backend, true, false);
   CHECK(viewport.width == kSceneWidth);
-  CHECK(Uniform(viewport, kPlaceholderPixel));
+  CHECK(Same(viewport, output));
   CHECK(renderer.backend->viewport().generation == 1);
   CHECK(renderer.backend->viewport().texture != 0);
   // The window output of a viewport frame is the UI's black background.
@@ -522,6 +531,7 @@ TEST_CASE("The d3d12 backend draws an ImGui frame over the output") {
   }
   TestRenderer renderer = MakeD3d12Renderer(HeadlessOptions());
   render::RendererBackend& backend = *renderer.backend;
+  const RgbaImage without_ui = DrawAndRead(backend, false, false);
   ImGuiContext* imgui = ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.DisplaySize = ImVec2(static_cast<float>(kSceneWidth),
@@ -549,7 +559,8 @@ TEST_CASE("The d3d12 backend draws an ImGui frame over the output") {
   render::ViewportPixels pixels;
   REQUIRE(backend.TakeViewportReadback(ticket, pixels) ==
           render::ReadbackStatus::kReady);
-  // Inside the window: ImGui's colours; far from it: the scene stand-in.
+  // Inside the window: ImGui's colours; far from it: the scene as drawn
+  // without UI.
   const auto pixel = [&pixels](uint32_t x, uint32_t y) {
     const size_t at = (size_t{y} * pixels.width + x) * 4;
     return std::array<uint8_t, 4>{static_cast<uint8_t>(pixels.rgba[at]),
@@ -557,8 +568,14 @@ TEST_CASE("The d3d12 backend draws an ImGui frame over the output") {
                                   static_cast<uint8_t>(pixels.rgba[at + 2]),
                                   static_cast<uint8_t>(pixels.rgba[at + 3])};
   };
-  CHECK(pixel(100, 60) != kPlaceholderPixel);
-  CHECK(pixel(600, 300) == kPlaceholderPixel);
+  const auto scene_pixel = [&without_ui](uint32_t x, uint32_t y) {
+    const size_t at = (size_t{y} * without_ui.width + x) * 4;
+    return std::array<uint8_t, 4>{without_ui.rgba[at], without_ui.rgba[at + 1],
+                                  without_ui.rgba[at + 2],
+                                  without_ui.rgba[at + 3]};
+  };
+  CHECK(pixel(100, 60) != scene_pixel(100, 60));
+  CHECK(pixel(600, 300) == scene_pixel(600, 300));
 
   backend.WaitIdle();
   backend.ShutdownImGuiRenderer();
@@ -607,7 +624,7 @@ TEST_CASE("An edited d3d12 shader is reloaded; a broken edit keeps the old one")
   options.shader_source_dir = dir.path();
   TestRenderer renderer = MakeD3d12Renderer(options);
   render::RendererBackend& backend = *renderer.backend;
-  CHECK(Uniform(DrawAndRead(backend, false, false), kPlaceholderPixel));
+  const RgbaImage before = DrawAndRead(backend, false, false);
 
   // Red and blue swapped in the present pass's output.
   std::string swapped = original;
@@ -618,7 +635,8 @@ TEST_CASE("An edited d3d12 shader is reloaded; a broken edit keeps the old one")
   poll(backend);
   CHECK_MESSAGE(backend.last_shader_error().empty(),
                 backend.last_shader_error());
-  CHECK(Uniform(DrawAndRead(backend, false, false), {56, 40, 32, 255}));
+  const RgbaImage swapped_image = DrawAndRead(backend, false, false);
+  CHECK(Same(swapped_image, SwapRedBlue(before)));
 
   // A broken edit: the error names the file, the old pipeline stays.
   std::string broken = original;
@@ -627,12 +645,12 @@ TEST_CASE("An edited d3d12 shader is reloaded; a broken edit keeps the old one")
   poll(backend);
   CHECK(std::string(backend.last_shader_error()).find("present.slang") !=
         std::string::npos);
-  CHECK(Uniform(DrawAndRead(backend, false, false), {56, 40, 32, 255}));
+  CHECK(Same(DrawAndRead(backend, false, false), swapped_image));
 
   write(original);
   poll(backend);
   CHECK(backend.last_shader_error().empty());
-  CHECK(Uniform(DrawAndRead(backend, false, false), kPlaceholderPixel));
+  CHECK(Same(DrawAndRead(backend, false, false), before));
   CheckValidation(backend);
 }
 #endif  // BLUE_SHADER_HOT_RELOAD

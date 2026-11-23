@@ -17,15 +17,21 @@ struct FullscreenVaryings {
 };
 
 // One triangle that covers the whole viewport. No vertex buffer: vertex i is
-// at (-1, -1), (3, -1), (-1, 3). The viewport is not flipped, so clip
-// y = -1 is the top row.
+// at uv (0, 0), (2, 0), (0, 2), uv (0, 0) being the top-left corner. Vulkan
+// (full-screen viewport not flipped): clip y = -1 is the top row; Direct3D:
+// clip y = +1 is, so the DXIL build mirrors y and uv means the same texel on
+// both.
 [shader("vertex")]
 FullscreenVaryings VertexMain(uint vertexIndex : SV_VertexID)
 {
     const float2 uv = float2(float((vertexIndex << 1) & 2u), float(vertexIndex & 2u));
     FullscreenVaryings output;
     output.uv = uv;
+#ifdef BLUE_DXIL
+    output.position = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+#else
     output.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
+#endif
     return output;
 }
 

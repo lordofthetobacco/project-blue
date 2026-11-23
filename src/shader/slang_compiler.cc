@@ -125,6 +125,10 @@ class SlangCompiler::Impl {
     for (const Define& define : defines) {
       macros.push_back({define.name.c_str(), define.value.c_str()});
     }
+    // As cmake/Shaders.cmake: DXIL sources see BLUE_DXIL (shaders/README.md).
+    if (!spirv) {
+      macros.push_back({"BLUE_DXIL", "1"});
+    }
 
     // The flags of cmake/Shaders.cmake.
     const bool debug = mode_ == CompileMode::kDebug;

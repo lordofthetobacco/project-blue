@@ -75,7 +75,7 @@ class DescriptorHeaps {
   static constexpr uint32_t kTableCount = 4096;
   static constexpr uint32_t kTransientCount =
       kShaderVisibleCount - kSingleCount - kTableSize * kTableCount;
-  static constexpr uint32_t kRtvCount = 256;
+  static constexpr uint32_t kRtvCount = 512;
   static constexpr uint32_t kDsvCount = 64;
   static constexpr uint32_t kStagingCount = 32768;
   static constexpr uint32_t kSamplerCount = 256;

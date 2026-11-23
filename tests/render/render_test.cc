@@ -1,6 +1,7 @@
 #include <SDL3/SDL_init.h>
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,7 @@
 
 #include "platform/file_system.h"
 #include "render/backend.h"
+#include "render/frame_plan.h"
 #include "render/renderer.h"
 #include "shader/compile_mode.h"
 #include "tests/render/harness_options.h"
@@ -28,7 +30,22 @@ namespace {
 struct SceneResult {
   RgbaImage image;
   render::ValidationStats validation;
+  // The backend drew everything the scene asks for (DrawsEverything()).
+  bool complete = true;
 };
+
+// Whether `backend` draws everything `scene` asks for. The Direct3D 12
+// backend gains its passes package by package (D2: depth pre-pass, meshes,
+// sky, tonemap, present; no shadows, SSAO, bloom, motion blur, sights,
+// scope or editor overlay yet).
+bool DrawsEverything(render::Backend backend, const TestScene& scene) {
+  if (backend != render::Backend::kD3d12) {
+    return true;
+  }
+  const render::FramePlan plan = render::MakeFramePlan(scene.view, {});
+  return !plan.shadows && !plan.ssao && !plan.bloom && !plan.motion_blur &&
+         !plan.overlay && !plan.scope && !scene.view.sight.has_value();
+}
 
 // A fresh headless renderer for every scene: no state leaks between scenes,
 // so each golden depends only on its own scene.
@@ -90,11 +107,33 @@ SceneResult DrawScene(render::Renderer* renderer, const TestScene* scene) {
   return result;
 }
 
-// Draws `scene_name` with a fresh renderer.
-SceneResult RenderScene(std::string_view scene_name, render::Backend backend) {
+// Turns off what the Direct3D 12 backend does not draw yet (shadows, SSAO,
+// bloom, weapon motion blur, the sights and scope, the editor overlay), so
+// the rest of a scene (materials, sky, tonemapping) can be compared.
+void OnlyD2Features(TestScene& scene) {
+  scene.view.shadows_enabled = false;
+  scene.view.post.ssao_enabled = false;
+  scene.view.post.bloom_enabled = false;
+  scene.view.post.weapon_motion_blur_enabled = false;
+  scene.view.scope.reset();
+  scene.view.sight.reset();
+  scene.view.lines = {};
+  scene.view.overlay_lines = {};
+  scene.view.selected_draws = {};
+}
+
+// Draws `scene_name` with a fresh renderer, after `adjust` (when set)
+// changed the built scene.
+SceneResult RenderScene(std::string_view scene_name, render::Backend backend,
+                        void (*adjust)(TestScene&) = nullptr) {
   const std::unique_ptr<render::Renderer> renderer = MakeRenderer(backend);
   const std::unique_ptr<TestScene> scene = BuildScene(scene_name, *renderer);
-  return DrawScene(renderer.get(), scene.get());
+  if (adjust != nullptr) {
+    adjust(*scene);
+  }
+  SceneResult result = DrawScene(renderer.get(), scene.get());
+  result.complete = DrawsEverything(backend, *scene);
+  return result;
 }
 
 std::string GoldenPath(std::string_view scene) {
@@ -115,20 +154,11 @@ const Tolerance& GoldenTolerance() {
              : kExact;
 }
 
-// Whether `backend` draws the scenes yet: the Direct3D 12 backend only
-// clears and presents until package D2 adds the scene passes (its own tests
-// are in d3d12_render_test.cc).
-bool DrawsScenes(render::Backend backend) {
-  return backend != render::Backend::kD3d12;
-}
-
 TEST_CASE("Headless scenes match the golden images") {
   for (const render::Backend backend_id : Options().backends) {
     const std::string backend(render::BackendName(backend_id));
-    if (!DrawsScenes(backend_id)) {
-      std::printf("(golden scenes skipped for %s: no scene passes yet)\n",
-                  backend.c_str());
-      continue;
+    if (backend_id == render::Backend::kD3d12) {
+      continue;  // Compared with Vulkan (cross-backend tolerance) below.
     }
     for (const std::string_view scene : SceneNames()) {
       const std::string label = std::string(scene) + "." + backend;
@@ -174,6 +204,91 @@ TEST_CASE("Headless scenes match the golden images") {
         }
       }
       CHECK_MESSAGE(passed, label, " vs golden (", tolerance.name,
+                    "): ", Describe(metrics));
+    }
+  }
+}
+
+// Each scene through every non-Vulkan backend, compared with the Vulkan
+// image of the same run (design §5.2) on the hardware adapter, or with the
+// Vulkan golden (rendered on the reference GPU) when Vulkan does not run in
+// this run (WARP: --adapter=software --backend=d3d12). Tolerances of design
+// §5.3: cross-backend on hardware, software adapter on WARP. Scenes the
+// backend cannot draw completely yet print their metrics but are not
+// checked.
+TEST_CASE("Headless scenes match Vulkan on the other backends") {
+  const bool software =
+      Options().adapter == render::AdapterPreference::kSoftware;
+  const bool vulkan_in_run =
+      !software && std::ranges::find(Options().backends,
+                                     render::Backend::kVulkan) !=
+                       Options().backends.end();
+  const Tolerance& tolerance = software ? kSoftwareAdapter : kCrossBackend;
+  for (const render::Backend backend_id : Options().backends) {
+    if (backend_id != render::Backend::kD3d12) {
+      continue;  // Vulkan is the reference; Metal is compared on a Mac.
+    }
+    const std::string backend(render::BackendName(backend_id));
+    for (const std::string_view scene : SceneNames()) {
+      const std::string label = std::string(scene) + "." + backend;
+      INFO("scene ", label);
+      const SceneResult result = RenderScene(scene, backend_id);
+      REQUIRE(result.image.valid());
+      CHECK_MESSAGE(result.validation.errors == 0,
+                    "GPU validation errors: ", result.validation.errors);
+      CHECK(WritePng(OutPath(scene, backend), result.image));
+      std::optional<RgbaImage> reference;
+      if (vulkan_in_run) {
+        reference = RenderScene(scene, render::Backend::kVulkan).image;
+      } else {
+        reference = ReadPng(GoldenPath(scene));
+      }
+      REQUIRE_MESSAGE(reference.has_value(), "no reference for ", label);
+      const CompareMetrics metrics =
+          Compare(result.image, *reference, tolerance.outlier_threshold);
+      const bool passed = Passes(metrics, tolerance);
+      std::printf("%-18s %s vs %s  %s  %s (validation %s, %u warnings)\n",
+                  std::string(scene).c_str(), backend.c_str(),
+                  vulkan_in_run ? "vulkan" : "golden",
+                  !result.complete ? "n/a " : (passed ? "ok  " : "FAIL"),
+                  Describe(metrics).c_str(),
+                  result.validation.enabled ? "on" : "off",
+                  result.validation.warnings);
+      if (!result.complete) {
+        // Missing passes (see DrawsEverything()): compare the rest of the
+        // scene instead, with both backends (no golden of that).
+        if (!vulkan_in_run) {
+          continue;
+        }
+        const SceneResult subset =
+            RenderScene(scene, backend_id, &OnlyD2Features);
+        REQUIRE(subset.complete);
+        CHECK(subset.validation.errors == 0);
+        const RgbaImage subset_reference =
+            RenderScene(scene, render::Backend::kVulkan, &OnlyD2Features).image;
+        const CompareMetrics subset_metrics = Compare(
+            subset.image, subset_reference, tolerance.outlier_threshold);
+        const bool subset_passed = Passes(subset_metrics, tolerance);
+        std::printf("%-18s %s vs vulkan  %s  %s (D2 subset)\n",
+                    std::string(scene).c_str(), backend.c_str(),
+                    subset_passed ? "ok  " : "FAIL",
+                    Describe(subset_metrics).c_str());
+        CHECK(WritePng(OutPath(scene, backend + ".d2"), subset.image));
+        if (!subset_passed) {
+          CHECK(WritePng(OutPath(scene, "vulkan.d2"), subset_reference));
+        }
+        CHECK_MESSAGE(subset_passed, label, " (D2 subset) vs Vulkan (",
+                      tolerance.name, "): ", Describe(subset_metrics));
+        continue;
+      }
+      if (!passed) {
+        CHECK(WritePng(OutPath(scene, backend + ".ref"), *reference));
+        if (metrics.same_size) {
+          CHECK(WritePng(OutPath(scene, backend + ".diff"),
+                         AmplifiedDiff(result.image, *reference, 16)));
+        }
+      }
+      CHECK_MESSAGE(passed, label, " vs Vulkan (", tolerance.name,
                     "): ", Describe(metrics));
     }
   }

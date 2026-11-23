@@ -17,7 +17,11 @@
 #include <utility>
 #include <vector>
 
+#include "camera/frustum.h"
 #include "core/extent.h"
+#include "lighting/cascades.h"
+#include "render/frame_plan.h"
+#include "render/frame_uniforms.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "platform/window.h"
@@ -27,6 +31,8 @@
 #include "render/d3d12/d3d12_context.h"
 #include "render/d3d12/format.h"
 #include "render/d3d12/image.h"
+#include "render/d3d12/passes/frame_context.h"
+#include "render/d3d12/passes/scene_pass.h"
 #include "render/d3d12/root_layout.h"
 #include "render/d3d12/staging_upload.h"
 #include "render/frame_config.h"
@@ -43,11 +49,8 @@ namespace {
 // The window output's format when headless and the editor viewport's
 // (resources and views): what the swapchain's views are.
 constexpr DXGI_FORMAT kOutputFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-// The LDR target: sRGB-encoded colour stored as UNORM, luma in alpha (the
-// Vulkan backend's kLdrFormat).
-constexpr DXGI_FORMAT kLdrFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 // The editor's window output under the UI.
-constexpr std::array<float, 4> kUiBackground = {0.0f, 0.0f, 0.0f, 1.0f};
+constexpr float kUiBackground[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
 // Neutral grey dielectric: what kDefaultMaterial looks like.
 material::MaterialDesc DefaultMaterialDesc() {
@@ -64,34 +67,6 @@ struct PresentConstants {
   int32_t fxaa = 0;
   float texel_size[2] = {0.0f, 0.0f};
 };
-
-// Returns a render target of `extent` in `format` (views in `format`, a
-// staging SRV, and with `shader_visible` one for ImGui), cleared to `clear`
-// (its optimized clear value) and left in `state`. Placed render targets
-// must be cleared or discarded before anything else uses them, so the clear
-// is submitted here (between frames: waits for the GPU).
-Image MakeTarget(const D3d12Context& context, core::Extent2D extent,
-                 DXGI_FORMAT format, D3D12_RESOURCE_STATES state,
-                 std::array<float, 4> clear, bool shader_visible,
-                 const wchar_t* name) {
-  D3D12_CLEAR_VALUE clear_value{};
-  clear_value.Format = format;
-  std::copy(clear.begin(), clear.end(), clear_value.Color);
-  Image image(context, {.extent = extent,
-                        .format = format,
-                        .flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-                        .initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET,
-                        .clear_value = clear_value,
-                        .name = name});
-  image.AddRtv(format);
-  image.CreateSrv(format, shader_visible);
-  context.SubmitImmediate([&](ID3D12GraphicsCommandList* cmd) {
-    cmd->ClearRenderTargetView(image.rtv(), clear.data(), 0, nullptr);
-    BarrierBatch barriers(cmd);
-    image.Transition(barriers, state);
-  });
-  return image;
-}
 
 std::optional<Swapchain> MakeSwapchain(const D3d12Context& context,
                                        const platform::Window* window) {
@@ -116,7 +91,7 @@ D3d12Renderer::D3d12Renderer(const RendererOptions& options,
       samplers_(context_, options.max_anisotropy),
       upload_ring_(context_),
       textures_(context_),
-      materials_(context_, textures_),
+      materials_(context_, textures_, samplers_),
       shader_programs_(context_, core::JoinPath(options.shader_dir, "dxil"),
                        options.shader_source_dir, options.shader_mode),
       fullscreen_root_(context_.device(), FullscreenRootLayout(),
@@ -128,14 +103,22 @@ D3d12Renderer::D3d12Renderer(const RendererOptions& options,
                       L"blue scene sky root signature"),
       scene_scope_root_(context_.device(), SceneRootLayout(kScopeBindings),
                         L"blue scene scope root signature"),
-      ldr_(MakeTarget(context_, output_extent(), kLdrFormat,
-                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                      kPlaceholderColor, false, L"blue ldr")),
+      targets_(context_, output_extent()),
+      frame_globals_(context_, samplers_),
+      environment_(context_, shader_programs_, fullscreen_root_, samplers_,
+                   frame_globals_),
+      depth_prepass_(context_, shader_programs_, scene_material_root_,
+                     frame_globals_, materials_, meshes_),
+      mesh_pass_(context_, shader_programs_, scene_material_root_,
+                 frame_globals_, materials_, meshes_),
+      skybox_pass_(context_, shader_programs_, scene_sky_root_, frame_globals_,
+                   environment_, samplers_),
+      tonemap_pass_(context_, shader_programs_, fullscreen_root_, samplers_),
       present_pass_(context_, shader_programs_, fullscreen_root_,
                     ShaderProgram::kPresent, kOutputFormat),
       gpu_timer_(context_) {
   if (!swapchain_) {
-    output_image_ = MakeTarget(context_, headless_extent_, kOutputFormat,
+    output_image_ = MakeColorTarget(context_, headless_extent_, kOutputFormat,
                                D3D12_RESOURCE_STATE_COPY_SOURCE, kUiBackground,
                                false, L"blue headless output");
     core::log::Info("Headless output {} x {}", headless_extent_.width,
@@ -268,8 +251,10 @@ MemoryStats D3d12Renderer::memory_stats() const {
   stats.texture_count = static_cast<uint32_t>(textures.count);
   stats.mesh_bytes = mesh_bytes_;
   stats.mesh_count = mesh_count_;
-  stats.render_target_bytes = ldr_.size_bytes() + viewport_image_.size_bytes() +
+  stats.render_target_bytes = targets_.size_bytes() +
+                              viewport_image_.size_bytes() +
                               output_image_.size_bytes();
+  stats.environment_bytes = environment_.size_bytes();
   for (const Retired<Mesh>& retired : retired_meshes_) {
     stats.retired_bytes += retired.object.size_bytes();
   }
@@ -283,32 +268,17 @@ MemoryStats D3d12Renderer::memory_stats() const {
   return stats;
 }
 
-void D3d12Renderer::SetEnvironment(const asset::ImageDataF& equirect,
-                                   float intensity, float rotation_radians) {
-  static_cast<void>(equirect);
-  context_.WaitIdle();
-  SetEnvironmentParams(intensity, rotation_radians);
-}
-
-void D3d12Renderer::ResetEnvironment() {
-  context_.WaitIdle();
-  SetEnvironmentParams(1.0f, 0.0f);
-}
-
-void D3d12Renderer::SetEnvironmentParams(float intensity,
-                                         float rotation_radians) {
-  environment_intensity_ = intensity;
-  environment_rotation_ = rotation_radians;
-}
-
 core::Extent2D D3d12Renderer::output_extent() const {
   return swapchain_ ? swapchain_->extent() : headless_extent_;
 }
 
-void D3d12Renderer::ResizeTargets(core::Extent2D extent) {
-  ldr_ = MakeTarget(context_, extent, kLdrFormat,
-                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                    kPlaceholderColor, false, L"blue ldr");
+void D3d12Renderer::ComputeWorldBounds(const SceneView& view) {
+  world_bounds_.clear();
+  world_bounds_.reserve(view.draws.size());
+  for (const DrawItem& item : view.draws) {
+    world_bounds_.push_back(camera::TransformAabb(
+        {.min = item.bounds.min, .max = item.bounds.max}, item.transform));
+  }
 }
 
 bool D3d12Renderer::RebuildSwapchain() {
@@ -319,7 +289,7 @@ bool D3d12Renderer::RebuildSwapchain() {
   context_.WaitIdle();
   swapchain_->Resize(size);
   if (viewport_.generation == 0) {  // Otherwise they follow the viewport.
-    ResizeTargets(swapchain_->extent());
+    targets_.Resize(swapchain_->extent());
   }
   swapchain_dirty_ = false;
   return true;
@@ -349,10 +319,10 @@ void D3d12Renderer::ResizeViewport(core::Extent2D size) {
   // The UI may sample it before the first DrawViewportFrame(): created in
   // PIXEL_SHADER_RESOURCE.
   viewport_image_ =
-      MakeTarget(context_, size, kOutputFormat,
+      MakeColorTarget(context_, size, kOutputFormat,
                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kUiBackground,
                  /*shader_visible=*/true, L"blue viewport output");
-  ResizeTargets(size);
+  targets_.Resize(size);
   viewport_ = {
       .texture = static_cast<ImTextureID>(viewport_image_.shader_srv().ptr),
       .extent = size,
@@ -450,7 +420,7 @@ void D3d12Renderer::RecordUi(ID3D12GraphicsCommandList* cmd, ImDrawData* ui,
                              Output output,
                              D3D12_CPU_DESCRIPTOR_HANDLE target) {
   if (output == Output::kViewport) {
-    cmd->ClearRenderTargetView(target, kUiBackground.data(), 0, nullptr);
+    cmd->ClearRenderTargetView(target, kUiBackground, 0, nullptr);
   }
   if (ui == nullptr || !imgui_initialized_) {
     return;
@@ -487,9 +457,19 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   materials_.BeginFrame(frame_serial_);
   DestroyRetired();
 
-  // Only the stand-in for the scene so far (see the top of the header):
-  // nothing is drawn, so the draw statistics stay zero.
+  // Cull and sort; the frame's uniforms. No shadow cascades yet (package
+  // D3): frames render unshadowed.
+  const FramePlan plan = MakeFramePlan(view, caps());
+  ComputeWorldBounds(view);
+  const camera::Frustum camera_frustum(view.camera.projection *
+                                       view.camera.view);
   stats_ = {};
+  draw_list_.Build(view, world_bounds_, camera_frustum,
+                   draw_source_.resources(), stats_);
+  const std::array<lighting::Cascade, lighting::kCascadeCount> cascades{};
+  FrameUniforms uniforms = MakeFrameUniforms(view, cascades, /*shadows=*/false,
+                                             targets_.extent());
+  environment_.FillUniforms(uniforms);
 
   CheckHr(frame.allocator->Reset());
   ID3D12GraphicsCommandList* cmd = frame.list.Get();
@@ -497,20 +477,35 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   heaps.Bind(cmd);
   gpu_timer_.Begin(cmd, frame_index_, GpuScope::kTotal);
 
-  // The scene stand-in.
-  {
-    BarrierBatch barriers(cmd);
-    ldr_.Transition(barriers, D3D12_RESOURCE_STATE_RENDER_TARGET);
-  }
-  cmd->ClearRenderTargetView(ldr_.rtv(), kPlaceholderColor.data(), 0,
-                             nullptr);
+  const FrameContext ctx{
+      .cmd = cmd,
+      .view = view,
+      .plan = plan,
+      .targets = targets_,
+      .frame = frame_globals_.Prepare(uniforms, upload_ring_),
+      .draw_list = draw_list_.entries(),
+      .stats = stats_,
+  };
+  // Times `record` as `scope`.
+  const auto timed = [&](GpuScope scope, const auto& record) {
+    gpu_timer_.Begin(cmd, frame_index_, scope);
+    record();
+    gpu_timer_.End(cmd, frame_index_, scope);
+  };
+  timed(GpuScope::kDepthPrepass, [&] { depth_prepass_.Record(ctx); });
+  timed(GpuScope::kScene, [&] {
+    BeginScenePass(ctx);
+    mesh_pass_.Draw(ctx);
+    skybox_pass_.Draw(ctx);
+    EndScenePass(ctx);
+  });
+  timed(GpuScope::kTonemap, [&] { tonemap_pass_.Record(ctx); });
 
   // The window output: the swapchain buffer, or the headless output image.
   ID3D12Resource* window_resource = nullptr;
   D3D12_CPU_DESCRIPTOR_HANDLE window_rtv{};
   {
     BarrierBatch barriers(cmd);
-    ldr_.Transition(barriers, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     if (swapchain_) {
       swapchain_->Transition(barriers, D3D12_RESOURCE_STATE_RENDER_TARGET);
       window_resource = swapchain_->buffer();
@@ -529,7 +524,7 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
   // Present: LDR -> the frame's scene output.
   gpu_timer_.Begin(cmd, frame_index_, GpuScope::kPresent);
   {
-    const core::Extent2D extent = ldr_.extent();
+    const core::Extent2D extent = targets_.extent();
     const PresentConstants constants{
         .decode_srgb = 1,  // Every output has _SRGB views.
         .fxaa = view.post.fxaa_enabled ? 1 : 0,
@@ -537,7 +532,7 @@ void D3d12Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
                        1.0f / static_cast<float>(extent.height)},
     };
     const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 1> inputs = {
-        ldr_.staging_srv()};
+        targets_.ldr().staging_srv()};
     if (output == Output::kViewport) {
       viewport_present_pass_->Record(cmd, viewport_image_.rtv(), extent,
                                      inputs, samplers_.linear_clamp(),

@@ -17,17 +17,27 @@
 
 #include "asset/image_decoder.h"
 #include "asset/mesh_data.h"
+#include "camera/frustum.h"
 #include "core/extent.h"
 #include "material/material.h"
 #include "platform/window.h"
 #include "render/backend.h"
+#include "render/draw_list.h"
 #include "render/d3d12/buffer.h"
 #include "render/d3d12/d3d12_context.h"
+#include "render/d3d12/draw_record.h"
+#include "render/d3d12/environment.h"
+#include "render/d3d12/frame_globals.h"
 #include "render/d3d12/fullscreen_pass.h"
 #include "render/d3d12/gpu_timer.h"
 #include "render/d3d12/image.h"
 #include "render/d3d12/material_system.h"
 #include "render/d3d12/mesh.h"
+#include "render/d3d12/passes/depth_prepass.h"
+#include "render/d3d12/passes/mesh_pass.h"
+#include "render/d3d12/passes/skybox_pass.h"
+#include "render/d3d12/passes/tonemap_pass.h"
+#include "render/d3d12/render_targets.h"
 #include "render/d3d12/root_signature.h"
 #include "render/d3d12/samplers.h"
 #include "render/d3d12/shader_programs.h"
@@ -43,49 +53,50 @@
 #include "render/scene_view.h"
 #include "render/texture_types.h"
 
-// How a frame is built (package D1)
-// ---------------------------------
-// D3d12Renderer owns the device and every resource kind of the backend:
-// meshes, textures, materials (descriptor tables), the shader programs
-// (DXIL, hot reload), the root signatures of the binding_layout.h families,
-// samplers, the upload ring, GPU timers and memory statistics. The scene
-// passes come with packages D2-D4; until then a frame is:
+// How a frame is built
+// --------------------
+// D3d12Renderer::DrawFrameTo() records the passes in order, each wrapped in
+// a GPU timer scope, the same frame as the Vulkan backend's (passes/ holds
+// one class or pair of functions per pass):
 //
-//   scene stand-in       the LDR target is cleared to kPlaceholderColor
-//                        (sRGB-encoded colour, luma in alpha, like the
-//                        tonemapper writes it); SceneView draws, lights and
-//                        the environment are not rendered yet
-//   present              FullscreenPass(present): LDR -> output (FXAA when
-//                        SceneView::post.fxaa_enabled), into the swapchain
-//                        buffer, the headless output image or the editor
-//                        viewport image
+//   depth pre-pass       DepthPrepass      draw list -> depth
+//   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
+//                        SkyboxPass -> EndScenePass
+//   tonemap              TonemapPass       hdr -> ldr (sRGB + luma)
+//   present              FullscreenPass(present): ldr -> the window output
+//                        (FXAA), or -> the editor viewport image
 //   ui                   ImGui (imgui_impl_dx12) on the window output; the
 //                        editor's window output is cleared to black first
 //   readbacks            copies for RequestViewportReadback() /
 //                        RequestOutputReadback()
 //
+// Not yet (packages D3, D4): shadow cascades, SSAO, bloom, the scope
+// picture, the sights, weapon motion blur and the editor overlay; frames
+// that ask for them render without them.
+//
+// The visible submeshes are culled and sorted once per frame by the shared
+// DrawList and recorded by RecordDrawList() (draw_record.h). The frame set
+// (FrameUniforms, shadow map, environment, BRDF LUT, AO) is FrameGlobals';
+// the image-based lighting is Environment's.
+//
 // Headless (RendererOptions::window null) there is no swapchain: an
 // offscreen R8G8B8A8_UNORM_SRGB output image of RendererOptions::
 // headless_extent stands in for the swapchain buffer.
 //
-// States between frames: the LDR target and the viewport image are
+// States between frames: hdr, ldr, the environment images and the viewport
+// image are PIXEL_SHADER_RESOURCE, the depth target DEPTH_READ |
 // PIXEL_SHADER_RESOURCE, uploaded textures PIXEL | NON_PIXEL_SHADER_RESOURCE,
-// the swapchain buffers PRESENT; every pass transitions what it uses
-// through Image::Transition() (exact per-resource tracking, design §4.1).
+// the swapchain buffers PRESENT; every pass transitions what it uses through
+// Image::Transition() (exact per-resource tracking, design §4.1).
 
 namespace blue::render::d3d12 {
 
 // The Direct3D 12 backend of render::Renderer. Every public function has the
 // contract of the Renderer function of the same name (render/renderer.h);
-// what package D1 does not draw yet is listed above. Created by
+// the effects not drawn yet are listed above. Created by
 // CreateD3d12Renderer(). Neither copyable nor movable. Not thread-safe.
 class D3d12Renderer final : public RendererBackend {
  public:
-  // The colour of the scene stand-in, sRGB-encoded (what the LDR target
-  // holds): a dark slate blue, (32, 40, 56) of 255; alpha is its luma.
-  static constexpr std::array<float, 4> kPlaceholderColor = {
-      32.0f / 255.0f, 40.0f / 255.0f, 56.0f / 255.0f, 39.0f / 255.0f};
-
   // Takes `context`, which must have a device (D3d12Context::has_device()).
   D3d12Renderer(const RendererOptions& options,
                 std::unique_ptr<D3d12Context> context);
@@ -145,12 +156,18 @@ class D3d12Renderer final : public RendererBackend {
   }
   [[nodiscard]] MemoryStats memory_stats() const override;
 
-  // Package D2 renders the environment; until then these only wait for the
-  // GPU (like the real ones) and remember the parameters.
   void SetEnvironment(const asset::ImageDataF& equirect, float intensity,
-                      float rotation_radians) override;
-  void ResetEnvironment() override;
-  void SetEnvironmentParams(float intensity, float rotation_radians) override;
+                      float rotation_radians) override {
+    context_.WaitIdle();
+    environment_.Set(equirect, intensity, rotation_radians);
+  }
+  void ResetEnvironment() override {
+    context_.WaitIdle();
+    environment_.Set({}, 1.0f, 0.0f);
+  }
+  void SetEnvironmentParams(float intensity, float rotation_radians) override {
+    environment_.SetParams(intensity, rotation_radians);
+  }
 
   void RequestSwapchainRebuild() override { swapchain_dirty_ = true; }
   void SetVsync(bool enabled) override { vsync_ = enabled; }
@@ -167,7 +184,7 @@ class D3d12Renderer final : public RendererBackend {
   // No temporal scaler: the scene is rendered at the size of its target
   // (the window or the editor viewport).
   [[nodiscard]] core::Extent2D render_extent() const override {
-    return ldr_.extent();
+    return targets_.extent();
   }
   [[nodiscard]] core::Extent2D scene_output_extent() const override {
     return render_extent();
@@ -251,8 +268,8 @@ class D3d12Renderer final : public RendererBackend {
   void DestroyRetiredIfIdle();
   // Blocks until no frame in flight runs on the GPU any more.
   void WaitForFramesInFlight() const;
-  // Recreates the LDR target at `extent`.
-  void ResizeTargets(core::Extent2D extent);
+  // Computes the world-space bounds of every draw item into world_bounds_.
+  void ComputeWorldBounds(const SceneView& view);
   void ResizeViewport(core::Extent2D size);
   [[nodiscard]] bool RebuildSwapchain();
   // The body of DrawFrame() and DrawViewportFrame().
@@ -289,20 +306,31 @@ class D3d12Renderer final : public RendererBackend {
   MaterialSystem materials_;
   ShaderPrograms shader_programs_;
   RootSignature fullscreen_root_;
-  // The scene families (frame set + material / sky / scope set), created
-  // now so a binding table that Direct3D rejects fails at startup; the
-  // passes of package D2 use them.
+  // The scene families (frame set + material / sky / scope set); the scope
+  // one is used from package D4 on.
   RootSignature scene_material_root_;
   RootSignature scene_sky_root_;
   RootSignature scene_scope_root_;
-  // The tonemapped scene (sRGB-encoded colour, luma in alpha); render size.
-  Image ldr_;
+  RenderTargets targets_;
+  FrameGlobals frame_globals_;
+  Environment environment_;
+  // Declared before the passes that borrow it.
+  std::vector<Mesh> meshes_;
+  // The meshes and materials as the draw list reads them.
+  DrawListSource draw_source_{materials_, meshes_};
+  DrawList draw_list_;
+  // World-space bounds of the current frame's draw items (parallel to
+  // SceneView::draws); a member to reuse its allocation.
+  std::vector<camera::Aabb> world_bounds_;
+  DepthPrepass depth_prepass_;
+  MeshPass mesh_pass_;
+  SkyboxPass skybox_pass_;
+  TonemapPass tonemap_pass_;
   FullscreenPass present_pass_;
   // The present pass into the editor viewport image; created by the first
   // PrepareViewport().
   std::optional<FullscreenPass> viewport_present_pass_;
 
-  std::vector<Mesh> meshes_;
   uint64_t mesh_bytes_ = 0;
   uint32_t mesh_count_ = 0;
   std::vector<Retired<Mesh>> retired_meshes_;
@@ -319,11 +347,6 @@ class D3d12Renderer final : public RendererBackend {
 
   std::vector<Readback> readbacks_;
   uint64_t next_readback_ticket_ = 1;
-
-  // What SetEnvironment() / SetEnvironmentParams() asked for (rendered from
-  // package D2 on).
-  float environment_intensity_ = 1.0f;
-  float environment_rotation_ = 0.0f;
 
   std::array<Frame, kFramesInFlight> frames_;
   size_t frame_index_ = 0;

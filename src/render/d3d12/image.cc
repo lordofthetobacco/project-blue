@@ -16,7 +16,8 @@ namespace blue::render::d3d12 {
 
 void BarrierBatch::Transition(ID3D12Resource* resource,
                               D3D12_RESOURCE_STATES before,
-                              D3D12_RESOURCE_STATES after) {
+                              D3D12_RESOURCE_STATES after,
+                              uint32_t subresource) {
   if (count_ == kCapacity) {
     Flush();
   }
@@ -25,7 +26,7 @@ void BarrierBatch::Transition(ID3D12Resource* resource,
   barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
   barrier.Transition = {
       .pResource = resource,
-      .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+      .Subresource = subresource,
       .StateBefore = before,
       .StateAfter = after,
   };
@@ -86,9 +87,10 @@ Image& Image::operator=(Image&& other) noexcept {
     state_ = std::exchange(other.state_, D3D12_RESOURCE_STATE_COMMON);
     size_bytes_ = std::exchange(other.size_bytes_, 0);
     rtvs_ = std::exchange(other.rtvs_, {});
-    rtv_count_ = std::exchange(other.rtv_count_, 0);
     dsv_ = std::exchange(other.dsv_, {});
+    read_only_dsv_ = std::exchange(other.read_only_dsv_, {});
     staging_srv_ = std::exchange(other.staging_srv_, {});
+    mip_srvs_ = std::exchange(other.mip_srvs_, {});
     shader_srv_ = std::exchange(other.shader_srv_, {});
   }
   return *this;
@@ -97,57 +99,82 @@ Image& Image::operator=(Image&& other) noexcept {
 void Image::Release() {
   if (context_ != nullptr) {
     DescriptorHeaps& heaps = context_->descriptors();
-    for (size_t i = 0; i < rtv_count_; ++i) {
-      heaps.FreeRtv(rtvs_[i]);
+    for (const Descriptor& rtv : rtvs_) {
+      heaps.FreeRtv(rtv);
     }
     if (dsv_.valid()) {
       heaps.FreeDsv(dsv_);
+      heaps.FreeDsv(read_only_dsv_);
     }
     if (staging_srv_.valid()) {
       heaps.FreeStaging(staging_srv_);
+    }
+    for (const Descriptor& srv : mip_srvs_) {
+      heaps.FreeStaging(srv);
     }
     if (shader_srv_.valid()) {
       heaps.FreeSingle(shader_srv_);
     }
   }
-  rtv_count_ = 0;
+  rtvs_.clear();
   dsv_ = {};
+  read_only_dsv_ = {};
   staging_srv_ = {};
+  mip_srvs_.clear();
   shader_srv_ = {};
   allocation_.Reset();
   context_ = nullptr;
 }
 
-size_t Image::AddRtv(DXGI_FORMAT format) {
-  if (rtv_count_ == kMaxRtvs) {
-    core::log::Fatal("Image has {} render target views already", kMaxRtvs);
-  }
+size_t Image::AddRtv(DXGI_FORMAT format, uint32_t mip, uint32_t layer) {
   const Descriptor rtv = context_->descriptors().AllocateRtv();
   D3D12_RENDER_TARGET_VIEW_DESC desc{};
   desc.Format = format;
   if (layers_ > 1) {
     desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
-    desc.Texture2DArray = {.MipSlice = 0,
-                           .FirstArraySlice = 0,
+    desc.Texture2DArray = {.MipSlice = mip,
+                           .FirstArraySlice = layer,
                            .ArraySize = 1,
                            .PlaneSlice = 0};
   } else {
     desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-    desc.Texture2D = {.MipSlice = 0, .PlaneSlice = 0};
+    desc.Texture2D = {.MipSlice = mip, .PlaneSlice = 0};
   }
   context_->device()->CreateRenderTargetView(resource(), &desc, rtv.cpu);
-  rtvs_[rtv_count_] = rtv;
-  return rtv_count_++;
+  rtvs_.push_back(rtv);
+  return rtvs_.size() - 1;
 }
 
 void Image::CreateDsv(DXGI_FORMAT format) {
-  dsv_ = context_->descriptors().AllocateDsv();
+  DescriptorHeaps& heaps = context_->descriptors();
+  dsv_ = heaps.AllocateDsv();
+  read_only_dsv_ = heaps.AllocateDsv();
   D3D12_DEPTH_STENCIL_VIEW_DESC desc{};
   desc.Format = format;
   desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
   desc.Flags = D3D12_DSV_FLAG_NONE;
   desc.Texture2D.MipSlice = 0;
   context_->device()->CreateDepthStencilView(resource(), &desc, dsv_.cpu);
+  desc.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+  context_->device()->CreateDepthStencilView(resource(), &desc,
+                                             read_only_dsv_.cpu);
+}
+
+size_t Image::AddMipSrv(DXGI_FORMAT format, uint32_t mip) {
+  D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+  desc.Format = format;
+  desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+  desc.Texture2DArray = {.MostDetailedMip = mip,
+                         .MipLevels = 1,
+                         .FirstArraySlice = 0,
+                         .ArraySize = layers_,
+                         .PlaneSlice = 0,
+                         .ResourceMinLODClamp = 0.0f};
+  const Descriptor srv = context_->descriptors().AllocateStaging();
+  context_->device()->CreateShaderResourceView(resource(), &desc, srv.cpu);
+  mip_srvs_.push_back(srv);
+  return mip_srvs_.size() - 1;
 }
 
 void Image::CreateSrv(DXGI_FORMAT format, bool shader_visible) {

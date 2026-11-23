@@ -133,7 +133,9 @@ function(blue_finalize_shaders)
         set(dxil_dir "${CMAKE_BINARY_DIR}/shader_check/dxil")
     endif()
     # Shader Model 6.0: the widest hardware; no later feature is used.
-    set(dxil_flags -target dxil -profile sm_6_0)
+    # BLUE_DXIL: the few places where Direct3D differs from Vulkan
+    # (shaders/README.md); the runtime compiler defines it too.
+    set(dxil_flags -target dxil -profile sm_6_0 -DBLUE_DXIL=1)
     set(dxil_extension dxil)
 
     # Every program depends on every source: an edit to a shared file recompiles all of

@@ -9,6 +9,7 @@
 #include <span>
 #include <vector>
 
+#include "render/d3d12/format.h"
 #include "render/d3d12/image.h"
 #include "render/texture_types.h"
 
@@ -23,6 +24,20 @@ enum class DefaultTexture {
   kBlack,       // 0.
   kCount,
 };
+
+// The state sampled textures are in: readable by every shader stage.
+inline constexpr D3D12_RESOURCE_STATES kSampledState =
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+// Creates a sampled texture of `desc` (desc.initial_state and desc.flags
+// are ignored) with a staging SRV, fills subresource i (mip + layer *
+// mip_levels) from `subresources[i]` (tightly packed rows of `block`; one
+// entry per subresource) through a staging upload, waits for it and returns
+// the image in kSampledState. A size that does not match is fatal.
+[[nodiscard]] Image CreateSampledImage(
+    const D3d12Context& context, const ImageDesc& desc, CopyBlock block,
+    std::span<const std::span<const std::byte>> subresources);
 
 // The backend's textures: the 1 x 1 defaults and textures uploaded already
 // encoded (Upload()), each resident until taken out with TakeUploaded().

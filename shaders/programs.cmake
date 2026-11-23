@@ -49,6 +49,9 @@ blue_shader_program(NAME env_equirect_to_cube SOURCE env_equirect_to_cube.slang
     VS VertexMain FS FragmentMain)
 blue_shader_program(NAME env_prefilter SOURCE env_prefilter.slang VS VertexMain FS FragmentMain)
 blue_shader_program(NAME env_brdf_lut SOURCE env_brdf_lut.slang VS VertexMain FS FragmentMain)
+# Direct3D 12 only (no blit): the specular source cube mip chain.
+blue_shader_program(NAME env_downsample SOURCE env_downsample.slang
+    VS VertexMain FS FragmentMain)
 
 # Tests only: the Direct3D 12 upload test (tests/render/d3d12_render_test.cc).
 blue_shader_program(NAME test_texture_grid SOURCE test_texture_grid.slang

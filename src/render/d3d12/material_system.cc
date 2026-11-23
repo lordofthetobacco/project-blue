@@ -35,9 +35,11 @@ static_assert(sizeof(MaterialParams) <= MaterialSystem::kParamsStride);
 }  // namespace
 
 MaterialSystem::MaterialSystem(const D3d12Context& context,
-                               const TextureCache& textures)
+                               const TextureCache& textures,
+                               const Samplers& samplers)
     : context_(context),
       textures_(textures),
+      samplers_(samplers),
       params_(context, DescriptorHeaps::kTableCount * kParamsStride,
               Buffer::Access::kUpload, L"blue material params") {}
 

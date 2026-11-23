@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "core/extent.h"
 #include "render/d3d12/descriptor_heaps.h"
@@ -30,9 +31,12 @@ class BarrierBatch {
   BarrierBatch(const BarrierBatch&) = delete;
   BarrierBatch& operator=(const BarrierBatch&) = delete;
 
-  // Adds a transition of every subresource of `resource`.
-  void Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
-                  D3D12_RESOURCE_STATES after);
+  // Adds a transition of subresource `subresource` (every subresource by
+  // default) of `resource`.
+  void Transition(
+      ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+      D3D12_RESOURCE_STATES after,
+      uint32_t subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
   // Records the collected barriers (nothing when empty).
   void Flush();
 
@@ -62,9 +66,10 @@ struct ImageDesc {
 // A 2D texture, texture array or cube map in memory from the D3D12MA
 // allocator, with the resource state it will be in when the commands
 // recorded so far have executed (state()), and the views it owns: up to
-// kMaxRtvs render target views, a depth stencil view, a shader resource
-// view in the staging heap (copied into tables) and one in the
-// shader-visible heap (ImGui). Views are freed with the image, which is
+// render target views (any mip and layer), a depth stencil view (and a
+// read-only one), a shader resource view of the whole image in the staging
+// heap (copied into tables), more staging views of single mips, and one in
+// the shader-visible heap (ImGui). Views are freed with the image, which is
 // only destroyed once no frame in flight uses it.
 //
 // The tracked state is exact because the backend records on one thread
@@ -73,8 +78,6 @@ struct ImageDesc {
 // Move-only; a moved-from image is empty. Not thread-safe.
 class Image {
  public:
-  static constexpr size_t kMaxRtvs = 2;
-
   Image() = default;
   Image(const D3d12Context& context, const ImageDesc& desc);
   ~Image();
@@ -84,18 +87,26 @@ class Image {
   Image(const Image&) = delete;
   Image& operator=(const Image&) = delete;
 
-  // Adds a render target view of mip 0, layer 0 in `format` and returns its
-  // index (< kMaxRtvs).
-  size_t AddRtv(DXGI_FORMAT format);
-  // Creates the depth stencil view in `format`.
+  // Adds a render target view of mip `mip`, layer `layer` in `format` and
+  // returns its index for rtv().
+  size_t AddRtv(DXGI_FORMAT format, uint32_t mip = 0, uint32_t layer = 0);
+  // Creates the depth stencil view in `format`, and a read-only one
+  // (read_only_dsv()) for passes that test against the depth but do not
+  // write it (the image then in DEPTH_READ).
   void CreateDsv(DXGI_FORMAT format);
   // Creates the staging shader resource view (every mip and layer) in
   // `format`; with `shader_visible` also one in the shader-visible heap.
   void CreateSrv(DXGI_FORMAT format, bool shader_visible);
+  // Adds a staging shader resource view of mip `mip` alone, every layer, as
+  // a Texture2DArray, and returns its index for mip_srv().
+  size_t AddMipSrv(DXGI_FORMAT format, uint32_t mip);
 
   // Adds the barrier that brings the image into `state` (nothing when it is
   // already there) and records the new state.
   void Transition(BarrierBatch& barriers, D3D12_RESOURCE_STATES state);
+  // For code that moves single subresources itself and leaves every
+  // subresource in `state`: records that state.
+  void AssumeState(D3D12_RESOURCE_STATES state) { state_ = state; }
 
   [[nodiscard]] ID3D12Resource* resource() const {
     return allocation_ ? allocation_->GetResource() : nullptr;
@@ -112,6 +123,16 @@ class Image {
     return rtvs_[index].cpu;
   }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE dsv() const { return dsv_.cpu; }
+  [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE read_only_dsv() const {
+    return read_only_dsv_.cpu;
+  }
+  [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE mip_srv(size_t index) const {
+    return mip_srvs_[index].cpu;
+  }
+  // The subresource index of `mip` of `layer`.
+  [[nodiscard]] uint32_t subresource(uint32_t mip, uint32_t layer) const {
+    return mip + layer * mip_levels_;
+  }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE staging_srv() const {
     return staging_srv_.cpu;
   }
@@ -131,10 +152,11 @@ class Image {
   DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
   D3D12_RESOURCE_STATES state_ = D3D12_RESOURCE_STATE_COMMON;
   uint64_t size_bytes_ = 0;
-  std::array<Descriptor, kMaxRtvs> rtvs_{};
-  size_t rtv_count_ = 0;
+  std::vector<Descriptor> rtvs_;
   Descriptor dsv_;
+  Descriptor read_only_dsv_;
   Descriptor staging_srv_;
+  std::vector<Descriptor> mip_srvs_;
   Descriptor shader_srv_;
 };
 
