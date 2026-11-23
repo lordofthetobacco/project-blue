@@ -207,7 +207,7 @@ constexpr std::array kFrameFields = {
     FieldOffsetOf{"jitter", offsetof(FrameUniforms, jitter)},
 };
 
-// MaterialParams (render/vulkan/material_system.h asserts the same numbers).
+// MaterialParams (render/material_params.cc asserts the same numbers).
 constexpr std::array kMaterialFields = {
     FieldOffsetOf{"baseColor", 0}, FieldOffsetOf{"emissive", 16},
     FieldOffsetOf{"surface", 32},  FieldOffsetOf{"uvAlpha", 48},

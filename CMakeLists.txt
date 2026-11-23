@@ -525,6 +525,7 @@ add_library(blue_render_common STATIC
     src/render/frame_plan.cc
     src/render/frame_uniforms.cc
     src/render/gpu_scope.cc
+    src/render/material_params.cc
     src/render/motion_blur_math.cc
     src/render/temporal_math.cc
     src/render/texture_types.cc
@@ -680,6 +681,10 @@ target_link_libraries(project-blue PRIVATE
 )
 
 blue_copy_runtime_dlls(project-blue SLANG)
+if(BLUE_RENDERER_D3D12)
+    # The Agility SDK exports and runtime (src/render/d3d12/CMakeLists.txt).
+    blue_add_d3d12_runtime(project-blue)
+endif()
 # The compiled shaders in <build>/bin/shaders, next to the executable.
 add_dependencies(project-blue blue_shaders)
 

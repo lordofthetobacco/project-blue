@@ -88,3 +88,9 @@ jobs:
 
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
+
+      # The Direct3D 12 backend on WARP (the pinned NuGet WARP next to the test executable):
+      # runs without a GPU, with the debug layer and GPU-based validation.
+      - name: Direct3D 12 render tests (WARP)
+        if: runner.os == 'Windows'
+        run: out/build/${{ matrix.preset }}/tests/render/blue_render_tests --backend=d3d12 --adapter=software --gpu-validation

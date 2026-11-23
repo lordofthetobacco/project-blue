@@ -48,7 +48,6 @@ constexpr std::array<std::string_view, 9> kSceneNames = {
     "weapon_motion",    "scope",          "editor_overlay",
 };
 
-constexpr uint32_t kTextureSize = 64;
 constexpr float kPi = std::numbers::pi_v<float>;
 
 // ---------------------------------------------------------------------------
@@ -259,19 +258,7 @@ Assets UploadAssets(Renderer& renderer) {
   assets.ground = Upload(renderer, asset::MakePlane(20.0f));
   assets.quad = Upload(renderer, asset::MakePlane(1.0f));
 
-  struct Source {
-    TextureFormat format;
-    std::vector<MipBytes> mips;
-    std::string_view name;
-  };
-  std::vector<Source> sources;
-  sources.push_back({TextureFormat::kRgba8Srgb, MipChain(Checker()), "checker"});
-  sources.push_back({TextureFormat::kBc7Srgb, Bc7Pattern(), "bc7"});
-  sources.push_back(
-      {TextureFormat::kRgba8Srgb, MipChain(AlphaDiscs()), "alpha_discs"});
-  sources.push_back(
-      {TextureFormat::kRgba8Unorm, MipChain(NormalBumps()), "normal_bumps"});
-  sources.push_back({TextureFormat::kRgba8Unorm, MipChain(OrmPattern()), "orm"});
+  const std::vector<TextureSource> sources = TestTextures();
 
   std::vector<std::vector<std::span<const std::byte>>> spans(sources.size());
   std::vector<TextureUpload> uploads;
@@ -676,6 +663,18 @@ void EditorOverlay(TestScene& scene, Renderer& renderer) {
 }
 
 }  // namespace
+
+std::vector<TextureSource> TestTextures() {
+  std::vector<TextureSource> sources;
+  sources.push_back({TextureFormat::kRgba8Srgb, MipChain(Checker()), "checker"});
+  sources.push_back({TextureFormat::kBc7Srgb, Bc7Pattern(), "bc7"});
+  sources.push_back(
+      {TextureFormat::kRgba8Srgb, MipChain(AlphaDiscs()), "alpha_discs"});
+  sources.push_back(
+      {TextureFormat::kRgba8Unorm, MipChain(NormalBumps()), "normal_bumps"});
+  sources.push_back({TextureFormat::kRgba8Unorm, MipChain(OrmPattern()), "orm"});
+  return sources;
+}
 
 std::span<const std::string_view> SceneNames() { return kSceneNames; }
 

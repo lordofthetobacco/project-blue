@@ -15,6 +15,9 @@ namespace blue::render_test {
 //   --backend=<name>       repeatable; default: every compiled backend
 //   --adapter=hw|software  default hw
 //   --update-golden        write the goldens instead of comparing
+//   --gpu-validation       RendererOptions::gpu_validation (validation layers /
+//                          the D3D12 debug layer with GPU-based validation)
+//                          also in Release builds
 //   --out=<dir>            rendered images and failure diffs
 //   --contact-sheet=<png>  after the tests, tile every golden into <png>
 struct HarnessOptions {
@@ -22,6 +25,7 @@ struct HarnessOptions {
   render::AdapterPreference adapter =
       render::AdapterPreference::kHighPerformance;
   bool update_golden = false;
+  bool gpu_validation = false;
   std::string out_dir;
   std::string contact_sheet;
 };

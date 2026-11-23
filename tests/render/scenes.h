@@ -1,6 +1,7 @@
 #ifndef BLUE_TESTS_RENDER_SCENES_H_
 #define BLUE_TESTS_RENDER_SCENES_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -10,6 +11,7 @@
 #include "render/debug_lines.h"
 #include "render/renderer.h"
 #include "render/scene_view.h"
+#include "render/texture_types.h"
 
 // The fixed scenes of the headless render tests (design §5.1). Everything is
 // built from code (builtin meshes, procedural textures, constant materials):
@@ -41,6 +43,20 @@ struct TestScene {
   std::vector<uint32_t> selected;
   render::SceneView view;
 };
+
+// One of the procedural textures the scenes upload: kTextureSize square,
+// full mip chain, each level exactly MipByteSize() bytes.
+struct TextureSource {
+  render::TextureFormat format = render::TextureFormat::kRgba8Unorm;
+  std::vector<std::vector<std::byte>> mips;
+  std::string_view name;
+};
+inline constexpr uint32_t kTextureSize = 64;
+
+// Returns the scenes' textures in a fixed order: checker (RGBA8 sRGB), bc7
+// (BC7 sRGB, one solid colour per block), alpha_discs (RGBA8 sRGB),
+// normal_bumps and orm (RGBA8 UNORM).
+[[nodiscard]] std::vector<TextureSource> TestTextures();
 
 // Returns the names of every scene, in a fixed order (the golden files are
 // tests/render/golden/<name>.png).

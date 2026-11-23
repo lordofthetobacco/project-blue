@@ -1,0 +1,347 @@
+#ifndef BLUE_RENDER_D3D12_D3D12_RENDERER_H_
+#define BLUE_RENDER_D3D12_D3D12_RENDERER_H_
+
+#include <d3d12.h>
+#include <imgui.h>
+#include <imgui_impl_dx12.h>
+#include <wrl/client.h>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <vector>
+
+#include "asset/image_decoder.h"
+#include "asset/mesh_data.h"
+#include "core/extent.h"
+#include "material/material.h"
+#include "platform/window.h"
+#include "render/backend.h"
+#include "render/d3d12/buffer.h"
+#include "render/d3d12/d3d12_context.h"
+#include "render/d3d12/fullscreen_pass.h"
+#include "render/d3d12/gpu_timer.h"
+#include "render/d3d12/image.h"
+#include "render/d3d12/material_system.h"
+#include "render/d3d12/mesh.h"
+#include "render/d3d12/root_signature.h"
+#include "render/d3d12/samplers.h"
+#include "render/d3d12/shader_programs.h"
+#include "render/d3d12/swapchain.h"
+#include "render/d3d12/texture_cache.h"
+#include "render/d3d12/upload_ring.h"
+#include "render/frame_config.h"
+#include "render/frame_plan.h"
+#include "render/gpu_scope.h"
+#include "render/memory_stats.h"
+#include "render/renderer.h"
+#include "render/renderer_backend.h"
+#include "render/scene_view.h"
+#include "render/texture_types.h"
+
+// How a frame is built (package D1)
+// ---------------------------------
+// D3d12Renderer owns the device and every resource kind of the backend:
+// meshes, textures, materials (descriptor tables), the shader programs
+// (DXIL, hot reload), the root signatures of the binding_layout.h families,
+// samplers, the upload ring, GPU timers and memory statistics. The scene
+// passes come with packages D2-D4; until then a frame is:
+//
+//   scene stand-in       the LDR target is cleared to kPlaceholderColor
+//                        (sRGB-encoded colour, luma in alpha, like the
+//                        tonemapper writes it); SceneView draws, lights and
+//                        the environment are not rendered yet
+//   present              FullscreenPass(present): LDR -> output (FXAA when
+//                        SceneView::post.fxaa_enabled), into the swapchain
+//                        buffer, the headless output image or the editor
+//                        viewport image
+//   ui                   ImGui (imgui_impl_dx12) on the window output; the
+//                        editor's window output is cleared to black first
+//   readbacks            copies for RequestViewportReadback() /
+//                        RequestOutputReadback()
+//
+// Headless (RendererOptions::window null) there is no swapchain: an
+// offscreen R8G8B8A8_UNORM_SRGB output image of RendererOptions::
+// headless_extent stands in for the swapchain buffer.
+//
+// States between frames: the LDR target and the viewport image are
+// PIXEL_SHADER_RESOURCE, uploaded textures PIXEL | NON_PIXEL_SHADER_RESOURCE,
+// the swapchain buffers PRESENT; every pass transitions what it uses
+// through Image::Transition() (exact per-resource tracking, design §4.1).
+
+namespace blue::render::d3d12 {
+
+// The Direct3D 12 backend of render::Renderer. Every public function has the
+// contract of the Renderer function of the same name (render/renderer.h);
+// what package D1 does not draw yet is listed above. Created by
+// CreateD3d12Renderer(). Neither copyable nor movable. Not thread-safe.
+class D3d12Renderer final : public RendererBackend {
+ public:
+  // The colour of the scene stand-in, sRGB-encoded (what the LDR target
+  // holds): a dark slate blue, (32, 40, 56) of 255; alpha is its luma.
+  static constexpr std::array<float, 4> kPlaceholderColor = {
+      32.0f / 255.0f, 40.0f / 255.0f, 56.0f / 255.0f, 39.0f / 255.0f};
+
+  // Takes `context`, which must have a device (D3d12Context::has_device()).
+  D3d12Renderer(const RendererOptions& options,
+                std::unique_ptr<D3d12Context> context);
+  ~D3d12Renderer() override;
+
+  [[nodiscard]] Backend backend() const override { return Backend::kD3d12; }
+  [[nodiscard]] BackendCaps caps() const override { return {}; }
+
+  void DrawFrame(const SceneView& view, ImDrawData* ui) override;
+  [[nodiscard]] ViewportImage PrepareViewport(core::Extent2D size) override;
+  [[nodiscard]] const ViewportImage& viewport() const override {
+    return viewport_;
+  }
+  void DrawViewportFrame(const SceneView& view, ImDrawData* ui) override;
+  [[nodiscard]] uint64_t RequestViewportReadback() override;
+  [[nodiscard]] uint64_t RequestOutputReadback() override;
+  [[nodiscard]] ReadbackStatus TakeViewportReadback(
+      uint64_t ticket, ViewportPixels& pixels) override;
+
+  [[nodiscard]] MeshId UploadMesh(
+      std::span<const asset::Vertex> vertices,
+      std::span<const asset::Index> indices) override;
+  void ReleaseMesh(MeshId id) override;
+  void ReleaseTextures(std::span<const TextureId> ids) override;
+  void ReleaseMaterial(MaterialId id) override { materials_.Release(id); }
+  void FlushReleases() override;
+  [[nodiscard]] ImTextureID ui_texture(TextureId id) const override {
+    return static_cast<ImTextureID>(textures_.image(id).shader_srv().ptr);
+  }
+
+  [[nodiscard]] MaterialId CreateMaterial(
+      const material::MaterialDesc& desc) override {
+    return materials_.Create(desc);
+  }
+  [[nodiscard]] std::vector<TextureId> UploadTextures(
+      std::span<const TextureUpload> textures) override {
+    return textures_.Upload(textures);
+  }
+  [[nodiscard]] MaterialId CreateMaterial(
+      const material::MaterialDesc& desc,
+      const MaterialTextures& textures) override {
+    return materials_.Create(desc, textures);
+  }
+  void UpdateMaterial(MaterialId id,
+                      const material::MaterialDesc& desc) override {
+    materials_.Update(id, desc);
+  }
+  [[nodiscard]] const material::MaterialDesc& material(
+      MaterialId id) const override {
+    return materials_.desc(id);
+  }
+  [[nodiscard]] size_t material_count() const override {
+    return materials_.count();
+  }
+  [[nodiscard]] TextureStats texture_stats() const override {
+    return textures_.stats();
+  }
+  [[nodiscard]] MemoryStats memory_stats() const override;
+
+  // Package D2 renders the environment; until then these only wait for the
+  // GPU (like the real ones) and remember the parameters.
+  void SetEnvironment(const asset::ImageDataF& equirect, float intensity,
+                      float rotation_radians) override;
+  void ResetEnvironment() override;
+  void SetEnvironmentParams(float intensity, float rotation_radians) override;
+
+  void RequestSwapchainRebuild() override { swapchain_dirty_ = true; }
+  void SetVsync(bool enabled) override { vsync_ = enabled; }
+  void ReloadChangedShaders() override { shader_programs_.ReloadChanged(); }
+  [[nodiscard]] std::string_view last_shader_error() const override {
+    return shader_programs_.last_error();
+  }
+
+  [[nodiscard]] bool vsync() const override { return vsync_; }
+  [[nodiscard]] std::string_view device_name() const override {
+    return context_.device_name();
+  }
+  [[nodiscard]] core::Extent2D output_extent() const override;
+  // No temporal scaler: the scene is rendered at the size of its target
+  // (the window or the editor viewport).
+  [[nodiscard]] core::Extent2D render_extent() const override {
+    return ldr_.extent();
+  }
+  [[nodiscard]] core::Extent2D scene_output_extent() const override {
+    return render_extent();
+  }
+  [[nodiscard]] Upscaling active_upscaling() const override {
+    return Upscaling::kOff;
+  }
+  void WaitIdle() const override { context_.WaitIdle(); }
+
+  [[nodiscard]] std::optional<double> gpu_frame_ms() const override {
+    return gpu_timer_.last_frame_ms();
+  }
+  [[nodiscard]] std::optional<double> gpu_scope_ms(
+      GpuScope scope) const override {
+    return gpu_timer_.last_ms(scope);
+  }
+  [[nodiscard]] RenderStats stats() const override { return stats_; }
+  [[nodiscard]] ValidationStats validation_stats() const override {
+    const D3d12Context::ValidationCounts counts = context_.validation_counts();
+    return {.enabled = context_.validation(),
+            .errors = counts.errors,
+            .warnings = counts.warnings};
+  }
+
+  void InitImGuiRenderer() const override;
+  void ShutdownImGuiRenderer() const override;
+
+  // Direct3D 12-only access for the backend's tests.
+  [[nodiscard]] const D3d12Context& context() const { return context_; }
+  [[nodiscard]] const TextureCache& textures() const { return textures_; }
+  [[nodiscard]] const Samplers& samplers() const { return samplers_; }
+  [[nodiscard]] const RootSignature& fullscreen_root_signature() const {
+    return fullscreen_root_;
+  }
+  [[nodiscard]] bool headless() const { return !swapchain_.has_value(); }
+
+ private:
+  // Per-frame-in-flight command recording.
+  struct Frame {
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    uint64_t fence_value = 0;  // Reached: the frame's work has finished.
+  };
+
+  // Where a frame's scene goes.
+  enum class Output {
+    kWindow,    // The window output (DrawFrame()).
+    kViewport,  // viewport_image_, with the UI alone on the window output.
+  };
+
+  // What a readback copies.
+  enum class ReadbackSource : uint8_t {
+    kViewport,  // viewport_image_ (RequestViewportReadback()).
+    kOutput,    // The window output (RequestOutputReadback()).
+  };
+
+  // Requested copies.
+  struct Readback {
+    uint64_t ticket = 0;
+    ReadbackSource source = ReadbackSource::kViewport;
+    // The frame that records the copy (0 until recorded) and its fence value
+    // (0 until submitted).
+    uint64_t frame_serial = 0;
+    uint64_t fence_value = 0;
+    core::Extent2D extent{};
+    uint32_t row_pitch = 0;
+    Buffer buffer;
+  };
+
+  template <typename T>
+  struct Retired {
+    T object;
+    uint64_t last_frame = 0;  // The last frame serial that may use it.
+  };
+
+  void CreateFrames();
+  // Destroys the retired meshes and images no frame in flight can use any
+  // more. Call after the current frame's fence was reached.
+  void DestroyRetired();
+  // Destroys every retired object if no frame is in flight (does not wait).
+  void DestroyRetiredIfIdle();
+  // Blocks until no frame in flight runs on the GPU any more.
+  void WaitForFramesInFlight() const;
+  // Recreates the LDR target at `extent`.
+  void ResizeTargets(core::Extent2D extent);
+  void ResizeViewport(core::Extent2D size);
+  [[nodiscard]] bool RebuildSwapchain();
+  // The body of DrawFrame() and DrawViewportFrame().
+  void DrawFrameTo(const SceneView& view, ImDrawData* ui, Output output);
+  // Records the window output's UI (and, for kViewport, its clear).
+  void RecordUi(ID3D12GraphicsCommandList* cmd, ImDrawData* ui,
+                Output output, D3D12_CPU_DESCRIPTOR_HANDLE target);
+  // Records the copy of `resource` (in COPY_SOURCE) for every readback of
+  // `source` not recorded yet.
+  void RecordReadbacks(ID3D12GraphicsCommandList* cmd, ReadbackSource source,
+                       ID3D12Resource* resource, core::Extent2D extent);
+  [[nodiscard]] bool HasPendingReadback(ReadbackSource source) const;
+
+  // ImGui's descriptor callbacks (ImGui_ImplDX12_InitInfo::UserData is the
+  // renderer).
+  static void AllocateImGuiDescriptor(ImGui_ImplDX12_InitInfo* info,
+                                      D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
+                                      D3D12_GPU_DESCRIPTOR_HANDLE* gpu);
+  static void FreeImGuiDescriptor(ImGui_ImplDX12_InitInfo* info,
+                                  D3D12_CPU_DESCRIPTOR_HANDLE cpu,
+                                  D3D12_GPU_DESCRIPTOR_HANDLE gpu);
+
+  // Declared first: everything below uses the context.
+  std::unique_ptr<D3d12Context> context_owner_;
+  const D3d12Context& context_;
+  const platform::Window* window_;  // Null when headless.
+  core::Extent2D headless_extent_;
+  bool vsync_ = true;
+  bool swapchain_dirty_ = false;
+  std::optional<Swapchain> swapchain_;
+  Samplers samplers_;
+  UploadRing upload_ring_;
+  TextureCache textures_;
+  MaterialSystem materials_;
+  ShaderPrograms shader_programs_;
+  RootSignature fullscreen_root_;
+  // The scene families (frame set + material / sky / scope set), created
+  // now so a binding table that Direct3D rejects fails at startup; the
+  // passes of package D2 use them.
+  RootSignature scene_material_root_;
+  RootSignature scene_sky_root_;
+  RootSignature scene_scope_root_;
+  // The tonemapped scene (sRGB-encoded colour, luma in alpha); render size.
+  Image ldr_;
+  FullscreenPass present_pass_;
+  // The present pass into the editor viewport image; created by the first
+  // PrepareViewport().
+  std::optional<FullscreenPass> viewport_present_pass_;
+
+  std::vector<Mesh> meshes_;
+  uint64_t mesh_bytes_ = 0;
+  uint32_t mesh_count_ = 0;
+  std::vector<Retired<Mesh>> retired_meshes_;
+  std::vector<Retired<Image>> retired_images_;
+
+  // The window output when headless.
+  Image output_image_;
+  // Editor viewport output (PrepareViewport()); empty in the game.
+  Image viewport_image_;
+  mutable ViewportImage viewport_;
+  uint64_t viewport_resized_at_ = 0;
+  // Whether imgui_impl_dx12 is initialized (InitImGuiRenderer()).
+  mutable bool imgui_initialized_ = false;
+
+  std::vector<Readback> readbacks_;
+  uint64_t next_readback_ticket_ = 1;
+
+  // What SetEnvironment() / SetEnvironmentParams() asked for (rendered from
+  // package D2 on).
+  float environment_intensity_ = 1.0f;
+  float environment_rotation_ = 0.0f;
+
+  std::array<Frame, kFramesInFlight> frames_;
+  size_t frame_index_ = 0;
+  // Number of the frame being recorded; counts every recorded frame from 1.
+  uint64_t frame_serial_ = 0;
+  RenderStats stats_;
+  GpuTimer gpu_timer_;
+};
+
+}  // namespace blue::render::d3d12
+
+namespace blue::render {
+
+// Returns the Direct3D 12 renderer for `options`, or null when no adapter
+// qualifies (CreateBackend() then tries another backend).
+[[nodiscard]] std::unique_ptr<RendererBackend> CreateD3d12Renderer(
+    const RendererOptions& options);
+
+}  // namespace blue::render
+
+#endif  // BLUE_RENDER_D3D12_D3D12_RENDERER_H_

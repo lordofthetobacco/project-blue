@@ -119,6 +119,15 @@ if(BLUE_RENDERER_VULKAN)
     )
     target_link_libraries(blue_tests PRIVATE blue_render_vulkan)
 endif()
+if(BLUE_RENDERER_D3D12)
+    target_sources(blue_tests PRIVATE
+        d3d12/descriptor_allocator_test.cc
+        d3d12/format_test.cc
+        d3d12/root_layout_test.cc
+        d3d12/upload_ring_test.cc
+    )
+    target_link_libraries(blue_tests PRIVATE blue_render_d3d12)
+endif()
 
 # The runtime shader compiler (hot reload).
 if(blue_slang_target)

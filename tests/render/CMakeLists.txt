@@ -20,6 +20,11 @@ add_executable(blue_render_tests
     render_test.cc
     scenes.cc
 )
+if(BLUE_RENDERER_D3D12)
+    # The Direct3D 12 backend's own GPU tests use its internals.
+    target_sources(blue_render_tests PRIVATE d3d12_render_test.cc)
+    target_link_libraries(blue_render_tests PRIVATE blue_render_d3d12)
+endif()
 
 target_include_directories(blue_render_tests PRIVATE ${CMAKE_SOURCE_DIR})
 
@@ -37,6 +42,10 @@ target_link_libraries(blue_render_tests PRIVATE
 
 # SLANG: the hot reload test recompiles shaders.
 blue_copy_runtime_dlls(blue_render_tests SLANG)
+if(BLUE_RENDERER_D3D12)
+    # The Agility SDK runtime and the pinned WARP (--adapter=software).
+    blue_add_d3d12_runtime(blue_render_tests WARP)
+endif()
 
 # The compiled shaders it renders with.
 add_dependencies(blue_render_tests blue_shaders)

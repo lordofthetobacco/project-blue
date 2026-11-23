@@ -73,6 +73,9 @@ if(TARGET blue_world AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/main.cc)
     )
 
     blue_copy_runtime_dlls(blue-editor SLANG)
+    if(BLUE_RENDERER_D3D12)
+        blue_add_d3d12_runtime(blue-editor)
+    endif()
     # The cooked samples (<build>/bin/assets: range.mscn, *.pbo) the browser starts in.
     if(TARGET blue_sample_assets)
         add_dependencies(blue-editor blue_sample_assets)

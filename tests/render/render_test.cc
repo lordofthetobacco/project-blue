@@ -41,6 +41,7 @@ std::unique_ptr<render::Renderer> MakeRenderer(render::Backend backend) {
       // Release render the same; no source directory: no hot reload.
       .adapter = Options().adapter,
       .headless_extent = {kSceneWidth, kSceneHeight},
+      .gpu_validation = Options().gpu_validation,
       .max_anisotropy = 1.0f,
   });
   // A fallback to another backend would compare the wrong renderer.
@@ -114,9 +115,21 @@ const Tolerance& GoldenTolerance() {
              : kExact;
 }
 
+// Whether `backend` draws the scenes yet: the Direct3D 12 backend only
+// clears and presents until package D2 adds the scene passes (its own tests
+// are in d3d12_render_test.cc).
+bool DrawsScenes(render::Backend backend) {
+  return backend != render::Backend::kD3d12;
+}
+
 TEST_CASE("Headless scenes match the golden images") {
   for (const render::Backend backend_id : Options().backends) {
     const std::string backend(render::BackendName(backend_id));
+    if (!DrawsScenes(backend_id)) {
+      std::printf("(golden scenes skipped for %s: no scene passes yet)\n",
+                  backend.c_str());
+      continue;
+    }
     for (const std::string_view scene : SceneNames()) {
       const std::string label = std::string(scene) + "." + backend;
       INFO("scene ", label);
@@ -237,6 +250,7 @@ TEST_CASE("An edited shader is reloaded; a broken edit keeps the old one") {
         .shader_mode = shader::CompileMode::kRelease,
         .adapter = Options().adapter,
         .headless_extent = {kSceneWidth, kSceneHeight},
+        .gpu_validation = Options().gpu_validation,
         .max_anisotropy = 1.0f,
     });
     REQUIRE(renderer->backend() == backend);

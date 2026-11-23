@@ -93,6 +93,8 @@ std::optional<HarnessOptions> ParseHarnessOptions(
       }
     } else if (arg == "--update-golden") {
       options.update_golden = true;
+    } else if (arg == "--gpu-validation") {
+      options.gpu_validation = true;
     } else if (std::optional<std::string> out = FlagValue(arg, "out")) {
       options.out_dir = *out;
     } else if (std::optional<std::string> sheet =
