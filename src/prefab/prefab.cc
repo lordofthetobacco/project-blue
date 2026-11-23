@@ -253,6 +253,31 @@ Problem ValidateEdit(const EditInfo& edit) {
   return std::nullopt;
 }
 
+Problem ValidateTags(std::span<const Tag> tags) {
+  if (tags.size() > kMaxTagCount) {
+    return std::format("{} tags, at most {} allowed", tags.size(),
+                       kMaxTagCount);
+  }
+  for (size_t i = 0; i < tags.size(); ++i) {
+    const Tag& tag = tags[i];
+    if (!IsValidTagKey(tag.key)) {
+      return std::format("tag '{}': key must be 1 to {} of [a-z0-9_.]",
+                         tag.key.substr(0, kMaxTagKeyLength + 1),
+                         kMaxTagKeyLength);
+    }
+    if (tag.value.size() > kMaxTagValueLength) {
+      return std::format("tag '{}': value longer than {} bytes", tag.key,
+                         kMaxTagValueLength);
+    }
+    for (size_t j = 0; j < i; ++j) {
+      if (tags[j].key == tag.key) {
+        return std::format("tag '{}' appears twice", tag.key);
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 std::span<const std::byte> BulkStorage::Store(
@@ -435,6 +460,9 @@ std::optional<std::string> ValidatePrefab(const Prefab& prefab) {
   if (Problem problem = ValidatePhysics(prefab.physics)) {
     return problem;
   }
+  if (Problem problem = ValidateTags(prefab.tags)) {
+    return problem;
+  }
   return ValidateEdit(prefab.edit);
 }
 
@@ -458,6 +486,43 @@ int FindMaterial(const Prefab& prefab, std::string_view name) {
   return found == prefab.materials.end()
              ? -1
              : static_cast<int>(found - prefab.materials.begin());
+}
+
+bool IsValidTagKey(std::string_view key) {
+  if (key.empty() || key.size() > kMaxTagKeyLength) {
+    return false;
+  }
+  return std::ranges::all_of(key, [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+           c == '.';
+  });
+}
+
+std::optional<std::string_view> FindTag(const Prefab& prefab,
+                                        std::string_view key) {
+  const auto found = std::ranges::find(prefab.tags, key, &Tag::key);
+  if (found == prefab.tags.end()) {
+    return std::nullopt;
+  }
+  return std::string_view(found->value);
+}
+
+void SetTag(Prefab& prefab, std::string_view key, std::string_view value) {
+  const auto found = std::ranges::find(prefab.tags, key, &Tag::key);
+  if (found != prefab.tags.end()) {
+    found->value = value;
+    return;
+  }
+  prefab.tags.push_back({.key = std::string(key), .value = std::string(value)});
+}
+
+bool RemoveTag(Prefab& prefab, std::string_view key) {
+  const auto found = std::ranges::find(prefab.tags, key, &Tag::key);
+  if (found == prefab.tags.end()) {
+    return false;
+  }
+  prefab.tags.erase(found);
+  return true;
 }
 
 }  // namespace blue::prefab

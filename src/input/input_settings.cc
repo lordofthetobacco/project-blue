@@ -1,9 +1,7 @@
 #include "input/input_settings.h"
 
 #include <algorithm>
-#include <cctype>
-#include <charconv>
-#include <cmath>
+#include <array>
 #include <cstddef>
 #include <format>
 #include <optional>
@@ -13,6 +11,7 @@
 #include <vector>
 
 #include "core/log.h"
+#include "core/text.h"
 #include "input/action.h"
 #include "input/bindings.h"
 #include "platform/file_system.h"
@@ -20,51 +19,12 @@
 namespace blue::input {
 namespace {
 
+using core::ParseBool;
+using core::ParseFiniteFloat;
+using core::Trim;
+
 constexpr size_t kMaxSettingsFileSize = 1024 * 1024;
 constexpr std::string_view kBindPrefix = "bind.";
-
-// Returns `text` without leading and trailing whitespace.
-std::string_view Trim(std::string_view text) {
-  const auto is_space = [](char c) {
-    return std::isspace(static_cast<unsigned char>(c)) != 0;
-  };
-  while (!text.empty() && is_space(text.front())) {
-    text.remove_prefix(1);
-  }
-  while (!text.empty() && is_space(text.back())) {
-    text.remove_suffix(1);
-  }
-  return text;
-}
-
-// Returns the float spelled by all of `text`, or nullopt if it is not a
-// number or is not finite.
-std::optional<float> ParseFiniteFloat(std::string_view text) {
-  float value = 0.0f;
-  const auto [end, ec] =
-      std::from_chars(text.data(), text.data() + text.size(), value);
-  if (ec != std::errc{} || end != text.data() + text.size() ||
-      !std::isfinite(value)) {
-    return std::nullopt;
-  }
-  return value;
-}
-
-// Returns the boolean spelled by `text` ("true"/"false"/"1"/"0", any case), or
-// nullopt for anything else.
-std::optional<bool> ParseBool(std::string_view text) {
-  std::string lower(text);
-  std::ranges::transform(lower, lower.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  if (lower == "true" || lower == "1") {
-    return true;
-  }
-  if (lower == "false" || lower == "0") {
-    return false;
-  }
-  return std::nullopt;
-}
 
 // Stores the float in `value` into `target`, clamped to [min, max], or logs
 // why it cannot.
@@ -86,9 +46,14 @@ void ApplyBool(bool& target, std::string_view key, std::string_view value,
   }
 }
 
-// Applies one "bind.<action> = <list>" line.
+// Which actions a settings file binds, indexed by Action.
+using BoundInFile = std::array<bool, kActionCount>;
+
+// Applies one "bind.<action> = <list>" line and marks the action in
+// `bound_in_file`.
 void ApplyBinding(InputBindings& bindings, std::string_view action_name,
-                  std::string_view value, const std::string& path) {
+                  std::string_view value, const std::string& path,
+                  BoundInFile& bound_in_file) {
   const std::optional<Action> action = ParseAction(action_name);
   if (!action) {
     core::log::Warn("{}: unknown action '{}'", path, action_name);
@@ -101,12 +66,53 @@ void ApplyBinding(InputBindings& bindings, std::string_view action_name,
     return;
   }
   bindings.Set(*action, std::move(*list));
+  bound_in_file[static_cast<size_t>(*action)] = true;
+}
+
+// A saved file lists every action that existed when it was written, so an
+// action it does not bind is newer and keeps its default keys. A file
+// binding of another action to one of those keys (F was push before it
+// became interact) would make the key do both: the new action takes the
+// key, unless the defaults themselves share it between the two (Space for
+// jump and fly up). An action left without keys that way gets its defaults
+// back (push moves to H).
+void GiveDefaultKeysToNewActions(InputBindings& bindings,
+                                 const BoundInFile& bound_in_file,
+                                 const std::string& path) {
+  const InputBindings defaults;
+  for (const Action added : AllActions()) {
+    if (bound_in_file[static_cast<size_t>(added)]) {
+      continue;
+    }
+    for (const Binding& key : defaults.For(added)) {
+      for (const Action other : AllActions()) {
+        if (!bound_in_file[static_cast<size_t>(other)] ||
+            !bindings.IsBound(other, key) || defaults.IsBound(other, key)) {
+          continue;
+        }
+        std::vector<Binding> kept;
+        for (const Binding& binding : bindings.For(other)) {
+          if (binding != key) {
+            kept.push_back(binding);
+          }
+        }
+        if (kept.empty()) {
+          const std::span<const Binding> fallback = defaults.For(other);
+          kept.assign(fallback.begin(), fallback.end());
+        }
+        core::log::Info("{}: {} goes to the new action {}; {} is bound to {}",
+                        path, FormatBinding(key), ActionName(added),
+                        ActionName(other), FormatBindingList(kept));
+        bindings.Set(other, std::move(kept));
+      }
+    }
+  }
 }
 
 // Applies one "key = value" `line` read from `path` to `settings`, logging
 // anything it cannot use.
 void ApplyLine(InputSettings& settings, std::string_view line,
-               const std::string& path) {
+               const std::string& path, BoundInFile& bound_in_file) {
   const size_t equals = line.find('=');
   if (equals == std::string_view::npos) {
     core::log::Warn("{}: ignoring malformed line '{}'", path, line);
@@ -117,8 +123,8 @@ void ApplyLine(InputSettings& settings, std::string_view line,
   const std::string_view value = Trim(line.substr(equals + 1));
 
   if (key.starts_with(kBindPrefix)) {
-    ApplyBinding(settings.bindings, key.substr(kBindPrefix.size()), value,
-                 path);
+    ApplyBinding(settings.bindings, key.substr(kBindPrefix.size()), value, path,
+                 bound_in_file);
   } else if (key == "mouse_sensitivity") {
     ApplyFloat(settings.mouse_sensitivity, key, value, kMinMouseSensitivity,
                kMaxMouseSensitivity, path);
@@ -151,6 +157,7 @@ InputSettings LoadInputSettings(const std::string& path) {
     return settings;
   }
 
+  BoundInFile bound_in_file{};
   std::string text;
   text.reserve(bytes.value().size());
   for (const std::byte b : bytes.value()) {
@@ -168,8 +175,9 @@ InputSettings LoadInputSettings(const std::string& path) {
     if (line.empty() || line.front() == '#') {
       continue;
     }
-    ApplyLine(settings, line, path);
+    ApplyLine(settings, line, path, bound_in_file);
   }
+  GiveDefaultKeysToNewActions(settings.bindings, bound_in_file, path);
   return settings;
 }
 

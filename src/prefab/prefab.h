@@ -276,6 +276,21 @@ struct Physics {
   std::span<const std::byte> cooked_shape;
 };
 
+// A `key = value` label on a prefab, e.g. "weapon" = "glock17" marks a weapon
+// prefab (see weapon/weapon_def.h). Keys are 1 to kMaxTagKeyLength
+// characters of [a-z0-9_.] and unique within a prefab; values are free text
+// of at most kMaxTagValueLength bytes (may be empty).
+struct Tag {
+  std::string key;
+  std::string value;
+
+  friend bool operator==(const Tag&, const Tag&) = default;
+};
+
+inline constexpr size_t kMaxTagKeyLength = 64;
+inline constexpr size_t kMaxTagValueLength = 256;
+inline constexpr size_t kMaxTagCount = 64;
+
 // What the editor needs to reopen and re-import a prefab. Paths are resolved
 // in memory and stored relative to the .pbo, like ChildPrefab::path.
 // `import_settings` is opaque text owned by the cook (its options);
@@ -301,6 +316,9 @@ struct Prefab {
   std::vector<PointLight> lights;
   std::vector<ChildPrefab> children;
   Physics physics;
+  // Ordered as authored; ValidatePrefab() checks keys, lengths, uniqueness
+  // and at most kMaxTagCount entries.
+  std::vector<Tag> tags;
   EditInfo edit;
   asset::Bounds bounds;  // all meshes at rest, in prefab space
   BulkStorage storage;
@@ -347,6 +365,23 @@ inline constexpr size_t kMaxSettingsLength = 1024 * 1024;
 
 // Returns the index of the first material called `name`, or -1.
 [[nodiscard]] int FindMaterial(const Prefab& prefab, std::string_view name);
+
+// Returns true if `key` is a valid tag key: 1 to kMaxTagKeyLength
+// characters, each a lower-case ASCII letter, a digit, '_' or '.'.
+[[nodiscard]] bool IsValidTagKey(std::string_view key);
+
+// Returns the value of tag `key`, or nullopt if the prefab has no such tag.
+// The view is valid until `prefab.tags` changes.
+[[nodiscard]] std::optional<std::string_view> FindTag(const Prefab& prefab,
+                                                      std::string_view key);
+
+// Sets tag `key` to `value`: replaces the value of an existing tag in place,
+// otherwise appends the tag. Does not validate (ValidatePrefab() does).
+void SetTag(Prefab& prefab, std::string_view key, std::string_view value);
+
+// Removes tag `key`, keeping the order of the others. Returns false if the
+// prefab had no such tag.
+bool RemoveTag(Prefab& prefab, std::string_view key);
 
 }  // namespace blue::prefab
 

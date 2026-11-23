@@ -3,14 +3,18 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstddef>
 #include <memory>
+#include <vector>
 
 #include <glm/geometric.hpp>
 #include <glm/vec3.hpp>
 
 #include "asset/mesh_data.h"
+#include "core/result.h"
 #include "physics/physics_runtime.h"
 #include "physics/physics_world.h"
+#include "physics/shape_cooking.h"
 #include "scene/scene.h"
 
 namespace blue::physics {
@@ -264,6 +268,44 @@ TEST_CASE("a wall stops the character") {
   CHECK(position.x > 2.4f);
   CHECK(Near(position.y, 0.0f, 0.05f));
   CHECK(character->IsOnGround());
+}
+
+// Adds a heavy dynamic 1 x 1.5 x 10 m block whose near face is x = 3.
+BodyId AddBlock(PhysicsWorld& world, bool blocks_characters) {
+  core::Result<std::vector<std::byte>, PhysicsError> cooked = CookShape(
+      {.kind = CookedShapeKind::kBox, .half_extents = {0.5f, 0.75f, 5.0f}});
+  REQUIRE(cooked.ok());
+  core::Result<CookedShape, PhysicsError> shape =
+      CookedShape::Restore(cooked.value());
+  REQUIRE(shape.ok());
+  const core::Result<BodyId, PhysicsError> body = world.CreateBody(
+      shape.value(), {.motion = scene::MotionType::kDynamic,
+                      .pose = {.position = {3.5f, 0.75f, 0.0f}},
+                      .mass = 2000.0f,
+                      .friction = 1.0f,
+                      .blocks_characters = blocks_characters});
+  REQUIRE(body.ok());
+  return body.value();
+}
+
+TEST_CASE("a body that does not block characters is walked through") {
+  for (const bool blocks : {true, false}) {
+    CAPTURE(blocks);
+    Fixture f;
+    const BodyId block = AddBlock(f.world, blocks);
+    std::unique_ptr<Character> character = f.Spawn();
+    f.Settle(*character);
+    character->SetDesiredVelocity(glm::vec3(3.0f, 0.0f, 0.0f));
+    f.Step(180);
+    if (blocks) {
+      CHECK(character->position().x < 3.0f);
+    } else {
+      CHECK(character->position().x > 5.0f);
+      // Not pushed either.
+      CHECK(f.world.InterpolatedPose(block).position.x ==
+            doctest::Approx(3.5f).epsilon(1.0e-3));
+    }
+  }
 }
 
 TEST_CASE("position interpolates between the last two steps") {

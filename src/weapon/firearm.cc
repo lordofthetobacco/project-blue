@@ -13,14 +13,48 @@ constexpr float kBoltReleaseFraction = 0.85f;
 
 constexpr float kSecondsPerMinute = 60.0f;
 
+// Returns `modes`, or kSemi alone when it is empty.
+FireModeMask AvailableModes(FireModeMask modes) {
+  return modes != 0 ? modes : FireModeBit(FireMode::kSemi);
+}
+
+// Returns the mode the selector starts in: `wanted` if available, else the
+// first available mode in enum order.
+FireMode StartMode(FireMode wanted, FireModeMask modes) {
+  const FireModeMask available = AvailableModes(modes);
+  if ((available & FireModeBit(wanted)) != 0) {
+    return wanted;
+  }
+  for (int i = 0; i < kFireModeCount; ++i) {
+    const auto mode = static_cast<FireMode>(i);
+    if ((available & FireModeBit(mode)) != 0) {
+      return mode;
+    }
+  }
+  return FireMode::kSemi;
+}
+
+// Returns the available mode after `current` in enum order, wrapping round.
+FireMode NextMode(FireMode current, FireModeMask modes) {
+  const FireModeMask available = AvailableModes(modes);
+  for (int step = 1; step <= kFireModeCount; ++step) {
+    const auto mode = static_cast<FireMode>((static_cast<int>(current) + step) %
+                                            kFireModeCount);
+    if ((available & FireModeBit(mode)) != 0) {
+      return mode;
+    }
+  }
+  return current;
+}
+
 }  // namespace
 
 Firearm::Firearm(const FirearmSpec& spec)
-    : spec_(spec),
-      fire_mode_(spec.select_fire ? spec.fire_mode : FireMode::kSemi) {
+    : spec_(spec), fire_mode_(StartMode(spec.fire_mode, spec.fire_modes)) {
   spec_.magazine_capacity = std::max(spec_.magazine_capacity, 0);
   spec_.spare_magazines = std::max(spec_.spare_magazines, 0);
   magazine_ = spec_.magazine_capacity;
+  magazine_inserted_ = spec_.magazine_capacity > 0;
   // Room for every magazine the weapon carries, so reloads never allocate.
   spare_magazines_.reserve(static_cast<size_t>(spec_.spare_magazines) + 1);
   if (spec_.magazine_capacity > 0) {
@@ -32,10 +66,10 @@ Firearm::Firearm(const FirearmSpec& spec)
 FirearmEvents Firearm::Update(const FirearmInput& input, float dt) {
   dt = std::max(dt, 0.0f);
   FirearmEvents events;
-  if (input.fire_mode_pressed && spec_.select_fire) {
-    fire_mode_ =
-        fire_mode_ == FireMode::kSemi ? FireMode::kAuto : FireMode::kSemi;
-    events.fire_mode_changed = true;
+  if (input.fire_mode_pressed) {
+    const FireMode next = NextMode(fire_mode_, spec_.fire_modes);
+    events.fire_mode_changed = next != fire_mode_;
+    fire_mode_ = next;
   }
   const bool was_reloading = reloading();
   if (input.reload_pressed && TryStartReload()) {
@@ -65,6 +99,34 @@ bool Firearm::CancelReload() {
   return true;
 }
 
+void Firearm::Refit(const FirearmSpec& spec) {
+  (void)CancelReload();
+  const int old_capacity = spec_.magazine_capacity;
+  // The spare count stays (the constructor reserved room for it), so the
+  // spec's own spare_magazines is not applied.
+  spec_ = spec;
+  spec_.magazine_capacity = std::max(spec_.magazine_capacity, 0);
+  spec_.spare_magazines = std::max(spec_.spare_magazines, 0);
+  const int capacity = spec_.magazine_capacity;
+  if (capacity == 0) {
+    magazine_ = 0;
+    magazine_inserted_ = false;
+  } else if (old_capacity == 0) {
+    magazine_ = capacity;
+    magazine_inserted_ = true;
+  } else {
+    magazine_ = std::min(magazine_, capacity);
+  }
+  if (capacity > 0) {
+    for (int& rounds : spare_magazines_) {
+      rounds = std::min(rounds, capacity);
+    }
+  }
+  if ((AvailableModes(spec_.fire_modes) & FireModeBit(fire_mode_)) == 0) {
+    fire_mode_ = StartMode(spec_.fire_mode, spec_.fire_modes);
+  }
+}
+
 float Firearm::reload_fraction() const {
   if (!reloading()) {
     return 0.0f;
@@ -77,7 +139,8 @@ int Firearm::rounds_loaded() const {
 }
 
 bool Firearm::TryStartReload() {
-  if (reloading() || spare_magazines_.empty()) {
+  if (reloading() || spare_magazines_.empty() || !spec_.functional ||
+      spec_.magazine_capacity == 0) {
     return false;
   }
   if (chambered_ && magazine_inserted_ &&
@@ -142,7 +205,7 @@ void Firearm::UpdateTrigger(const FirearmInput& input, float dt,
   if (!input.trigger_held) {
     pull_used_ = false;
   }
-  if (!input.trigger_held || !input.can_fire) {
+  if (!input.trigger_held || !input.can_fire || !spec_.functional) {
     cycle_remaining_ = std::max(cycle_remaining_ - dt, 0.0f);
     return;
   }
@@ -150,7 +213,7 @@ void Firearm::UpdateTrigger(const FirearmInput& input, float dt,
   // bolt has cycled while the trigger is held.
   float shot_time = cycle_remaining_;
   while (shot_time <= dt && events.shots < kMaxShotsPerUpdate) {
-    if (fire_mode_ == FireMode::kSemi && pull_used_) {
+    if (fire_mode_ != FireMode::kAuto && pull_used_) {
       break;
     }
     if (!chambered_) {

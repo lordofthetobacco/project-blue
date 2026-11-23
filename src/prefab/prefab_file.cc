@@ -71,6 +71,7 @@ constexpr uint32_t kLightChunk = MakeFourcc('L', 'G', 'H', 'T');
 constexpr uint32_t kChildChunk = MakeFourcc('C', 'H', 'L', 'D');
 constexpr uint32_t kPhysicsChunk = MakeFourcc('P', 'H', 'Y', 'S');
 constexpr uint32_t kEditChunk = MakeFourcc('E', 'D', 'I', 'T');
+constexpr uint32_t kTagChunk = MakeFourcc('T', 'A', 'G', 'S');
 constexpr uint32_t kBulkChunk = MakeFourcc('B', 'U', 'L', 'K');
 
 constexpr uint32_t kDoubleSidedFlag = 1U << 0;
@@ -95,6 +96,7 @@ constexpr size_t kMinEventBytes = kStringBytes + 4;
 constexpr size_t kMinSocketBytes = kStringBytes + 4 + kTransformBytes;
 constexpr size_t kMinLightBytes = kStringBytes + 4 + 8 * 4;
 constexpr size_t kMinChildBytes = kStringBytes + 4 + kTransformBytes;
+constexpr size_t kMinTagBytes = 2 * kStringBytes;
 
 // Returns `value` rounded up to a multiple of kBulkAlignment.
 constexpr size_t AlignUp(size_t value) {
@@ -406,6 +408,16 @@ std::vector<std::byte> EncodePhysics(const Physics& physics, BulkLayout& bulk) {
   writer.WriteF32(physics.friction);
   writer.WriteF32(physics.restitution);
   bulk.WriteRef(writer, physics.cooked_shape);
+  return writer.bytes();
+}
+
+std::vector<std::byte> EncodeTags(const Prefab& prefab) {
+  BinaryWriter writer;
+  writer.WriteU32(static_cast<uint32_t>(prefab.tags.size()));
+  for (const Tag& tag : prefab.tags) {
+    writer.WriteString(tag.key);
+    writer.WriteString(tag.value);
+  }
   return writer.bytes();
 }
 
@@ -801,6 +813,19 @@ Status DecodePhysics(ChunkDecoder decoder, Prefab& prefab) {
   return decoder.Finish();
 }
 
+Status DecodeTags(ChunkDecoder decoder, Prefab& prefab) {
+  const std::optional<uint32_t> count = ReadCount(decoder, kMinTagBytes);
+  if (!count) {
+    return Corrupt();
+  }
+  prefab.tags.resize(*count);
+  for (Tag& tag : prefab.tags) {
+    tag.key = decoder.ReadString();
+    tag.value = decoder.ReadString();
+  }
+  return decoder.Finish();
+}
+
 Status DecodeEdit(ChunkDecoder decoder, std::string_view base_dir,
                   Prefab& prefab) {
   EditInfo& edit = prefab.edit;
@@ -925,6 +950,8 @@ Status DecodeChunk(uint32_t fourcc, std::span<const std::byte> body,
       return DecodePhysics(decoder, prefab);
     case kEditChunk:
       return DecodeEdit(decoder, base_dir, prefab);
+    case kTagChunk:
+      return DecodeTags(decoder, prefab);
     default:
       return Status::Ok();
   }
@@ -978,6 +1005,11 @@ BytesResult EncodePrefab(const Prefab& prefab, std::string_view base_dir) {
   chunks.emplace_back(kChildChunk, EncodeChildren(prefab, base_dir));
   chunks.emplace_back(kPhysicsChunk, EncodePhysics(prefab.physics, bulk));
   chunks.emplace_back(kEditChunk, EncodeEdit(prefab.edit, base_dir));
+  // Only tagged prefabs get the chunk: an untagged prefab encodes exactly as
+  // before tags existed.
+  if (!prefab.tags.empty()) {
+    chunks.emplace_back(kTagChunk, EncodeTags(prefab));
+  }
   const bool has_bulk = bulk.size() > 0;
   const size_t chunk_count = chunks.size() + (has_bulk ? 1 : 0);
 

@@ -94,7 +94,9 @@ Decomposed Decompose(const glm::mat4& world) {
 PhysicsBuildSummary WorldPhysics::Build(const scene::SceneData& scene,
                                         const World& world) {
   for (const BodyEntry& entry : bodies_) {
-    physics_.RemoveBody(entry.body);
+    if (!entry.removed) {
+      physics_.RemoveBody(entry.body);
+    }
   }
   bodies_.clear();
   by_body_.clear();
@@ -165,9 +167,23 @@ PhysicsBuildSummary WorldPhysics::Build(const scene::SceneData& scene,
   return summary;
 }
 
+int WorldPhysics::RemoveHiddenBodies(const World& world) {
+  int removed = 0;
+  for (BodyEntry& entry : bodies_) {
+    if (entry.removed || !world.IsInstanceHidden(entry.instance)) {
+      continue;
+    }
+    physics_.RemoveBody(entry.body);
+    by_body_.erase(static_cast<uint32_t>(entry.body));
+    entry.removed = true;
+    ++removed;
+  }
+  return removed;
+}
+
 void WorldPhysics::SyncToWorld(World& world) const {
   for (const BodyEntry& entry : bodies_) {
-    if (!entry.dynamic || !entry.root) {
+    if (!entry.dynamic || !entry.root || entry.removed) {
       continue;
     }
     const physics::Pose pose = physics_.InterpolatedPose(entry.body);
@@ -191,7 +207,7 @@ std::optional<scene::InstanceId> WorldPhysics::InstanceFor(
 std::optional<physics::BodyId> WorldPhysics::BodyFor(
     scene::InstanceId id) const {
   for (const BodyEntry& entry : bodies_) {
-    if (entry.instance == id && entry.root) {
+    if (entry.instance == id && entry.root && !entry.removed) {
       return entry.body;
     }
   }

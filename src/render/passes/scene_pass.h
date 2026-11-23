@@ -4,8 +4,10 @@
 #include "render/passes/frame_context.h"
 
 // The HDR scene pass: one dynamic-rendering scope on the HDR color target
-// and the scene depth, inside which MeshPass, SkyboxPass and ReticlePass
-// record their draws.
+// and the scene depth (FrameContext::scene_hdr / scene_depth, over
+// scene_extent from the top-left corner: the main view's targets or a
+// scope's picture), inside which MeshPass, SkyboxPass, ReticlePass and
+// ScopeLensPass record their draws.
 
 namespace blue::render {
 

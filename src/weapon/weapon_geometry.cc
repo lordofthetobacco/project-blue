@@ -11,6 +11,7 @@ const WeaponGeometry& M16Geometry() {
       .optic_lens = {0.0f, 1.354f, -1.27f},
       .optic_lens_radius = 0.11f,
       .grip = {0.0f, -0.75f, -2.0f},
+      .eyepiece = {0.0f, 1.354f, -1.505f},
   };
   return kGeometry;
 }
@@ -24,6 +25,7 @@ const WeaponGeometry& Glock17Geometry() {
       .optic_lens = {0.913f, 0.810f, 0.0f},
       .optic_lens_radius = 0.0f,
       .grip = {0.78f, -0.35f, 0.0f},
+      .eyepiece = {0.913f, 0.810f, 0.0f},
   };
   return kGeometry;
 }

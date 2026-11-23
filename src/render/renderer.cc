@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <glm/vec4.hpp>
 
 #include "camera/frustum.h"
+#include "camera/projection.h"
 #include "core/log.h"
 #include "lighting/cascades.h"
 #include "material/material.h"
@@ -24,6 +26,10 @@
 namespace blue::render {
 
 namespace {
+
+// m, the scope camera's near plane: nothing of the world is that close to
+// the objective.
+constexpr float kScopeNearPlane = 0.05f;
 
 // Neutral grey dielectric: what kDefaultMaterial looks like.
 material::MaterialDesc DefaultMaterialDesc() {
@@ -70,6 +76,8 @@ Renderer::Renderer(const platform::Window& window,
                    frame_globals_.set_layout(), environment_),
       reticle_pass_(context_, shader_programs_, shader_dir,
                     frame_globals_.set_layout()),
+      scope_lens_pass_(context_, shader_programs_, shader_dir,
+                       frame_globals_.set_layout()),
       motion_blur_pass_(context_, shader_programs_, shader_dir,
                         frame_globals_.set_layout(), meshes_),
       bloom_pass_(context_, shader_programs_, shader_dir),
@@ -241,9 +249,10 @@ MemoryStats Renderer::memory_stats() const {
   stats.texture_count = static_cast<uint32_t>(textures.count);
   stats.mesh_bytes = mesh_bytes_;
   stats.mesh_count = mesh_count_;
-  stats.render_target_bytes = targets_.size_bytes() +
-                              viewport_image_.size_bytes() +
-                              shadow_pass_.map_bytes();
+  stats.render_target_bytes =
+      targets_.size_bytes() + viewport_image_.size_bytes() +
+      shadow_pass_.map_bytes() + scope_picture_.size_bytes() +
+      scope_depth_.size_bytes();
   stats.environment_bytes = environment_.size_bytes();
   // Usually empty, a handful of entries right after a release.
   for (const Retired<Mesh>& retired : retired_meshes_) {
@@ -484,6 +493,9 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
       .frame_set = frame_globals_.set(frame_index_),
       .view = view,
       .targets = targets_,
+      .scene_hdr = targets_.hdr(),
+      .scene_depth = targets_.depth(),
+      .scene_extent = extent,
       .swapchain_image = swapchain_.image(*image_index),
       .swapchain_view = swapchain_.image_view(*image_index),
       .swapchain_extent = swapchain_.extent(),
@@ -494,7 +506,63 @@ void Renderer::DrawFrameTo(const SceneView& view, ImDrawData* ui,
       .draw_list = draw_list_.entries(),
       .stats = stats_,
   };
-  RecordCommands(frame, ctx, ui, output);
+
+  // The scope's picture: the same scene from the scope's camera, culled by
+  // its own frustum, into the corner of the scope target its size needs.
+  std::optional<SceneView> scope_view;
+  std::optional<camera::Frustum> scope_frustum;
+  std::optional<FrameContext> scope_ctx;
+  RenderStats scope_stats;
+  if (view.scope) {
+    EnsureScopeTargets();
+  }
+  if (view.scope && view.scope->render_picture) {
+    const ScopeSight& scope = *view.scope;
+    const uint32_t size = std::clamp(scope.resolution, 1u, kMaxScopeResolution);
+    const VkExtent2D scope_extent{size, size};
+    scope_view.emplace(view);
+    scope_view->scope.reset();
+    scope_view->sight.reset();
+    scope_view->post.weapon_motion_blur_enabled = false;
+    Camera& camera = scope_view->camera;
+    camera.view = scope.view;
+    camera.position = scope.position;
+    camera.vertical_fov_radians =
+        2.0f * std::atan(std::max(scope.camera_tangent, 1.0e-5f));
+    camera.near_plane = kScopeNearPlane;
+    camera.projection = camera::ReversedInfinitePerspective(
+        camera.vertical_fov_radians, 1.0f, kScopeNearPlane);
+    camera.previous_view_projection = camera.projection * camera.view;
+    scope_frustum.emplace(camera.projection * camera.view);
+    scope_draw_list_.Build(*scope_view, world_bounds_, *scope_frustum,
+                           materials_, meshes_, scope_stats,
+                           /*scope_view=*/true);
+    FrameUniforms scope_uniforms =
+        MakeFrameUniforms(*scope_view, cascades, shadows, scope_extent);
+    environment_.FillUniforms(scope_uniforms);
+    frame_globals_.Write(frame_index_, scope_uniforms, FrameView::kScope);
+    scope_ctx.emplace(FrameContext{
+        .cmd = frame.command_buffer,
+        .frame_index = frame_index_,
+        .frame_set = frame_globals_.set(frame_index_, FrameView::kScope),
+        .view = *scope_view,
+        .targets = targets_,
+        .scene_hdr = scope_picture_,
+        .scene_depth = scope_depth_,
+        .scene_extent = scope_extent,
+        .swapchain_image = VK_NULL_HANDLE,
+        .swapchain_view = VK_NULL_HANDLE,
+        .swapchain_extent = {},
+        .world_bounds = world_bounds_,
+        .camera_frustum = *scope_frustum,
+        .cascades = cascades,
+        .shadows = shadows,
+        .draw_list = scope_draw_list_.entries(),
+        .stats = scope_stats,
+    });
+  }
+  RecordCommands(frame, ctx, scope_ctx ? &*scope_ctx : nullptr, ui, output);
+  stats_.scope_draw_calls = scope_stats.draw_calls;
   SubmitAndPresent(frame, *image_index);
 
   frame_index_ = (frame_index_ + 1) % kFramesInFlight;
@@ -572,8 +640,62 @@ void Renderer::ComputeWorldBounds(const SceneView& view) {
   }
 }
 
+void Renderer::EnsureScopeTargets() {
+  if (scope_picture_.handle() != VK_NULL_HANDLE) {
+    return;
+  }
+  const VkExtent2D extent{kMaxScopeResolution, kMaxScopeResolution};
+  scope_picture_ =
+      Image(context_, {.extent = extent,
+                       .format = RenderTargets::kHdrFormat,
+                       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                VK_IMAGE_USAGE_SAMPLED_BIT |
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                       .dedicated = true});
+  scope_depth_ =
+      Image(context_, {.extent = extent,
+                       .format = RenderTargets::kDepthFormat,
+                       .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                       .aspect = VK_IMAGE_ASPECT_DEPTH_BIT,
+                       .dedicated = true});
+  // The lens may sample the picture before one was ever rendered (no light
+  // through the scope): give it a defined, black content.
+  context_.SubmitImmediate([this](VkCommandBuffer cmd) {
+    constexpr BarrierScope kTransferWrite{VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                                          VK_ACCESS_2_TRANSFER_WRITE_BIT};
+    ImageBarrier(cmd, scope_picture_.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
+                 kNoAccess, kTransferWrite, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+    const VkImageSubresourceRange range = WholeImage(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(cmd, scope_picture_.handle(),
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                         &range);
+    ImageBarrier(cmd, scope_picture_.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
+                 kTransferWrite, kFragmentSampledRead,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  });
+  scope_lens_pass_.BindPicture(scope_picture_.view(), samplers_.linear_clamp());
+  core::log::Info("Scope picture target {} x {}", extent.width, extent.height);
+}
+
+void Renderer::RecordScopeView(const FrameContext& scope_ctx) {
+  depth_prepass_.Record(scope_ctx);
+  BeginScenePass(scope_ctx);
+  mesh_pass_.Draw(scope_ctx);
+  skybox_pass_.Draw(scope_ctx);
+  EndScenePass(scope_ctx);
+}
+
+void Renderer::DrawSights(const FrameContext& ctx) const {
+  reticle_pass_.Draw(ctx);
+  scope_lens_pass_.Draw(ctx);
+}
+
 void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
-                              ImDrawData* ui, Output output) {
+                              const FrameContext* scope_ctx, ImDrawData* ui,
+                              Output output) {
   const VkCommandBuffer cmd = ctx.cmd;
   CheckVk(vkResetCommandPool(context_.device(), frame.command_pool, 0));
   const VkCommandBufferBeginInfo begin_info{
@@ -602,8 +724,13 @@ void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
   } else {
     ssao_pass_.Record(ctx);  // At most a one-time clear to white.
   }
-  // The weapon motion blur rewrites the HDR image, so the reflex sight is
-  // drawn after it: its dot must stay sharp.
+  if (scope_ctx != nullptr) {
+    timed(GpuScope::kScopeView, [&] { RecordScopeView(*scope_ctx); });
+  }
+  // The weapon motion blur rewrites the HDR image, so the sights are drawn
+  // after it: the reflex dot and the scope's picture must stay sharp (the
+  // picture is not weapon motion), and they are tonemapped once with the
+  // rest of the image.
   const std::optional<VkRect2D> motion_blur_area =
       MotionBlurPass::FindArea(ctx);
   timed(GpuScope::kScene, [&] {
@@ -611,16 +738,16 @@ void Renderer::RecordCommands(const Frame& frame, const FrameContext& ctx,
     mesh_pass_.Draw(ctx);
     skybox_pass_.Draw(ctx);
     if (!motion_blur_area) {
-      reticle_pass_.Draw(ctx);
+      DrawSights(ctx);
     }
     EndScenePass(ctx);
   });
   if (motion_blur_area) {
     timed(GpuScope::kMotionBlur, [&] {
       motion_blur_pass_.Record(ctx, *motion_blur_area);
-      if (ctx.view.sight) {
+      if (ctx.view.sight || ctx.view.scope) {
         ResumeScenePass(ctx);
-        reticle_pass_.Draw(ctx);
+        DrawSights(ctx);
         EndScenePass(ctx);
       }
     });

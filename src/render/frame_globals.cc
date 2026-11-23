@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 
 #include <glm/common.hpp>
@@ -84,7 +85,7 @@ VkDescriptorSetLayout CreateLayout(VkDevice device) {
 }
 
 VkDescriptorPool CreatePool(VkDevice device) {
-  const auto frames = static_cast<uint32_t>(kFramesInFlight);
+  const auto frames = static_cast<uint32_t>(kFramesInFlight * kFrameViewCount);
   const std::array<VkDescriptorPoolSize, 2> pool_sizes{{
       {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = frames},
       {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -274,7 +275,8 @@ FrameGlobals::FrameGlobals(const VulkanContext& context,
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
   }
   BindEnvironment(default_cube_.view(), default_lut_.view());
-  BindAmbientOcclusion(default_ambient_occlusion_.view());
+  BindImage(kAmbientOcclusionBinding, default_ambient_occlusion_.view(),
+            samplers_.linear_clamp(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 FrameGlobals::~FrameGlobals() {
@@ -282,8 +284,10 @@ FrameGlobals::~FrameGlobals() {
   vkDestroyDescriptorSetLayout(device_, layout_, nullptr);
 }
 
-void FrameGlobals::Write(size_t frame, const FrameUniforms& uniforms) const {
-  std::memcpy(frames_[frame].uniforms.mapped(), &uniforms, sizeof(uniforms));
+void FrameGlobals::Write(size_t frame, const FrameUniforms& uniforms,
+                         FrameView view) const {
+  std::memcpy(frames_[Index(frame, view)].uniforms.mapped(), &uniforms,
+              sizeof(uniforms));
 }
 
 void FrameGlobals::BindShadowMap(VkImageView view, VkSampler compare_sampler) {
@@ -301,20 +305,25 @@ void FrameGlobals::BindEnvironment(VkImageView prefiltered_cube,
 
 void FrameGlobals::BindAmbientOcclusion(VkImageView ambient_occlusion) {
   BindImage(kAmbientOcclusionBinding, ambient_occlusion,
-            samplers_.linear_clamp(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            samplers_.linear_clamp(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            FrameView::kMain);
 }
 
 void FrameGlobals::BindImage(uint32_t binding, VkImageView view,
-                             VkSampler sampler, VkImageLayout layout) {
+                             VkSampler sampler, VkImageLayout layout,
+                             std::optional<FrameView> only) {
   const VkDescriptorImageInfo image_info{
       .sampler = sampler,
       .imageView = view,
       .imageLayout = layout,
   };
-  for (const Frame& frame : frames_) {
+  for (size_t i = 0; i < frames_.size(); ++i) {
+    if (only && static_cast<size_t>(*only) != i % kFrameViewCount) {
+      continue;
+    }
     const VkWriteDescriptorSet write{
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = frame.set,
+        .dstSet = frames_[i].set,
         .dstBinding = binding,
         .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,

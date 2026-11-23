@@ -401,6 +401,11 @@ Json PrefabToJson(const prefab::Prefab& prefab, const std::string& asset_root) {
                      .Set("node", socket.node)
                      .Set("local", TransformJson(socket.local)));
   }
+  // In file order, as an object (keys are unique).
+  Json tags = Json::Object();
+  for (const prefab::Tag& tag : prefab.tags) {
+    tags.Set(tag.key, tag.value);
+  }
   Json lights = Json::Array();
   for (size_t i = 0; i < prefab.lights.size(); ++i) {
     const prefab::PointLight& light = prefab.lights[i];
@@ -431,6 +436,7 @@ Json PrefabToJson(const prefab::Prefab& prefab, const std::string& asset_root) {
       .Set("textures", std::move(textures))
       .Set("clips", std::move(clips))
       .Set("sockets", std::move(sockets))
+      .Set("tags", std::move(tags))
       .Set("lights", std::move(lights))
       .Set("children", std::move(children))
       .Set("physics", PhysicsJson(prefab.physics))

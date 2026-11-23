@@ -31,7 +31,9 @@ namespace blue::physics::internal {
 
 class BroadPhaseLayerMapping final : public JPH::BroadPhaseLayerInterface {
  public:
-  JPH::uint GetNumBroadPhaseLayers() const override { return layers::kCount; }
+  JPH::uint GetNumBroadPhaseLayers() const override {
+    return broad_layers::kCount;
+  }
 
   JPH::BroadPhaseLayer GetBroadPhaseLayer(
       JPH::ObjectLayer layer) const override {
@@ -54,7 +56,7 @@ class ObjectVsBroadPhaseFilter final
   bool ShouldCollide(JPH::ObjectLayer layer,
                      JPH::BroadPhaseLayer broad_layer) const override {
     // Static geometry only collides with moving objects.
-    return layer == layers::kMoving || broad_layer == broad_layers::kMoving;
+    return layer != layers::kNonMoving || broad_layer == broad_layers::kMoving;
   }
 };
 
@@ -62,7 +64,16 @@ class ObjectPairFilter final : public JPH::ObjectLayerPairFilter {
  public:
   bool ShouldCollide(JPH::ObjectLayer layer1,
                      JPH::ObjectLayer layer2) const override {
-    return layer1 == layers::kMoving || layer2 == layers::kMoving;
+    return layer1 != layers::kNonMoving || layer2 != layers::kNonMoving;
+  }
+};
+
+// What a character collides with: everything but the bodies created with
+// ShapeBodyDesc::blocks_characters false.
+class CharacterObjectFilter final : public JPH::ObjectLayerFilter {
+ public:
+  bool ShouldCollide(JPH::ObjectLayer layer) const override {
+    return layer != layers::kMovingNoCharacter;
   }
 };
 

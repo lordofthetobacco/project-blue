@@ -37,6 +37,7 @@
 #include "render/passes/overlay_pass.h"
 #include "render/passes/present_pass.h"
 #include "render/passes/reticle_pass.h"
+#include "render/passes/scope_lens_pass.h"
 #include "render/passes/shadow_pass.h"
 #include "render/passes/skybox_pass.h"
 #include "render/passes/ssao_pass.h"
@@ -58,15 +59,23 @@
 //   shadow cascades      ShadowPass        (sun depth, 4 layers)
 //   depth pre-pass       DepthPrepass      draw list -> depth
 //   ssao                 SsaoPass          depth -> ssao (half res, blurred)
+//   scope picture        RecordScopeView   SceneView::scope only: the same
+//                                          DepthPrepass, MeshPass and
+//                                          SkyboxPass from the scope's
+//                                          camera into the scope picture
+//                                          (shadow map and IBL shared, no
+//                                          SSAO, the held weapon left out)
 //   scene (HDR)          BeginScenePass -> MeshPass (depth EQUAL),
-//                        SkyboxPass, ReticlePass -> EndScenePass
+//                        SkyboxPass, ReticlePass, ScopeLensPass ->
+//                        EndScenePass
 //   motion blur          MotionBlurPass    weapon items -> velocity -> tile
 //                                          max; hdr blurred in place (via a
 //                                          copy); then ResumeScenePass ->
-//                                          ReticlePass -> EndScenePass. Only
-//                                          in frames with weapon motion
-//                                          blur, where the reticle moves
-//                                          here from the scene pass.
+//                                          ReticlePass, ScopeLensPass ->
+//                                          EndScenePass. Only in frames with
+//                                          weapon motion blur, where the
+//                                          sights move here from the scene
+//                                          pass.
 //   bloom                BloomPass         hdr -> bloom mip chain
 //   tonemap              TonemapPass       hdr + bloom -> ldr (sRGB + luma)
 //   overlay              OverlayPass       debug lines + selection outline
@@ -350,9 +359,19 @@ class Renderer {
   // Submits the recorded commands of `frame` and presents `image_index`.
   void SubmitAndPresent(const Frame& frame, uint32_t image_index);
   // Records every pass of the frame described by `ctx` (see the top of this
-  // file).
+  // file); `scope_ctx` is the scope picture's, or null.
   void RecordCommands(const Frame& frame, const FrameContext& ctx,
-                      ImDrawData* ui, Output output);
+                      const FrameContext* scope_ctx, ImDrawData* ui,
+                      Output output);
+  // Creates the scope picture and its depth (kMaxScopeResolution square) the
+  // first time a frame has a scope; they live as long as the renderer.
+  void EnsureScopeTargets();
+  // Records the scope picture: depth pre-pass, meshes and sky of
+  // `scope_ctx`.
+  void RecordScopeView(const FrameContext& scope_ctx);
+  // Draws the sights (reflex dot, scope eyepiece) of `ctx`; inside the
+  // scene pass.
+  void DrawSights(const FrameContext& ctx) const;
   // Records the copy of the viewport image (COLOR_ATTACHMENT_OPTIMAL after
   // the present pass, and again afterwards) for every readback not recorded
   // yet.
@@ -389,6 +408,11 @@ class Renderer {
   std::vector<Retired<Mesh>> retired_meshes_;
   std::vector<Retired<Image>> retired_images_;
   DrawList draw_list_;
+  // The scope view's culled draw list and its picture and depth
+  // (EnsureScopeTargets(); empty until a frame has a scope).
+  DrawList scope_draw_list_;
+  Image scope_picture_;
+  Image scope_depth_;
 
   ShadowPass shadow_pass_;
   DepthPrepass depth_prepass_;
@@ -396,6 +420,7 @@ class Renderer {
   MeshPass mesh_pass_;
   SkyboxPass skybox_pass_;
   ReticlePass reticle_pass_;
+  ScopeLensPass scope_lens_pass_;
   MotionBlurPass motion_blur_pass_;
   BloomPass bloom_pass_;
   TonemapPass tonemap_pass_;

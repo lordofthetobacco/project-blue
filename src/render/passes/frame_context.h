@@ -9,6 +9,7 @@
 #include "camera/frustum.h"
 #include "lighting/cascades.h"
 #include "render/draw_list.h"
+#include "render/image.h"
 #include "render/render_targets.h"
 #include "render/scene_view.h"
 
@@ -24,6 +25,13 @@ struct FrameContext {
   VkDescriptorSet frame_set = VK_NULL_HANDLE;
   const SceneView& view;
   const RenderTargets& targets;
+  // What the camera passes (DepthPrepass, the scene pass and what is drawn
+  // inside it) render into, from the top-left corner: targets.hdr(),
+  // targets.depth() and targets.extent() for the main view; a scope's
+  // picture for the scope view (Renderer::RecordScopeView()).
+  const Image& scene_hdr;
+  const Image& scene_depth;
+  VkExtent2D scene_extent{};
 
   // The swapchain image this frame presents (layout UNDEFINED until the
   // present pass).

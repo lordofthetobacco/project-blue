@@ -11,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -237,6 +238,7 @@ void CheckSamePrefab(const Prefab& a, const Prefab& b) {
   CHECK(p.friction == q.friction);
   CHECK(p.restitution == q.restitution);
   CHECK(SameBytes(p.cooked_shape, q.cooked_shape));
+  CHECK(a.tags == b.tags);
   CHECK(a.edit.source_model == b.edit.source_model);
   CHECK(a.edit.import_settings == b.edit.import_settings);
   CHECK(a.edit.texture_sources == b.edit.texture_sources);
@@ -668,6 +670,68 @@ TEST_CASE("Large prefab timing") {
   MESSAGE("large prefab ", megabytes, " MB: encode ", encode_ms, " ms, decode ",
           decode_ms, " ms, decode with bulk CRC ", verified_ms,
           " ms, CRC-32 of the whole file ", crc_ms, " ms (crc ", crc, ")");
+}
+
+TEST_CASE("Tags round trip in order; an untagged prefab writes no TAGS chunk") {
+  constexpr uint32_t kTags = scene::MakeFourcc('T', 'A', 'G', 'S');
+  Prefab tagged;
+  tagged.tags = {{.key = "weapon", .value = "glock17"},
+                 {.key = "a.b_2", .value = ""},
+                 {.key = "zz", .value = "spaces and = signs"}};
+  const std::vector<std::byte> file = Encode(tagged);
+  CHECK(std::ranges::count(Toc(file), kTags, &Entry::fourcc) == 1);
+  auto decoded = Decode(file);
+  REQUIRE(decoded.ok());
+  CHECK(decoded.value().tags == tagged.tags);
+
+  // An untagged prefab encodes exactly as before tags existed: no chunk,
+  // and such a file decodes with no tags.
+  const std::vector<std::byte> untagged = Encode(Prefab{});
+  CHECK(std::ranges::count(Toc(untagged), kTags, &Entry::fourcc) == 0);
+  auto old = Decode(untagged);
+  REQUIRE(old.ok());
+  CHECK(old.value().tags.empty());
+}
+
+TEST_CASE("A reader that does not know TAGS loads the rest of the file") {
+  // What an older reader does with the chunk: skip it as unknown. Renaming
+  // the chunk shows the remaining file is complete without it.
+  constexpr uint32_t kTags = scene::MakeFourcc('T', 'A', 'G', 'S');
+  std::vector<std::byte> file = Encode(testing::MakeSamplePrefab());
+  const std::vector<Entry> toc = Toc(file);
+  const auto tags = std::ranges::find(toc, kTags, &Entry::fourcc);
+  REQUIRE(tags != toc.end());
+  const size_t at =
+      kHeaderSize + static_cast<size_t>(tags - toc.begin()) * kTocEntrySize;
+  PutU32(file, at, scene::MakeFourcc('F', 'U', 'T', 'R'));
+  FixChecksums(file);
+  auto decoded = Decode(file);
+  REQUIRE(decoded.ok());
+  CHECK(decoded.value().tags.empty());
+  Prefab expected = testing::MakeSamplePrefab();
+  expected.tags.clear();
+  CheckSamePrefab(expected, decoded.value());
+}
+
+TEST_CASE("Invalid tags are refused when encoding and when decoding") {
+  Prefab duplicate;
+  duplicate.tags = {{.key = "weapon", .value = "a"},
+                    {.key = "weapon", .value = "b"}};
+  auto encoded = EncodePrefab(duplicate, "");
+  REQUIRE_FALSE(encoded.ok());
+  CHECK(encoded.error() == PrefabError::kInvalidPrefab);
+
+  // A valid file whose key is changed to upper case (checksums fixed).
+  Prefab tagged;
+  tagged.tags = {{.key = "weapon", .value = "glock17"}};
+  std::vector<std::byte> file = Encode(tagged);
+  const std::string_view key = "weapon";
+  const auto found = std::ranges::search(
+      file, std::as_bytes(std::span(key.data(), key.size())));
+  REQUIRE_FALSE(found.empty());
+  *found.begin() = static_cast<std::byte>('W');
+  FixChecksums(file);
+  CHECK(DecodeError(file) == PrefabError::kCorrupt);
 }
 
 }  // namespace blue::prefab

@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "asset/mesh_data.h"
@@ -207,6 +208,48 @@ TEST_CASE("ValidatePrefab reports broken references and values") {
     prefab.sockets[0].name.assign(kMaxStringLength + 1, 'x');
     CHECK_FALSE(Problem(prefab).empty());
   }
+}
+
+TEST_CASE("Tag keys, lookups and edits") {
+  CHECK(IsValidTagKey("weapon"));
+  CHECK(IsValidTagKey("a.b_c9"));
+  CHECK_FALSE(IsValidTagKey(""));
+  CHECK_FALSE(IsValidTagKey("Weapon"));
+  CHECK_FALSE(IsValidTagKey("two words"));
+  CHECK_FALSE(IsValidTagKey("k=v"));
+  CHECK(IsValidTagKey(std::string(kMaxTagKeyLength, 'k')));
+  CHECK_FALSE(IsValidTagKey(std::string(kMaxTagKeyLength + 1, 'k')));
+
+  Prefab prefab;
+  CHECK_FALSE(FindTag(prefab, "weapon").has_value());
+  SetTag(prefab, "weapon", "m16");
+  SetTag(prefab, "kind", "rifle");
+  SetTag(prefab, "weapon", "glock17");  // Replaced in place.
+  REQUIRE(prefab.tags.size() == 2);
+  CHECK(prefab.tags[0].key == "weapon");
+  CHECK(FindTag(prefab, "weapon") ==
+        std::optional<std::string_view>("glock17"));
+  CHECK(RemoveTag(prefab, "weapon"));
+  CHECK_FALSE(RemoveTag(prefab, "weapon"));
+  REQUIRE(prefab.tags.size() == 1);
+  CHECK(prefab.tags[0].key == "kind");
+}
+
+TEST_CASE("ValidatePrefab checks tags") {
+  Prefab prefab;
+  prefab.tags = {{.key = "weapon", .value = "glock17"}};
+  CHECK_FALSE(ValidatePrefab(prefab).has_value());
+  SUBCASE("bad key") { prefab.tags[0].key = "Weapon"; }
+  SUBCASE("duplicate key") { prefab.tags.push_back(prefab.tags[0]); }
+  SUBCASE("long value") {
+    prefab.tags[0].value = std::string(kMaxTagValueLength + 1, 'v');
+  }
+  SUBCASE("too many") {
+    for (size_t i = 0; i < kMaxTagCount; ++i) {
+      prefab.tags.push_back({.key = "k" + std::to_string(i)});
+    }
+  }
+  CHECK(ValidatePrefab(prefab).has_value());
 }
 
 }  // namespace blue::prefab

@@ -563,4 +563,55 @@ TEST_CASE("C and X toggle cascade debug and shadows once, ignoring repeat") {
   CHECK(frame.actions.pressed(Action::kToggleShadows));
 }
 
+TEST_CASE("Cursor mode: no capture, left drag looks, clicks fire nothing") {
+  InputMapper mapper;
+  CaptureAndSettle(mapper);
+  mapper.set_mouse_mode(InputMapper::MouseMode::kCursor);
+  CHECK_FALSE(mapper.wants_mouse_captured());
+
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_LEFT, true, 3 * kSecond));
+  CHECK_FALSE(mapper.wants_mouse_captured());
+  mapper.HandleEvent(MotionEvent(4.0f, -2.0f));
+  const input::InputFrame frame = mapper.EndFrame();
+  CHECK(frame.look);
+  CHECK(frame.mouse_delta == glm::vec2(4.0f, -2.0f));
+  CHECK_FALSE(frame.actions.held(Action::kFire));
+  CHECK_FALSE(frame.actions.pressed(Action::kFire));
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_RIGHT, true, 3 * kSecond));
+  CHECK_FALSE(mapper.EndFrame().actions.held(Action::kAim));
+}
+
+TEST_CASE("Cursor mode: Escape is left to the app, keys still bind") {
+  InputMapper mapper;
+  mapper.HandleEvent(WindowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED));
+  mapper.set_mouse_mode(InputMapper::MouseMode::kCursor);
+  Press(mapper, SDL_SCANCODE_ESCAPE);
+  Press(mapper, SDL_SCANCODE_T);
+  const input::InputFrame frame = mapper.EndFrame();
+  CHECK_FALSE(mapper.quit_requested());
+  CHECK(frame.actions.pressed(Action::kEscape));
+  CHECK(frame.actions.pressed(Action::kInspectWeapon));
+}
+
+TEST_CASE("Leaving cursor mode forgets held buttons; RequestCapture captures") {
+  InputMapper mapper;
+  mapper.HandleEvent(WindowEvent(SDL_EVENT_WINDOW_FOCUS_GAINED));
+  mapper.set_mouse_mode(InputMapper::MouseMode::kCursor);
+  mapper.HandleEvent(ButtonEvent(SDL_BUTTON_LEFT, true, 3 * kSecond));
+  mapper.RequestCapture();  // Not in capture mode: ignored.
+  CHECK_FALSE(mapper.wants_mouse_captured());
+
+  mapper.set_mouse_mode(InputMapper::MouseMode::kCapture);
+  mapper.RequestCapture();
+  CHECK(mapper.wants_mouse_captured());
+  // The button held over the screen does not become a held trigger.
+  CHECK_FALSE(mapper.EndFrame().actions.held(Action::kFire));
+}
+
+TEST_CASE("RequestCapture needs the window focus") {
+  InputMapper mapper;
+  mapper.RequestCapture();
+  CHECK_FALSE(mapper.wants_mouse_captured());
+}
+
 }  // namespace blue::platform

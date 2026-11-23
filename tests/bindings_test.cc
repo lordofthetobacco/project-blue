@@ -78,10 +78,9 @@ TEST_CASE("Default bindings cover every action with the legacy keys") {
   CHECK(bindings.IsBound(Action::kFlyUp, Binding::Key(SDL_SCANCODE_SPACE)));
   CHECK(bindings.IsBound(Action::kCrouch, Binding::Key(SDL_SCANCODE_LCTRL)));
   CHECK(bindings.IsBound(Action::kSprint, Binding::Key(SDL_SCANCODE_LSHIFT)));
-  CHECK(
-      bindings.IsBound(Action::kCycleCamera, Binding::Key(SDL_SCANCODE_TAB)));
+  CHECK(bindings.IsBound(Action::kCycleCamera, Binding::Key(SDL_SCANCODE_TAB)));
   CHECK(bindings.IsBound(Action::kEscape, Binding::Key(SDL_SCANCODE_ESCAPE)));
-  CHECK(bindings.IsBound(Action::kPush, Binding::Key(SDL_SCANCODE_F)));
+  CHECK(bindings.IsBound(Action::kPush, Binding::Key(SDL_SCANCODE_H)));
   CHECK(bindings.IsBound(Action::kSaveScene, Binding::Key(SDL_SCANCODE_F5)));
   CHECK_FALSE(bindings.IsBound(Action::kPush, Binding::Key(SDL_SCANCODE_G)));
 }
@@ -101,6 +100,38 @@ TEST_CASE("Weapon slots default to keys 2 (pistol) and 3 (rifle)") {
   CHECK(bindings.IsBound(Action::kEquipRifle, Binding::Key(SDL_SCANCODE_3)));
   CHECK(bindings.For(Action::kEquipPistol).size() == 1);
   CHECK(bindings.For(Action::kEquipRifle).size() == 1);
+}
+
+TEST_CASE("Interact defaults to F and dropping the weapon to G") {
+  const InputBindings bindings;
+  CHECK(bindings.IsBound(Action::kInteract, Binding::Key(SDL_SCANCODE_F)));
+  CHECK(bindings.IsBound(Action::kDropWeapon, Binding::Key(SDL_SCANCODE_G)));
+  CHECK(bindings.For(Action::kInteract).size() == 1);
+  CHECK(bindings.For(Action::kDropWeapon).size() == 1);
+  CHECK(IsEdgeTriggered(Action::kInteract));
+  CHECK(IsEdgeTriggered(Action::kDropWeapon));
+  CHECK(ParseAction("interact") == Action::kInteract);
+  CHECK(ParseAction("drop_weapon") == Action::kDropWeapon);
+}
+
+TEST_CASE("The scope's zero defaults to Page Up (further) and Page Down") {
+  const InputBindings bindings;
+  CHECK(bindings.IsBound(Action::kZeroUp, Binding::Key(SDL_SCANCODE_PAGEUP)));
+  CHECK(
+      bindings.IsBound(Action::kZeroDown, Binding::Key(SDL_SCANCODE_PAGEDOWN)));
+  CHECK(IsEdgeTriggered(Action::kZeroUp));
+  CHECK(IsEdgeTriggered(Action::kZeroDown));
+  CHECK(ParseAction("zero_up") == Action::kZeroUp);
+  CHECK(ParseAction("zero_down") == Action::kZeroDown);
+}
+
+TEST_CASE("The inspect screen defaults to T") {
+  const InputBindings bindings;
+  CHECK(bindings.IsBound(Action::kInspectWeapon, Binding::Key(SDL_SCANCODE_T)));
+  CHECK(bindings.For(Action::kInspectWeapon).size() == 1);
+  CHECK(IsEdgeTriggered(Action::kInspectWeapon));
+  CHECK(ParseAction("inspect_weapon") == Action::kInspectWeapon);
+  CHECK(ActionName(Action::kInspectWeapon) == "inspect_weapon");
 }
 
 TEST_CASE("No two default actions share an input except the mode pairs") {

@@ -217,13 +217,14 @@ class Character::Impl final : public internal::FixedStepParticipant {
   const CharacterDesc& desc() const { return desc_; }
 
  private:
-  // The character collides with whatever a moving body collides with.
+  // The character collides with whatever a moving body collides with, except
+  // the bodies that do not block characters.
   JPH::DefaultBroadPhaseLayerFilter BroadPhaseFilter() const {
     return world_.system().GetDefaultBroadPhaseLayerFilter(
         internal::layers::kMoving);
   }
-  JPH::DefaultObjectLayerFilter ObjectFilter() const {
-    return world_.system().GetDefaultLayerFilter(internal::layers::kMoving);
+  const internal::CharacterObjectFilter& ObjectFilter() const {
+    return object_filter_;
   }
 
   PhysicsWorld::Impl& world_;
@@ -232,6 +233,7 @@ class Character::Impl final : public internal::FixedStepParticipant {
   JPH::ShapeRefC crouching_shape_;
   JPH::Ref<JPH::CharacterVirtual> character_;
   JPH::CharacterVirtual::ExtendedUpdateSettings extended_;
+  internal::CharacterObjectFilter object_filter_;
   JPH::BodyFilter body_filter_;
   JPH::ShapeFilter shape_filter_;
 

@@ -34,6 +34,9 @@
 //   'SOCK'  sockets.  'LGHT'  point lights.  'CHLD'  child prefabs.
 //   'PHYS'  physics body; its cooked shape is a 'BULK' range.
 //   'EDIT'  source model, import settings, texture sources.
+//   'TAGS'  tags: count, per tag key and value. Written only when the prefab
+//           has tags; added without a version bump (an older reader skips
+//           it, a file without it loads with no tags).
 // Bulk chunk:
 //   'BULK'  vertex arrays, index arrays, texture mips and cooked shapes, each
 //           at a multiple of 16 from the file start, referenced by

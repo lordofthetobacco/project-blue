@@ -34,9 +34,13 @@ void DrawList::Build(const SceneView& view,
                      std::span<const camera::Aabb> world_bounds,
                      const camera::Frustum& frustum,
                      const MaterialSystem& materials,
-                     const std::vector<Mesh>& meshes, RenderStats& stats) {
+                     const std::vector<Mesh>& meshes, RenderStats& stats,
+                     bool scope_view) {
   entries_.clear();
   for (size_t i = 0; i < view.draws.size(); ++i) {
+    if (scope_view && view.draws[i].hidden_in_scope) {
+      continue;
+    }
     if (!frustum.Intersects(world_bounds[i])) {
       ++stats.culled_draws;
       continue;

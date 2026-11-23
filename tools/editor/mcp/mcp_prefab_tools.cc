@@ -3,7 +3,7 @@
 // commands, each one undo step.
 //
 //   prefab_get, prefab_set_material, prefab_add_socket, prefab_set_socket,
-//   prefab_set_collider, prefab_clip_edit, prefab_validate
+//   prefab_set_tag, prefab_set_collider, prefab_clip_edit, prefab_validate
 
 #include <cstddef>
 #include <cstdint>
@@ -242,6 +242,55 @@ void RegisterPrefabTools(mcp::Server& server, EditorContext& context) {
         });
         doc.selection().Set({.kind = SelectionKind::kSocket, .index = added});
         Json result = SocketJson(doc.state(), added);
+        result.Set("undo", UndoNote(doc));
+        return ToolResult::Structured(std::move(result));
+      });
+
+  AddTool(
+      server, context,
+      {.name = "prefab_set_tag",
+       .title = "Set or remove a tag",
+       .description =
+           "Sets prefab tag `key` to `value` (adds it or changes its value), "
+           "or removes it with remove = true. Keys are 1-64 of [a-z0-9_.], "
+           "values at most 256 bytes. The tag weapon = <type> (glock17, "
+           "m16) makes the prefab a weapon the game can pick up. Returns "
+           "every tag.",
+       .input_schema = ObjectSchema(
+           Json::Object()
+               .Set("key", Prop("string", "Tag key."))
+               .Set("value", Prop("string", "New value (set)."))
+               .Set("remove", Prop("boolean", "Remove the tag instead.")),
+           {"key"})},
+      [ctx](const ToolCall& call) -> ToolReturn {
+        PrefabResult prefab = PrefabForEdit(*ctx);
+        if (!prefab.ok()) {
+          return prefab.error();
+        }
+        PrefabDocument& doc = *prefab.value();
+        const Json& args = call.arguments;
+        const std::string key = *args.GetString("key");
+        const std::string* value = args.GetString("value");
+        const Json* remove = args.Find("remove");
+        const bool removing =
+            remove != nullptr && remove->is_bool() && remove->bool_value();
+        if (!removing && value == nullptr) {
+          return ToolResult::Error("give a value, or remove = true");
+        }
+        core::Result<void, std::string> edited =
+            TryEditQuiet(doc, removing ? "Remove tag" : "Set tag",
+                         ChangeKind::kParameters, [&](prefab::Prefab& p) {
+                           return removing ? RemovePrefabTag(p, key)
+                                           : SetPrefabTag(p, key, *value);
+                         });
+        if (!edited.ok()) {
+          return ToolResult::Error(edited.error());
+        }
+        Json tags = Json::Object();
+        for (const prefab::Tag& tag : doc.state().tags) {
+          tags.Set(tag.key, tag.value);
+        }
+        Json result = Json::Object().Set("tags", std::move(tags));
         result.Set("undo", UndoNote(doc));
         return ToolResult::Structured(std::move(result));
       });

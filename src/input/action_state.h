@@ -39,6 +39,14 @@ class ActionState {
     released_.reset();
   }
 
+  // Forgets `action`: not held, no edges (no release edge is recorded).
+  void Forget(Action action) {
+    const size_t index = Index(action);
+    held_[index] = false;
+    pressed_[index] = false;
+    released_[index] = false;
+  }
+
   // Forgets everything, without recording release edges.
   void Clear() {
     held_.reset();
