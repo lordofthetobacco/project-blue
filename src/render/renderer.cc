@@ -15,7 +15,7 @@ namespace blue::render {
 Renderer::Renderer(const RendererOptions& options)
     : backend_(CreateBackend(options)) {}
 
-Renderer::Renderer(const platform::Window& window,
+Renderer::Renderer(platform::Window& window,
                    const std::string& shader_dir,
                    shader::CompileMode shader_mode)
     : Renderer(RendererOptions{.window = &window,

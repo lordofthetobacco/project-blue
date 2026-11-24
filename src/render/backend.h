@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/result.h"
 #include "platform/window_graphics.h"
@@ -44,6 +45,15 @@ enum class AdapterPreference : uint8_t {
 
 // Returns how the window must be created for `backend`.
 [[nodiscard]] platform::WindowGraphics WindowGraphicsFor(Backend backend);
+
+// Returns the backends to try, in order, when starting `requested` (design
+// §1.4): `requested`, then `default_backend`, then `compiled` in its order
+// (Vulkan, D3D12, Metal), each once and only if it is in `compiled`. An
+// explicit --renderer= choice falls back too: the design makes only an
+// unknown or not-compiled name fatal.
+[[nodiscard]] std::vector<Backend> FallbackOrder(
+    Backend requested, Backend default_backend,
+    std::span<const Backend> compiled);
 
 // Picks the backend to start with: the one named by `command_line` (the
 // value of --renderer=) when set, else by `environment` (BLUE_RENDERER) when

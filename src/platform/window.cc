@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -41,7 +42,19 @@ Window::Window(const char* title, int width, int height,
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     core::log::Fatal("SDL_Init failed: {}", SDL_GetError());
   }
+  if (!Create(title, width, height, graphics, position)) {
+    core::log::Fatal("The window could not be created (see above)");
+  }
+}
 
+Window::~Window() {
+  Destroy();
+  SDL_Quit();
+}
+
+bool Window::Create(const char* title, int width, int height,
+                    WindowGraphics graphics,
+                    std::optional<WindowPair> position) {
   const SDL_PropertiesID properties = SDL_CreateProperties();
   SDL_SetStringProperty(properties, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
   SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
@@ -67,24 +80,53 @@ Window::Window(const char* title, int width, int height,
   window_ = SDL_CreateWindowWithProperties(properties);
   SDL_DestroyProperties(properties);
   if (window_ == nullptr) {
-    core::log::Fatal("SDL_CreateWindow failed: {}", SDL_GetError());
+    core::log::Error("SDL_CreateWindow failed: {}", SDL_GetError());
+    return false;
   }
+  graphics_ = graphics;
   if (graphics != WindowGraphics::kMetal) {
-    return;
+    return true;
   }
   metal_view_ = SDL_Metal_CreateView(window_);
   if (metal_view_ == nullptr) {
-    core::log::Fatal("SDL_Metal_CreateView failed: {}", SDL_GetError());
+    core::log::Error("SDL_Metal_CreateView failed: {}", SDL_GetError());
+    Destroy();
+    return false;
   }
+  return true;
 }
 
-Window::~Window() {
+void Window::Destroy() {
   // The view is a subview of the window's content view: it goes first.
   if (metal_view_ != nullptr) {
     SDL_Metal_DestroyView(metal_view_);
+    metal_view_ = nullptr;
   }
-  SDL_DestroyWindow(window_);
-  SDL_Quit();
+  if (window_ != nullptr) {
+    SDL_DestroyWindow(window_);
+    window_ = nullptr;
+  }
+}
+
+bool Window::Recreate(WindowGraphics graphics) {
+  if (graphics == graphics_) {
+    return true;
+  }
+  const std::string title = SDL_GetWindowTitle(window_);
+  int width = 0;
+  int height = 0;
+  SDL_GetWindowSize(window_, &width, &height);
+  WindowPair position;
+  SDL_GetWindowPosition(window_, &position.x, &position.y);
+  const WindowGraphics previous = graphics_;
+  Destroy();
+  if (Create(title.c_str(), width, height, graphics, position)) {
+    return true;
+  }
+  if (!Create(title.c_str(), width, height, previous, position)) {
+    core::log::Fatal("The window could not be created again (see above)");
+  }
+  return false;
 }
 
 core::Extent2D Window::PixelSize() const {

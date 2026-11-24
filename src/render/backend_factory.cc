@@ -149,28 +149,11 @@ std::unique_ptr<RendererBackend> CreateBackend(const RendererOptions& options) {
     core::log::Fatal("Renderer backend '{}' is not compiled into this build",
                      BackendName(options.backend));
   }
-  // The requested backend, then the default, then the fixed order.
-  std::array<Backend, 2 + kCompiledBackends.size()> order{};
-  size_t count = 0;
-  const auto add = [&order, &count](Backend backend) {
-    for (size_t i = 0; i < count; ++i) {
-      if (order[i] == backend) {
-        return;
-      }
-    }
-    order[count++] = backend;
-  };
-  add(options.backend);
-  add(DefaultBackend());
-  for (const Backend backend : kCompiledBackends) {
-    add(backend);
-  }
-  for (size_t i = 0; i < count; ++i) {
-    const Backend backend = order[i];
+  for (const Backend backend :
+       FallbackOrder(options.backend, DefaultBackend(), CompiledBackends())) {
     if (options.window != nullptr &&
-        options.window->graphics() != WindowGraphicsFor(backend)) {
-      // Switching would need a window created for that backend.
-      core::log::Warn("Renderer backend '{}' skipped: the window was not "
+        !options.window->Recreate(WindowGraphicsFor(backend))) {
+      core::log::Warn("Renderer backend '{}' skipped: no window could be "
                       "created for it",
                       BackendName(backend));
       continue;

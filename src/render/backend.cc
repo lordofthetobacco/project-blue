@@ -1,7 +1,10 @@
 #include "render/backend.h"
 
+#include <algorithm>
 #include <optional>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace blue::render {
 
@@ -25,6 +28,23 @@ std::optional<Backend> ParseBackend(std::string_view name) {
     }
   }
   return std::nullopt;
+}
+
+std::vector<Backend> FallbackOrder(Backend requested, Backend default_backend,
+                                   std::span<const Backend> compiled) {
+  std::vector<Backend> order;
+  const auto add = [&order, compiled](Backend backend) {
+    if (std::ranges::find(compiled, backend) != compiled.end() &&
+        std::ranges::find(order, backend) == order.end()) {
+      order.push_back(backend);
+    }
+  };
+  add(requested);
+  add(default_backend);
+  for (const Backend backend : compiled) {
+    add(backend);
+  }
+  return order;
 }
 
 platform::WindowGraphics WindowGraphicsFor(Backend backend) {

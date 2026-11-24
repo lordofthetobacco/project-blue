@@ -40,11 +40,13 @@ inline constexpr float kMaterialAnisotropy = 8.0f;
 
 // How Renderer is created.
 struct RendererOptions {
-  // The window to present to, which must outlive the renderer and must have
-  // been created for the backend (WindowGraphicsFor()). Null: headless (no
+  // The window to present to, which must outlive the renderer. When the
+  // backend that starts needs other window graphics (WindowGraphicsFor()),
+  // the renderer re-creates it (platform::Window::Recreate()), so nothing
+  // may hold its native handles before the renderer exists. Null: headless (no
   // surface, no swapchain, SDL's video subsystem untouched); DrawFrame()
   // renders into an offscreen output image of `headless_extent` instead.
-  const platform::Window* window = nullptr;
+  platform::Window* window = nullptr;
   // The backend to start; another compiled one is used when it has no
   // suitable device (see Renderer()).
   Backend backend = DefaultBackend();
@@ -124,13 +126,14 @@ class Renderer {
   static constexpr uint64_t kViewportResizeFrames = 4;
 
   // Starts options.backend; when it finds no suitable device, the other
-  // compiled backends that can draw to options.window are tried (default,
-  // Vulkan, D3D12, Metal), and none is fatal. Loads the compiled shaders
-  // of options.shader_dir (a missing one is fatal) and watches
-  // options.shader_source_dir for changes (see ReloadChangedShaders()).
+  // compiled backends are tried (FallbackOrder(): default, Vulkan, D3D12,
+  // Metal), options.window re-created for each as needed, and none is fatal.
+  // Loads the compiled shaders of options.shader_dir (a missing one is fatal)
+  // and watches options.shader_source_dir for changes (see
+  // ReloadChangedShaders()).
   explicit Renderer(const RendererOptions& options);
   // Same, with the default backend presenting to `window`.
-  Renderer(const platform::Window& window, const std::string& shader_dir,
+  Renderer(platform::Window& window, const std::string& shader_dir,
            shader::CompileMode shader_mode);
   ~Renderer();
 
