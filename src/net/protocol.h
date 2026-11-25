@@ -7,8 +7,9 @@
 namespace blue::net {
 
 // Constants of the Project Blue wire protocol, section 1 of
-// docs/netcode/protocol.md. The Rust server (server/crates/blue-protocol)
-// uses the same values; changing one is a protocol version bump.
+// docs/netcode/protocol.md. The Rust server (crates/blue-protocol in the
+// blue-server repository) uses the same values; changing one is a protocol
+// version bump.
 
 // Sent in ClientHello; a mismatch is answered with ServerReject.
 inline constexpr uint16_t kProtocolVersion = 3;

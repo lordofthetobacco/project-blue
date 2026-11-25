@@ -1,8 +1,9 @@
-// The golden vectors of the Rust reference codec
-// (server/crates/blue-protocol/tests/vectors, described in vectors.md):
-// every vector decodes to the logical value vectors.md lists, and encoding
-// that value (and re-encoding the decoded value) reproduces the bytes
-// exactly. The values below mirror server/crates/blue-protocol/tests/golden.rs.
+// The golden vectors of the Rust reference codec (docs/netcode/vectors, a copy
+// of crates/blue-protocol/tests/vectors in the blue-server repository,
+// described in vectors.md): every vector decodes to the logical value
+// vectors.md lists, and encoding that value (and re-encoding the decoded
+// value) reproduces the bytes exactly. The values below mirror
+// crates/blue-protocol/tests/golden.rs in the blue-server repository.
 
 #include <doctest/doctest.h>
 

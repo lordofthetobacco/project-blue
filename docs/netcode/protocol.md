@@ -1,9 +1,10 @@
 # Project Blue wire protocol
 
 Normative specification of everything Project Blue sends inside a netcode.io
-payload. The Rust reference implementation is `server/crates/blue-protocol`;
-the C++ client codec must follow this document and reproduce the golden vectors
-in `server/crates/blue-protocol/tests/vectors/` byte for byte.
+payload. The Rust reference implementation is `crates/blue-protocol` in the
+[blue-server repository](https://github.com/lordofthetobacco/blue-server); the
+C++ client codec must follow this document and reproduce the golden vectors in
+`docs/netcode/vectors/` byte for byte.
 
 **Protocol version: 3** (`PROTOCOL_VERSION`). Layouts marked *provisional*
 follow the sim core and will change with it; every change bumps the version
@@ -747,7 +748,8 @@ interaction reach and line of sight, name contents.
 
 ## 13. Golden vectors
 
-`server/crates/blue-protocol/tests/vectors/` holds one `<name>.bin` per vector
+`docs/netcode/vectors/` (a copy of `crates/blue-protocol/tests/vectors/` in the
+blue-server repository) holds one `<name>.bin` per vector
 and `vectors.md` with the logical value of each (Rust `Debug` output, plus a hex
 dump). Vectors: `msg_<name>` for every message type (type id + body, zero
 padded), `control_client_hello`, `control_server_welcome`,
@@ -757,8 +759,9 @@ padded), `control_client_hello`, `control_server_welcome`,
 baseline, two objects) and `server_snapshot_delta` (moved, changed, removed,
 new and unchanged players against a baseline; one moving object).
 
-`cargo test` compares; `BLUE_BLESS=1 cargo test` regenerates (only together
-with a `PROTOCOL_VERSION` bump). The C++ tests must encode the same logical
+In blue-server `cargo test` compares and `BLUE_BLESS=1 cargo test` regenerates
+(only together with a `PROTOCOL_VERSION` bump); the regenerated vectors are then
+copied here. The C++ tests must encode the same logical
 values to identical bytes and decode the bytes to the same values.
 
 ## 14. Changelog

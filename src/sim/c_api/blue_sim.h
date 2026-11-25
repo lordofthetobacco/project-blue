@@ -1,5 +1,6 @@
 /* C ABI over blue_sim (sim/sim_world.h), used by the Rust dedicated server
- * (crates/blue-native). Plain C11: no C++ types cross this boundary.
+ * (crates/blue-native in the blue-server repository). Plain C11: no C++ types
+ * cross this boundary.
  *
  * Naming: snake_case functions (blue_sim_*) and Blue* types, a documented
  * exception to the project's C++ naming rules for C interop.

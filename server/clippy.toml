@@ -1,2 +1,0 @@
-# "CMake" is a product name, not code.
-doc-valid-idents = ["CMake", ".."]

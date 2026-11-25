@@ -52,8 +52,9 @@ target_include_directories(blue_sim_tests PRIVATE ${CMAKE_SOURCE_DIR})
 target_compile_definitions(blue_sim_tests PRIVATE
     # See tests/CMakeLists.txt: lets CHECKs print std::string_view.
     DOCTEST_CONFIG_USE_STD_HEADERS
-    # Golden vectors of the Rust wire codec, checked byte for byte by net_golden_vectors_test.
-    BLUE_PROTOCOL_VECTORS_DIR="${CMAKE_SOURCE_DIR}/server/crates/blue-protocol/tests/vectors"
+    # Golden vectors of the wire codec (a copy of the blue-server repository's), checked byte
+    # for byte by net_golden_vectors_test.
+    BLUE_PROTOCOL_VECTORS_DIR="${CMAKE_SOURCE_DIR}/docs/netcode/vectors"
 )
 
 blue_target_defaults(blue_sim_tests ALLOW_EXCEPTIONS_AND_RTTI)

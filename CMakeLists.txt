@@ -12,9 +12,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-# Headless simulation core only, for the Linux dedicated server (server/): the libraries
-# behind blue_sim_c, netcode and blue_sim_tests. No renderer, UI, editor, shaders, cooking
-# or importers, so it configures without the Vulkan SDK, Slang or windowing packages.
+# Headless simulation core only, for the Linux dedicated server (the blue-server repository):
+# the libraries behind blue_sim_c, netcode and blue_sim_tests. No renderer, UI, editor, shaders,
+# cooking or importers, so it configures without the Vulkan SDK, Slang or windowing packages.
 option(BLUE_SIM_ONLY "Build only the headless simulation core (dedicated server)" OFF)
 
 if(NOT BLUE_SIM_ONLY)
@@ -272,9 +272,9 @@ blue_target_defaults(blue_sim_c)
 
 target_link_libraries(blue_sim_c PRIVATE blue_sim)
 
-# Client networking without rendering: the wire codecs of docs/netcode/protocol.md
-# (mirroring server/crates/blue-protocol bit for bit) and the netcode.io client transport.
-# netcode stays private: no netcode type appears in src/net headers.
+# Client networking without rendering: the wire codecs of docs/netcode/protocol.md (mirroring
+# crates/blue-protocol in the blue-server repository bit for bit) and the netcode.io client
+# transport. netcode stays private: no netcode type appears in src/net headers.
 add_library(blue_net STATIC
     src/net/bit_stream.cc
     src/net/client_session.cc

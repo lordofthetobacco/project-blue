@@ -95,9 +95,9 @@ jobs:
         if: runner.os == 'Windows'
         run: out/build/${{ matrix.preset }}/tests/render/blue_render_tests --backend=d3d12 --adapter=software --gpu-validation
 
-  # The headless simulation core the Rust dedicated server links (BLUE_SIM_ONLY): built with
-  # only what the server's Linux container has (cmake, make, gcc/g++, git), so no Vulkan SDK,
-  # windowing packages, ninja or compiler cache.
+  # The headless simulation core the Rust dedicated server links (BLUE_SIM_ONLY; the server itself
+  # is built in the blue-server repository): built with only what the server's Linux container
+  # has (cmake, make, gcc/g++, git), so no Vulkan SDK, windowing packages, ninja or compiler cache.
   linux-sim:
     name: linux-sim
     runs-on: ubuntu-latest
@@ -125,43 +125,3 @@ jobs:
         run: |
           cat out/build/linux-sim/blue_sim_c.link out/build/linux-sim/blue_sim_c.syslibs
           xargs -a out/build/linux-sim/blue_sim_c.link ls -l
-
-  # Rust dedicated server (server/). `cargo test` builds the native code
-  # (blue_sim_c + netcode) through crates/blue-native/build.rs, which runs the
-  # BLUE_SIM_ONLY CMake build inside the cargo target directory.
-  # Follow-up: build server/Dockerfile here once a registry is chosen.
-  server:
-    name: server (Rust)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
-    env:
-      CARGO_TERM_COLOR: always
-    steps:
-      - uses: actions/checkout@v4
-
-      # rustup reads server/rust-toolchain.toml (channel + clippy, rustfmt)
-      # and installs it on first use.
-      - name: Toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-
-      - name: Cache cargo and native build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            server/target
-          key: server-${{ runner.os }}-${{ hashFiles('server/rust-toolchain.toml', 'server/Cargo.lock', 'CMakeLists.txt', 'cmake/**', 'src/**') }}
-          restore-keys: |
-            server-${{ runner.os }}-
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace
