@@ -25,6 +25,19 @@ set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+if(BLUE_SIM_ONLY)
+    # The dedicated server only uses SDL's file system, file IO and key-name tables
+    # (blue_core, blue_input): a console library without windowing, audio or devices, so it
+    # builds without X11/Wayland/ALSA/udev/D-Bus development packages.
+    set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
+    foreach(subsystem IN ITEMS AUDIO VIDEO GPU RENDER CAMERA JOYSTICK HAPTIC HIDAPI POWER
+                               SENSOR DIALOG TRAY)
+        set(SDL_${subsystem} OFF CACHE BOOL "" FORCE)
+    endforeach()
+    foreach(feature IN ITEMS DBUS IBUS LIBUDEV LIBURING PIPEWIRE)
+        set(SDL_${feature} OFF CACHE BOOL "" FORCE)
+    endforeach()
+endif()
 
 FetchContent_Declare(SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
@@ -140,6 +153,10 @@ set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
 set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
 set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
 set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+# The client (MSVC) and the dedicated server (GCC) must step identically: Jolt then defines
+# JPH_CROSS_PLATFORM_DETERMINISTIC (PUBLIC), compiles with /fp:precise instead of /fp:fast on
+# MSVC and -ffp-contract=off instead of =fast on GCC/Clang, and drops JPH_USE_FMADD / -mfma.
+set(CROSS_PLATFORM_DETERMINISTIC ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(JoltPhysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
@@ -148,9 +165,35 @@ FetchContent_Declare(JoltPhysics
     SOURCE_SUBDIR  Build
     SYSTEM)
 
-FetchContent_MakeAvailable(SDL3 glm imgui imguizmo stb)
-if(BLUE_RENDERER_VULKAN)
-    FetchContent_MakeAvailable(VulkanMemoryAllocator)
+# --- netcode.io (encrypted, connection-based UDP: the multiplayer transport) ------------
+# Both the game client and the Rust dedicated server use this C reference implementation
+# (protocol "NETCODE 1.03", payloads up to 1200 bytes). Its own CMakeLists.txt selects the
+# static MSVC runtime and adds install rules, so SOURCE_SUBDIR names a directory without a
+# CMakeLists.txt and the `netcode` target is defined below from netcode.c and the vendored
+# libsodium subset (sodium/sodium.c).
+FetchContent_Declare(netcode
+    GIT_REPOSITORY https://github.com/mas-bandwidth/netcode.git
+    GIT_TAG        v1.5.0
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  no-cmake
+    SYSTEM)
+
+# --- doctest (unit tests; made available by tests/ and tests/sim) -------------------------
+FetchContent_Declare(doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG        v2.4.12
+    GIT_SHALLOW    TRUE
+    SYSTEM)
+
+# Sim-only builds (BLUE_SIM_ONLY, the dedicated server) stop after JoltPhysics and netcode
+# below; everything after that is for the renderer, the UI and content cooking.
+if(BLUE_SIM_ONLY)
+    FetchContent_MakeAvailable(SDL3 glm netcode)
+else()
+    FetchContent_MakeAvailable(SDL3 glm imgui imguizmo stb netcode)
+    if(BLUE_RENDERER_VULKAN)
+        FetchContent_MakeAvailable(VulkanMemoryAllocator)
+    endif()
 endif()
 
 # SDL compiles SDL_mslibc.c with an explicit /GL- on MSVC; our link-time optimisation default
@@ -160,6 +203,42 @@ if(MSVC)
     set_target_properties(SDL3-static PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF
         INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL OFF)
+endif()
+
+# Jolt only adds /arch:AVX2 and its JPH_USE_* definitions when CMAKE_VS_PLATFORM_NAME is
+# x64, which is empty under Ninja. Set it just for Jolt so it keeps its default AVX2 build.
+if(NOT CMAKE_VS_PLATFORM_NAME AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+    set(CMAKE_VS_PLATFORM_NAME x64)
+    FetchContent_MakeAvailable(JoltPhysics)
+    unset(CMAKE_VS_PLATFORM_NAME)
+else()
+    FetchContent_MakeAvailable(JoltPhysics)
+endif()
+
+# netcode.io and its vendored libsodium subset, compiled as C99 with the project's runtime
+# library (/MD) and the same strict floating point as netcode's own build. netcode.h is a
+# SYSTEM include; netcode's sources are third-party code and keep their warnings out of the
+# build log. netcode.h derives NETCODE_DEBUG / NETCODE_RELEASE from NDEBUG.
+add_library(netcode STATIC
+    ${netcode_SOURCE_DIR}/netcode.c
+    ${netcode_SOURCE_DIR}/sodium/sodium.c
+)
+set_target_properties(netcode PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+target_include_directories(netcode SYSTEM PUBLIC ${netcode_SOURCE_DIR})
+target_include_directories(netcode PRIVATE ${netcode_SOURCE_DIR}/sodium)
+if(MSVC)
+    target_compile_options(netcode PRIVATE /W0 /fp:precise)
+    target_compile_definitions(netcode PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_compile_options(netcode PRIVATE -w -ffp-contract=off)
+endif()
+if(WIN32)
+    target_link_libraries(netcode PUBLIC ws2_32 iphlpapi)
+endif()
+
+if(BLUE_SIM_ONLY)
+    blue_remove_msvc_default_flags()
+    return()
 endif()
 
 # The asset-cooking dependencies are compiled optimised even in Debug: assimp
@@ -203,16 +282,6 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/third_party/bc7enc_rdo
     ${CMAKE_BINARY_DIR}/_deps/bc7enc_rdo-target)
 set(CMAKE_C_FLAGS_DEBUG "${blue_saved_c_flags_debug}")
 set(CMAKE_CXX_FLAGS_DEBUG "${blue_saved_cxx_flags_debug}")
-
-# Jolt only adds /arch:AVX2 and its JPH_USE_* definitions when CMAKE_VS_PLATFORM_NAME is
-# x64, which is empty under Ninja. Set it just for Jolt so it keeps its default AVX2 build.
-if(NOT CMAKE_VS_PLATFORM_NAME AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
-    set(CMAKE_VS_PLATFORM_NAME x64)
-    FetchContent_MakeAvailable(JoltPhysics)
-    unset(CMAKE_VS_PLATFORM_NAME)
-else()
-    FetchContent_MakeAvailable(JoltPhysics)
-endif()
 
 # Every sub-project above has copied the default flags; from here on the root directory
 # (first-party code and the libraries below) compiles without /EHsc and the Release /O2,

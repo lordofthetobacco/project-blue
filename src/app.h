@@ -7,9 +7,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/mat4x4.hpp>
@@ -18,7 +20,10 @@
 
 #include "asset/mesh_data.h"
 #include "camera/camera_controller.h"
+#include "game/character_animator.h"
+#include "game/character_model.h"
 #include "game/part_stash.h"
+#include "game/remote_players.h"
 #include "game/scene_pickups.h"
 #include "game/weapon_builds.h"
 #include "game/weapon_modding.h"
@@ -27,6 +32,8 @@
 #include "input/input_settings.h"
 #include "interact/interaction_focus.h"
 #include "lighting/environment.h"
+#include "net/client_session.h"
+#include "net/net_settings.h"
 #include "physics/physics_runtime.h"
 #include "physics/physics_world.h"
 #include "platform/input_mapper.h"
@@ -35,6 +42,13 @@
 #include "prefab/prefab.h"
 #include "render/renderer.h"
 #include "scene/scene_data.h"
+#include "sim/command_builder.h"
+#include "sim/player_sim.h"
+#include "sim/player_state.h"
+#include "sim/sim_world.h"
+#include "sim/weapon_table.h"
+#include "ui/main_menu.h"
+#include "ui/main_menu_rules.h"
 #include "ui/perf_overlay.h"
 #include "ui/weapon_inspect_screen.h"
 #include "weapon/dispersion.h"
@@ -52,6 +66,7 @@
 #include "weapon/weapon_def.h"
 #include "weapon/weapon_item.h"
 #include "weapon/weapon_throw.h"
+#include "world/core/collision_world.h"
 #include "world/draw_history.h"
 #include "world/gpu_backend.h"
 #include "world/prefab_cache.h"
@@ -62,7 +77,12 @@
 namespace blue {
 
 struct CliOptions {
+  // Starts straight into offline play of this scene (the editor's way).
   std::optional<std::string> scene_path;
+  // Starts connecting to this server ("host:port") at once.
+  std::optional<std::string> connect;
+  // The player name to connect with (instead of the saved one).
+  std::optional<std::string> player_name;
   std::optional<platform::WindowPair> window_position;
   // The value of --renderer=, unchecked (render::ChooseBackend() checks it).
   std::optional<std::string> renderer;
@@ -70,10 +90,12 @@ struct CliOptions {
 };
 
 inline constexpr const char* kUsage =
-    "usage: project-blue [--scene <file.mscn>] [--window-pos X,Y] "
-    "[--renderer=vulkan|d3d12|metal]\n"
-    "The environment variable BLUE_RENDERER chooses the renderer backend "
-    "when --renderer= does not.";
+    "usage: project-blue [--scene <file.mscn>] [--connect host:port] "
+    "[--name <player>] [--window-pos X,Y] [--renderer=vulkan|d3d12|metal]\n"
+    "Without --scene or --connect the game starts in the main menu. --scene "
+    "starts offline play of that scene; with --connect it is the scene "
+    "played online. The environment variable BLUE_RENDERER chooses the "
+    "renderer backend when --renderer= does not.";
 
 // Parses the command line. Returns nullopt for unknown arguments, options
 // missing their value and malformed values. --help / -h sets show_help.
@@ -89,10 +111,14 @@ enum class ViewMode {
 
 // The game application: owns the window, renderer, the scene (a .mscn
 // resolved into a world::World), the player and debug camera, and runs the
-// main loop. Startup failures are fatal. Neither copyable nor movable. Not
-// thread-safe.
+// main loop through the GameState machine: the main menu, offline play
+// (unchanged single-player), connecting, online play (net::ClientSession)
+// and the disconnected message. Startup failures are fatal. Neither copyable
+// nor movable. Not thread-safe.
 class App {
  public:
+  using GameState = ui::GameState;
+
   // Renders with `backend` (render::ChooseBackend()), or another compiled
   // one that can draw to the same window when it has no suitable device.
   // `process_start` is when main() was entered; the time to the first frame
@@ -148,6 +174,93 @@ class App {
   static constexpr size_t kMaxImpactMarks = 64;
   static constexpr int kMaxTargets = 16;
   static constexpr int kHitLogCapacity = 64;
+  static constexpr size_t kKillFeedLines = 6;
+
+  // The builtin capsules remote players are drawn with; uploaded once.
+  struct CapsuleMeshes {
+    render::MeshId standing{};
+    render::MeshId crouching{};
+    asset::Bounds standing_bounds;
+    asset::Bounds crouching_bounds;
+  };
+
+  // Runs the single-player frame (the game before the menu existed): input,
+  // player, physics, weapon, bullets.
+  void UpdateOffline(const input::InputFrame& raw_input, float frame_seconds);
+  // Runs the networked frame: look, commands, the session's ticks
+  // (prediction, one physics step each), interpolation, replicated world
+  // and effects, the cosmetic weapon.
+  void UpdateOnline(const input::InputFrame& input, float frame_seconds);
+  // Applies the menu rules to this frame (pause overlay, cursor mode,
+  // Escape) and returns them.
+  ui::MenuRules UpdateMenu(const input::InputFrame& raw_input);
+  // Pumps the session while connecting; moves to kOnline or kDisconnected.
+  void UpdateConnecting();
+  // Emits the main menu or the pause overlay and acts on the clicks.
+  void DrawMenus(const ui::MenuRules& rules);
+  // Loads scene_path_ for offline play and puts the player at its start.
+  void StartOffline();
+  // Validates `address` and `name`, loads the scene with kinematic bodies
+  // and starts connecting. Returns false (menu_status_ says why) on a
+  // problem.
+  bool StartConnect(std::string_view address, std::string_view name);
+  // Ends the connection (if any) and shows the menu: kDisconnected with
+  // `reason`, or kMainMenu when `reason` is empty.
+  void LeaveOnline(std::string_view reason);
+  // Seconds since the process started: the session's clock.
+  [[nodiscard]] double NowSeconds() const;
+  // Builds (once per scene) the headless SimWorld whose weapon table and
+  // content hash the session uses, and maps the table's keys to the
+  // definitions of weapon_library_. Returns an error message on failure.
+  [[nodiscard]] std::optional<std::string> PrepareNetReference();
+  // The definition of weapon `key` in weapon_library_, or nullopt.
+  [[nodiscard]] std::optional<weapon::WeaponDefId> DefOfKey(
+      sim::WeaponKey key) const;
+  // Makes loadout_ show `state`: the weapons of its keys, its loadout state
+  // restored. Returns whether the weapon in hand changed.
+  bool SyncDisplayLoadout(const sim::PlayerState& state);
+  // Poses the weapon in hand from the predicted player and spawns the
+  // cosmetic tracers of this frame's predicted shots.
+  void UpdateOnlineWeapon(const sim::PlayerState& state, float step);
+  // Spawns tracers of other players' shots and impact marks of every
+  // bullet hit the server reported since the last frame.
+  void ApplyReplicatedEffects();
+  // Moves the kinematic scene bodies to their interpolated server poses
+  // and hides the scene pick-ups taken on the server.
+  void ApplyReplicatedWorld();
+  // Finds what the player looks at among the replicated dropped weapons
+  // and scene pick-ups; sets the commands' interaction target.
+  void UpdateOnlineInteraction(float step);
+  // Remote players' placements (animated over `step` seconds), name tags
+  // and the kill feed for this frame.
+  void UpdateRemotePlayers(float step);
+  // Loads the player model (assets/kyle.pbo) and hands its rig to the
+  // remote players and the local body; without it players are capsules and
+  // the local player casts no body shadow.
+  void LoadCharacterModel();
+  // How the player model holds weapon `def` (kNone for no weapon).
+  [[nodiscard]] game::WeaponHold HoldOf(
+      std::optional<weapon::WeaponDefId> def) const;
+  // Animates the local player's body (shadow only) over `step` from the
+  // offline player or the predicted online one.
+  void AnimateLocalBody(float step);
+  // Appends the local player's body and its weapon as shadow-only draws
+  // while the first-person view is active (not on the inspect screen).
+  void AppendLocalBodyDraws();
+  // Returns whether the local body casts the first-person player's shadow
+  // this frame (the viewmodel then casts none).
+  [[nodiscard]] bool LocalBodyShown() const;
+  // Appends the remote players' and replicated dropped weapons' draws.
+  void AppendOnlineDraws();
+  // The HUD of a networked game for this frame (data in net_hud_).
+  [[nodiscard]] const ui::NetHudInfo* MakeNetHudInfo(double now_seconds);
+  // The first-person player view is active (offline: a spawned character;
+  // online: a predicted player).
+  [[nodiscard]] bool FirstPersonActive() const;
+  [[nodiscard]] bool online_playing() const {
+    return game_state_ == GameState::kOnline && session_ != nullptr &&
+           session_->player() != nullptr;
+  }
 
   void HandleEvent(const SDL_Event& event);
   void ApplyMouseCapture();
@@ -333,6 +446,8 @@ class App {
   // Counts a bullet hit, logs it when the body is a target and, on a static
   // body, leaves an impact mark. Does not push the body.
   void RecordHit(const weapon::Impact& impact);
+  // Leaves a bullet hole on a static surface at `point` facing `normal`.
+  void AddImpactMark(glm::vec3 point, glm::vec3 normal);
   // Removes every bullet, impact mark and logged hit.
   void ClearBullets();
   // Rebuilds targets_ from the instances named as targets; call after every
@@ -494,6 +609,66 @@ class App {
   // The HDRI path the renderer's environment was loaded from (empty for the
   // generated default sky); nullopt before the first LoadEnvironment().
   std::optional<std::string> environment_source_;
+
+  // The game state machine and the menu.
+  GameState game_state_ = GameState::kMainMenu;
+  bool pause_open_ = false;
+  bool menu_cursor_ = false;  // the menu put the mapper in kCursor
+  bool scene_loaded_ = false;
+  // What RebuildPhysics() makes of dynamic bodies: simulated offline,
+  // kinematic online (the server moves them).
+  world::DynamicBodies dynamic_bodies_ = world::DynamicBodies::kSimulated;
+  net::NetSettings net_settings_;
+  std::string net_settings_path_;
+  std::array<char, 256> address_field_{};
+  std::array<char, 64> name_field_{};
+  std::string menu_status_;
+  bool menu_status_error_ = false;
+  std::string server_address_;  // the server played on
+
+  // Online play. The reference world gives the weapon table and content
+  // hash the server agrees on (built once per scene, on physics_runtime_);
+  // the session predicts the local player in physics_world_ and must go
+  // before both.
+  std::unique_ptr<sim::SimWorld> net_reference_;
+  std::string net_reference_scene_;
+  // Parallel to net_reference_'s weapon table rows: the definition of each
+  // key in weapon_library_, if the game has one.
+  std::vector<std::optional<weapon::WeaponDefId>> key_defs_;
+  std::unique_ptr<net::ClientSession> session_;
+  uint64_t client_id_ = 0;  // random per launch
+  sim::CommandBuilder command_builder_;
+  camera::LookAngles online_look_;
+  glm::vec2 online_look_delta_{0.0f};  // this frame's turn
+  glm::vec3 online_prev_feet_{0.0f};   // feet before the last tick
+  glm::vec3 online_feet_{0.0f};        // feet after the last tick
+  glm::vec3 online_eye_{0.0f};         // the shown eye this frame
+  float online_fov_ = 70.0f;           // degrees, blended towards aim
+  // The cursor was captured since online play (or the pause) began.
+  bool online_captured_once_ = false;
+  bool quit_ = false;  // Quit was clicked in a menu
+  // Predicted shots of this frame, for the viewmodel and tracers.
+  std::vector<sim::ShotEvent> online_shots_;
+  // The commands' interaction target, from the focus.
+  uint8_t interact_kind_ = 0;
+  uint32_t interact_id_ = 0;
+  // The keys loadout_ was built for (online).
+  std::array<sim::WeaponKey, weapon::kWeaponSlotCount> display_keys_{};
+  uint64_t next_shot_record_ = 0;    // replication shots read so far
+  uint64_t next_impact_record_ = 0;  // replication impacts read so far
+  size_t taken_pickups_applied_ = 0;
+  game::RemotePlayers remote_players_;
+  CapsuleMeshes capsule_meshes_;
+  // The animated player model (nullopt: capsules, no body shadow) and the
+  // local player's body animation, drawn into the shadow maps only.
+  std::optional<game::CharacterModel> character_model_;
+  std::optional<game::CharacterAnimator> local_body_;
+  std::vector<game::RemotePlayerView> remote_views_;    // reused
+  std::vector<ui::NameTag> name_tags_;                  // reused
+  std::array<std::string, kKillFeedLines> kill_texts_;  // reused
+  std::array<ui::KillFeedLine, kKillFeedLines> kill_lines_{};
+  size_t kill_line_count_ = 0;
+  ui::NetHudInfo net_hud_;
 
   std::chrono::steady_clock::time_point process_start_;
   bool first_frame_logged_ = false;

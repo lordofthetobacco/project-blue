@@ -23,6 +23,7 @@
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
 
+#include "core/log.h"
 #include "physics/internal/jolt_math.h"
 #include "physics/internal/layers.h"
 #include "physics/internal/physics_world_impl.h"
@@ -103,8 +104,9 @@ const char* ToString(GroundState state) {
   return "unknown ground state";
 }
 
-// Owns the Jolt character and both capsules; registered with the world as a
-// fixed-step participant for its whole lifetime.
+// Owns the Jolt character and both capsules. Unless manually stepped it is
+// registered with the world as a fixed-step participant for its whole
+// lifetime.
 class Character::Impl final : public internal::FixedStepParticipant {
  public:
   Impl(PhysicsWorld::Impl& world, const CharacterDesc& desc,
@@ -123,15 +125,16 @@ class Character::Impl final : public internal::FixedStepParticipant {
     settings->mMaxStrength = desc.max_strength;
     // Only contacts below the capsule's lower hemisphere center can support
     // the character, so touching a wall with the side never counts as ground.
-    settings->mSupportingVolume =
-        JPH::Plane(JPH::Vec3::sAxisY(), -desc.radius);
-    character_ = new JPH::CharacterVirtual(settings, JPH::RVec3(ToJolt(feet)),
-                                           JPH::Quat::sIdentity(),
-                                           &world_.system());
+    settings->mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -desc.radius);
+    character_ =
+        new JPH::CharacterVirtual(settings, JPH::RVec3(ToJolt(feet)),
+                                  JPH::Quat::sIdentity(), &world_.system());
     extended_.mStickToFloorStepDown =
         JPH::Vec3(0.0f, -desc.stick_to_floor, 0.0f);
     extended_.mWalkStairsStepUp = JPH::Vec3(0.0f, desc.step_up, 0.0f);
-    world_.AddParticipant(this);
+    if (!desc.manual_step) {
+      world_.AddParticipant(this);
+    }
   }
 
   Impl(const Impl&) = delete;
@@ -195,12 +198,36 @@ class Character::Impl final : public internal::FixedStepParticipant {
                                 world_.temp_allocator());
   }
 
+  void Step() {
+    if (!desc_.manual_step) {
+      core::log::Warn(
+          "Character::Step ignored: the world steps this character");
+      return;
+    }
+    PreStep(kFixedStepSeconds);
+  }
+
+  CharacterState SaveState() const {
+    return CharacterState{
+        .position = FromJolt(JPH::Vec3(character_->GetPosition())),
+        .velocity = velocity(),
+        .jump_pending = jump_pending_,
+        .jump_age = jump_age_,
+        .jump_cooldown = jump_cooldown_,
+        .crouching = crouching_,
+        .jump_speed = jump_speed_,
+    };
+  }
+
+  void RestoreState(const CharacterState& state);
+
   glm::vec3 position() const {
     if (previous_ == current_) {
       return current_;  // Exact after a teleport or while standing still.
     }
     return glm::mix(previous_, current_, world_.interpolation_alpha());
   }
+  glm::vec3 tick_position() const { return current_; }
   glm::vec3 velocity() const {
     return FromJolt(character_->GetLinearVelocity());
   }
@@ -294,6 +321,29 @@ void Character::Impl::PreStep(float dt) {
   }
 }
 
+void Character::Impl::RestoreState(const CharacterState& state) {
+  if (!IsFiniteVec(state.position) || !IsFiniteVec(state.velocity)) {
+    return;
+  }
+  // An unlimited penetration depth always switches the shape: shrinking
+  // always fits, and a rewind to standing must not depend on what moved into
+  // the head room since.
+  const JPH::Shape* shape =
+      state.crouching ? crouching_shape_.GetPtr() : standing_shape_.GetPtr();
+  (void)character_->SetShape(shape, FLT_MAX, BroadPhaseFilter(), ObjectFilter(),
+                             body_filter_, shape_filter_,
+                             world_.temp_allocator());
+  crouching_ = state.crouching;
+  character_->SetPosition(JPH::RVec3(ToJolt(state.position)));
+  character_->SetLinearVelocity(ToJolt(state.velocity));
+  previous_ = current_ = state.position;
+  jump_pending_ = state.jump_pending;
+  jump_age_ = state.jump_age;
+  jump_cooldown_ = state.jump_cooldown;
+  jump_speed_ = state.jump_speed;
+  RefreshContacts();
+}
+
 core::Result<std::unique_ptr<Character>, PhysicsError> Character::Create(
     PhysicsWorld& world, const CharacterDesc& desc, glm::vec3 feet_position) {
   using Result = core::Result<std::unique_ptr<Character>, PhysicsError>;
@@ -308,8 +358,7 @@ core::Result<std::unique_ptr<Character>, PhysicsError> Character::Create(
   auto impl = std::make_unique<Impl>(*world.impl_, desc, std::move(standing),
                                      std::move(crouching), feet_position);
   impl->RefreshContacts();
-  return Result::Ok(
-      std::unique_ptr<Character>(new Character(std::move(impl))));
+  return Result::Ok(std::unique_ptr<Character>(new Character(std::move(impl))));
 }
 
 Character::Character(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -334,7 +383,17 @@ void Character::Teleport(glm::vec3 feet_position) {
 
 void Character::RefreshContacts() { impl_->RefreshContacts(); }
 
+void Character::Step() { impl_->Step(); }
+
+CharacterState Character::SaveState() const { return impl_->SaveState(); }
+
+void Character::RestoreState(const CharacterState& state) {
+  impl_->RestoreState(state);
+}
+
 glm::vec3 Character::position() const { return impl_->position(); }
+
+glm::vec3 Character::tick_position() const { return impl_->tick_position(); }
 
 glm::vec3 Character::velocity() const { return impl_->velocity(); }
 

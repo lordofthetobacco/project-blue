@@ -1,0 +1,14 @@
+[package]
+name = "blue-native"
+description = "Safe Rust wrappers over the native netcode.io and blue_sim C libraries (the only crate with unsafe code)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "build.rs"
+links = "blue_sim_c"
+
+[dependencies]
+
+[lints]
+workspace = true

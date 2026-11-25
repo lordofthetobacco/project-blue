@@ -108,6 +108,13 @@ struct DrawItem {
   // Not drawn into a scope's picture (SceneView::scope): the first-person
   // weapon, which carries the scope.
   bool hidden_in_scope = false;
+  // Drawn into the shadow maps only: never seen by a camera (the main view,
+  // its depth pre-pass, SSAO and motion vectors, nor a scope's picture),
+  // only its shadow is. The first-person player's own body.
+  bool shadow_only = false;
+  // Drawn into the shadow maps. False for the first-person weapon while the
+  // player's own body casts the player's shadow (with its own weapon).
+  bool casts_shadow = true;
 };
 
 // Draw counts of the most recent frame. Culled items were submitted in the

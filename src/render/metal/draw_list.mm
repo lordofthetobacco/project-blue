@@ -43,7 +43,10 @@ void DrawList::Build(const SceneView& view,
                      bool scope_view) {
   entries_.clear();
   for (size_t i = 0; i < view.draws.size(); ++i) {
-    if (scope_view && view.draws[i].hidden_in_scope) {
+    // The camera passes never see a shadow-only item; the shadow passes
+    // read view.draws directly.
+    if (view.draws[i].shadow_only ||
+        (scope_view && view.draws[i].hidden_in_scope)) {
       continue;
     }
     if (!frustum.Intersects(world_bounds[i])) {

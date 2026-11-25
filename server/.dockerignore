@@ -1,0 +1,5 @@
+# The supported build context is the repository root (see the root
+# .dockerignore and server/Dockerfile). This file only keeps a build with
+# server/ as the context from sending build output.
+target/
+**/target/

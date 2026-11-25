@@ -17,6 +17,7 @@
 #include "render/d3d12/image.h"
 #include "render/d3d12/pipeline.h"
 #include "render/d3d12/root_layout.h"
+#include "render/draw_list.h"
 #include "render/shader_manifest.h"
 
 namespace blue::render::d3d12 {
@@ -111,6 +112,9 @@ void ShadowPass::Record(const FrameContext& ctx) {
     const lighting::Cascade& cascade = ctx.cascades[layer];
     const camera::Frustum cascade_frustum(cascade.view_projection);
     for (size_t i = 0; i < ctx.view.draws.size(); ++i) {
+      if (!IsShadowCaster(ctx.view.draws[i])) {
+        continue;
+      }
       if (!cascade_frustum.Intersects(ctx.world_bounds[i])) {
         ++ctx.stats.shadow_culled_draws;
         continue;

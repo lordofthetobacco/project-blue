@@ -1,6 +1,7 @@
 #ifndef BLUE_WEAPON_PROJECTILE_SYSTEM_H_
 #define BLUE_WEAPON_PROJECTILE_SYSTEM_H_
 
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -22,6 +23,8 @@ struct Projectile {
   float age = 0.0f;          // s of simulated flight
   float distance = 0.0f;     // m travelled along the path
   int shot_number = 0;       // as given to Spawn
+  uint32_t owner = 0;        // as given to Spawn, opaque
+  int id = 0;                // unique among live bullets, > 0; Segment
 };
 
 // A bullet that hit a body during the most recent Update.
@@ -34,6 +37,45 @@ struct Impact {
   float flight_time = 0.0f;  // s from the shot (spawn age included) to the hit
   float distance = 0.0f;     // m travelled along the path to the hit
   int shot_number = 0;       // of the bullet, as given to Spawn
+};
+
+// One integration substep of one bullet, recorded by
+// ProjectileSystem::Sweep: the bullet moves from `origin` to
+// `origin + delta` unless the world (or a player, see PlayerHit) stops it
+// first.
+struct Segment {
+  int projectile = 0;   // Projectile::id, stable while the bullet flies
+  int shot_number = 0;  // of the bullet, as given to Spawn
+  uint32_t owner = 0;   // of the bullet, as given to Spawn
+  glm::vec3 origin{0.0f};
+  glm::vec3 delta{0.0f};
+  // Fraction of `delta` at which the world stops the bullet; 1 = no world
+  // hit on this segment.
+  float world_fraction = 1.0f;
+  glm::vec3 velocity{0.0f};      // m/s at the segment start
+  float mass = 0.0f;             // kg
+  physics::BodyId world_body{};  // the hit body; meaningless without a hit
+  glm::vec3 world_normal{0.0f};  // of the hit surface; 0 without a hit
+};
+
+// A player hit by a Segment, as found by the caller (who alone knows the
+// players' capsules, e.g. lag compensated on the server).
+struct PlayerHit {
+  int segment = 0;        // index into ProjectileSystem::segments()
+  uint32_t victim = 0;    // opaque, reported back in PlayerImpact
+  float fraction = 0.0f;  // along the segment's delta, [0, 1]
+};
+
+// A bullet that hit a player during the most recent Resolve.
+struct PlayerImpact {
+  uint32_t victim = 0;  // as given in PlayerHit
+  glm::vec3 point{0.0f};
+  glm::vec3 velocity{0.0f};  // bullet velocity at the hit, m/s
+  float mass = 0.0f;         // kg
+  int shot_number = 0;       // of the bullet, as given to Spawn
+  uint32_t owner = 0;        // of the bullet, as given to Spawn
+  float flight_time = 0.0f;  // s from the shot (spawn age included) to the hit
+  float distance = 0.0f;     // m travelled along the path to the hit
 };
 
 // One integration step of a bullet: how far it moves and its velocity
@@ -75,7 +117,18 @@ struct ProjectileTuning {
 // then Update. A bullet spawned since the last Update is advanced by its
 // spawn `age` in the next Update, not by that Update's dt.
 //
-// All storage is reserved at construction: Spawn and Update never allocate.
+// Update is Sweep followed by Resolve with no player hits. Splitting them
+// lets a caller test the swept segments against targets the physics world
+// does not hold (players' capsules) in between: Sweep records every substep
+// as a Segment without changing any bullet, the caller turns its own hits
+// into PlayerHits, and Resolve applies the earliest hit of each bullet (a
+// player's or the world's) and advances the survivors. Call Resolve once,
+// right after Sweep; Spawn or Clear in between discards the sweep (Resolve
+// then only clears the hit lists).
+//
+// Storage is reserved at construction (segments for 8 substeps per bullet)
+// and kept, so once it has grown to a frame's needs Spawn, Update, Sweep and
+// Resolve never allocate.
 // The physics::Character is invisible to CastRay (it has no rigid body), so a
 // bullet never hits the shooter's own capsule. Copyable. Not thread-safe.
 class ProjectileSystem {
@@ -89,31 +142,85 @@ class ProjectileSystem {
   // (negative counts as 0). `shot_number` is carried to the bullet's Impact
   // so hits can be matched to shots. At capacity the oldest bullet is
   // dropped.
+  // `owner` is opaque, carried to the bullet's segments and player impacts.
   void Spawn(glm::vec3 position, glm::vec3 velocity, float mass, float drag,
-             float age = 0.0f, int shot_number = 0);
+             float age = 0.0f, int shot_number = 0, uint32_t owner = 0);
 
   // Advances every bullet by `dt` seconds (fresh ones by their spawn age) under
   // `gravity` (m/s^2), resolving hits against `world`. Replaces impacts().
   void Update(physics::PhysicsWorld& world, glm::vec3 gravity, float dt);
+
+  // First phase of Update: integrates every bullet over `dt` as Update does
+  // and records each substep as a Segment, cast against `world`. A bullet's
+  // segments are consecutive, in flight order, and end at its first world
+  // hit or where it expires. Changes no bullet. Replaces segments().
+  void Sweep(const physics::PhysicsWorld& world, glm::vec3 gravity, float dt);
+
+  // Second phase of Update: for each bullet the earliest hit along its
+  // segments wins. A player hit counts when its fraction is below its
+  // segment's world_fraction; the first such segment, then the smallest
+  // fraction, wins. It removes the bullet and is reported in
+  // player_impacts(). Otherwise a world hit removes the bullet exactly as
+  // Update does (Impact; impulse on a dynamic body). Survivors advance to
+  // where the sweep left them. Hits naming no segment of the sweep are
+  // ignored. Replaces impacts() and player_impacts(); empties segments().
+  void Resolve(physics::PhysicsWorld& world,
+               std::span<const PlayerHit> player_hits);
 
   [[nodiscard]] std::span<const Projectile> projectiles() const {
     return projectiles_;
   }
   // Hits of the most recent Update, in no particular order.
   [[nodiscard]] std::span<const Impact> impacts() const { return impacts_; }
+  // Player hits of the most recent Resolve, in bullet order.
+  [[nodiscard]] std::span<const PlayerImpact> player_impacts() const {
+    return player_impacts_;
+  }
+  // Segments of the most recent Sweep; empty after Resolve, Spawn or Clear.
+  [[nodiscard]] std::span<const Segment> segments() const { return segments_; }
   [[nodiscard]] const ProjectileTuning& tuning() const { return tuning_; }
 
-  // Removes every bullet and impact.
+  // Removes every bullet, impact and segment.
   void Clear();
 
  private:
-  // Advances `bullet` by `seconds`; returns false when it hit or expired.
-  bool Advance(physics::PhysicsWorld& world, glm::vec3 gravity, float seconds,
-               Projectile& bullet);
+  // What the sweep found for one bullet (indexed like projectiles_).
+  struct Flight {
+    Projectile end;      // after its last segment (at the world hit, if any)
+    bool alive = false;  // flies on after this sweep
+    bool world_hit = false;  // its last segment hit the world
+    int last_segment = -1;   // index of that segment when world_hit
+    // The winning player hit's segment index and fraction; -1 for none.
+    int player_segment = -1;
+    float player_fraction = 0.0f;
+    uint32_t victim = 0;
+  };
+  // What Resolve needs of a segment besides the Segment itself.
+  struct SegmentTrack {
+    int bullet = 0;  // index into projectiles_ and flights_
+    glm::vec3 end_velocity{0.0f};
+    float start_age = 0.0f;       // s, bullet age at the segment start
+    float duration = 0.0f;        // s
+    float start_distance = 0.0f;  // m travelled at the segment start
+    float length = 0.0f;          // m, |delta|
+  };
+
+  // Integrates `bullet` (index `index`) over `seconds`, recording its
+  // segments, and returns where it ends up.
+  Flight SweepBullet(const physics::PhysicsWorld& world, glm::vec3 gravity,
+                     float seconds, int index, Projectile bullet);
+  // Forgets the recorded sweep.
+  void DiscardSweep();
 
   ProjectileTuning tuning_;
   std::vector<Projectile> projectiles_;
   std::vector<Impact> impacts_;
+  std::vector<PlayerImpact> player_impacts_;
+  std::vector<Segment> segments_;
+  std::vector<SegmentTrack> tracks_;  // parallel to segments_
+  std::vector<Flight> flights_;       // parallel to projectiles_ when swept_
+  bool swept_ = false;                // a Sweep awaits its Resolve
+  int next_id_ = 1;                   // Projectile::id of the next Spawn
   // The last `fresh_count_` projectiles were spawned since the last Update;
   // their `age` holds the spawn age still to be simulated.
   int fresh_count_ = 0;

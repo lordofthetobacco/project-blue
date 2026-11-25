@@ -16,6 +16,9 @@
 #include "asset/mesh_data.h"
 #include "render/scene_view.h"
 #include "scene/scene_data.h"
+#include "world/core/placement.h"
+#include "world/core/placement_plan.h"
+#include "world/core/prefab_id.h"
 #include "world/prefab_cache.h"
 #include "world/prefab_pose.h"
 
@@ -25,28 +28,6 @@
 // by the game and the editor.
 
 namespace blue::world {
-
-// A problem met while building a world; the affected instance (or nested
-// prefab) is skipped, the rest of the world is built.
-struct WorldIssue {
-  scene::InstanceId instance = scene::kNoInstance;
-  std::string message;
-};
-
-// Nested prefabs deeper than this are dropped with an issue.
-inline constexpr int kMaxPrefabDepth = 16;
-
-// One resolved prefab copy: a scene instance's prefab, or a child prefab
-// nested in one. `owner` is the scene instance it belongs to.
-struct Placement {
-  scene::InstanceId owner = scene::kNoInstance;
-  PrefabId prefab{};
-  // Index into World::placements() of the prefab this one is nested in, or
-  // -1 for the instance's own prefab.
-  int parent = -1;
-  int depth = 0;          // 0 for the instance's own prefab
-  glm::mat4 world{1.0f};  // prefab space -> world
-};
 
 struct PickHit {
   scene::InstanceId instance = scene::kNoInstance;

@@ -46,6 +46,11 @@ class PrefabPose {
   // Poses the current clip at `time` without playing it (editor scrubbing).
   // No-op without a clip.
   void SetTime(float time);
+  // Poses the nodes from `local` (one local transform per node, e.g. a
+  // procedural animator's output) and recomputes the matrices; a playing
+  // clip is stopped and forgotten. Copies min(nodes, local.size())
+  // entries, the others keep their rest transform. Does not allocate.
+  void SetLocalPose(std::span<const animation::Transform> local);
   // Advances a playing clip by `dt` seconds and recomputes the matrices.
   // Returns true if the pose changed.
   bool Update(float dt);

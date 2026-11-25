@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
 #include "input/input_settings.h"
@@ -119,6 +120,38 @@ struct HitLogOverlayInfo {
   int shots_fired = 0;
 };
 
+// A name drawn over a remote player at `screen` (display pixels, origin top
+// left), projected by the game.
+struct NameTag {
+  glm::vec2 screen{0.0f};
+  std::string_view name;
+};
+
+// One kill feed line, e.g. "alice > bob", fading out with `opacity`.
+struct KillFeedLine {
+  std::string_view text;
+  float opacity = 1.0f;  // [0, 1]
+};
+
+// What a networked game adds to the overlay: the HUD (health, ammo), a net
+// quality line, name tags and the kill feed. Everything is borrowed for the
+// PerfOverlay::Build() call.
+struct NetHudInfo {
+  int health = 0;
+  bool alive = true;
+  float respawn_seconds = 0.0f;  // while dead
+  bool has_weapon = false;
+  int rounds_in_magazine = 0;
+  int spare_rounds = 0;  // in the spare magazines
+  double ping_ms = 0.0;
+  double loss_percent = 0.0;
+  double snapshots_per_second = 0.0;
+  double replays_per_second = 0.0;
+  double interpolation_ms = 0.0;
+  std::span<const NameTag> name_tags;
+  std::span<const KillFeedLine> kill_feed;
+};
+
 // Plain data the overlay shows about the loaded scene; the views must outlive
 // the PerfOverlay::Build() call.
 struct SceneOverlayInfo {
@@ -151,6 +184,9 @@ struct SceneOverlayInfo {
   // The weapon inspect screen is open: the stats, settings and hit log
   // windows stay hidden so its panels have the screen.
   bool hide_windows = false;
+  // Online only: the HUD, net line, name tags and kill feed (drawn also
+  // while the stats window is hidden); null offline.
+  const NetHudInfo* net = nullptr;
 };
 
 // What one Build() call produced.

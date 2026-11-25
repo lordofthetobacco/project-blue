@@ -265,6 +265,31 @@ TEST_CASE("recoil kicks the rifle back and up, then recovers") {
   CHECK(glm::length(viewmodel.muzzle_direction() - rest_direction) < 1.0e-4f);
 }
 
+TEST_CASE("a shot leaves along the aimed bore at any frame rate") {
+  // The bullet is gone before the rifle moves: the frame that fires must not
+  // pose the barrel with that shot's own recoil, or the shot goes high by
+  // a frame's worth of muzzle rise (FPS-dependent, ~1.7 mrad at 1000 FPS,
+  // which made a 100 m zero shoot like a 300 m one).
+  for (const float dt : {1.0f / 1000.0f, 1.0f / 144.0f, 1.0f / 30.0f}) {
+    CAPTURE(dt);
+    Viewmodel viewmodel(M16Geometry(), SprA3GViewmodelTuning());
+    ViewmodelInput still = Still(true);
+    still.dt = dt;
+    Settle(viewmodel, still);
+    const glm::vec3 aimed_muzzle = viewmodel.muzzle_position();
+    const glm::vec3 aimed_direction = viewmodel.muzzle_direction();
+    ViewmodelInput shot = still;
+    shot.shots = 1;
+    viewmodel.Update(shot);
+    CHECK(glm::length(viewmodel.muzzle_direction() - aimed_direction) <
+          1.0e-6f);
+    CHECK(glm::length(viewmodel.muzzle_position() - aimed_muzzle) < 1.0e-6f);
+    // The kick still shows from the next frame on.
+    viewmodel.Update(still);
+    CHECK(viewmodel.muzzle_direction().y > aimed_direction.y);
+  }
+}
+
 TEST_CASE("TakeLookKick is deterministic per seed and clears on read") {
   auto kicks_for = [](uint32_t seed) {
     ViewmodelTuning tuning;

@@ -310,6 +310,69 @@ PerfOverlay::PerfOverlay(const platform::Window& window,
     : renderer_(renderer),
       layer_(window, renderer, {.scale_mode = UiScaleMode::kWindowHeight}) {}
 
+namespace {
+
+void DrawNetLine(const NetHudInfo& net) {
+  ImGui::Text("Net: ping %.0f ms  loss %.1f%%  %.0f snap/s  %.1f replays/s",
+              net.ping_ms, net.loss_percent, net.snapshots_per_second,
+              net.replays_per_second);
+  ImGui::Text("     interpolation delay %.0f ms", net.interpolation_ms);
+}
+
+// Health and ammo at the bottom left, the net line under them, name tags
+// and the kill feed (top right), all on the background draw list or a
+// window without inputs.
+void DrawNetHud(const NetHudInfo& net) {
+  ImDrawList* draw = ImGui::GetBackgroundDrawList();
+  const float font = ImGui::GetFontSize();
+  for (const NameTag& tag : net.name_tags) {
+    const ImVec2 size =
+        ImGui::CalcTextSize(tag.name.data(), tag.name.data() + tag.name.size());
+    const ImVec2 at(tag.screen.x - size.x * 0.5f, tag.screen.y - size.y);
+    draw->AddRectFilled(ImVec2(at.x - 3.0f, at.y - 1.0f),
+                        ImVec2(at.x + size.x + 3.0f, at.y + size.y + 1.0f),
+                        IM_COL32(0, 0, 0, 110), 3.0f);
+    draw->AddText(at, IM_COL32(235, 235, 235, 255), tag.name.data(),
+                  tag.name.data() + tag.name.size());
+  }
+  const ImVec2 display = ImGui::GetIO().DisplaySize;
+  float y = font;
+  for (const KillFeedLine& line : net.kill_feed) {
+    const ImVec2 size = ImGui::CalcTextSize(
+        line.text.data(), line.text.data() + line.text.size());
+    const auto alpha =
+        static_cast<int>(std::clamp(line.opacity, 0.0f, 1.0f) * 255.0f);
+    draw->AddText(ImVec2(display.x - size.x - font, y),
+                  IM_COL32(255, 230, 200, alpha), line.text.data(),
+                  line.text.data() + line.text.size());
+    y += size.y + font * 0.25f;
+  }
+
+  ImGui::SetNextWindowPos(ImVec2(font, display.y - font), ImGuiCond_Always,
+                          ImVec2(0.0f, 1.0f));
+  ImGui::SetNextWindowBgAlpha(0.45f);
+  constexpr ImGuiWindowFlags kFlags =
+      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+      ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
+  if (ImGui::Begin("HUD", nullptr, kFlags)) {
+    if (net.alive) {
+      ImGui::Text("Health %d", net.health);
+    } else {
+      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f),
+                         "Dead - respawn in %.1f s", net.respawn_seconds);
+    }
+    if (net.has_weapon) {
+      ImGui::Text("Ammo %d / %d", net.rounds_in_magazine, net.spare_rounds);
+    }
+    ImGui::TextDisabled("ping %.0f ms  loss %.1f%%", net.ping_ms,
+                        net.loss_percent);
+  }
+  ImGui::End();
+}
+
+}  // namespace
+
 BuildResult PerfOverlay::Build(float cpu_frame_ms,
                                std::optional<double> gpu_frame_ms,
                                const SceneOverlayInfo& scene_info,
@@ -328,6 +391,9 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
   }
   if (scene_info.interaction_dot_opacity > 0.0f) {
     DrawInteractionDot(scene_info.interaction_dot_opacity);
+  }
+  if (scene_info.net != nullptr) {
+    DrawNetHud(*scene_info.net);
   }
 
   if (visible_ && !scene_info.hide_windows) {
@@ -354,6 +420,10 @@ BuildResult PerfOverlay::Build(float cpu_frame_ms,
       DrawShadowInfo(scene_info.shadows);
       ImGui::Separator();
       DrawSceneInfo(scene_info);
+      if (scene_info.net != nullptr) {
+        ImGui::Separator();
+        DrawNetLine(*scene_info.net);
+      }
     }
     ImGui::End();
 

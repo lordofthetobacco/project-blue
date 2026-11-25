@@ -11,6 +11,7 @@
 #include <glm/vec2.hpp>
 
 #include "input/action.h"
+#include "player/movement.h"
 
 namespace blue::player {
 namespace {
@@ -19,10 +20,6 @@ using input::Action;
 
 // Same limit as camera::ApplyMouseLook, which does not export it.
 constexpr float kMaxPitch = glm::radians(89.0f);
-
-[[nodiscard]] float Axis(bool positive, bool negative) {
-  return (positive ? 1.0f : 0.0f) - (negative ? 1.0f : 0.0f);
-}
 
 }  // namespace
 
@@ -98,11 +95,17 @@ void PlayerController::Update(const input::InputFrame& input,
     look_ = turned;
   }
 
-  const float move_x =
-      Axis(actions.held(Action::kMoveRight), actions.held(Action::kMoveLeft));
-  const float move_z =
-      Axis(actions.held(Action::kMoveForward), actions.held(Action::kMoveBack));
-  const bool moving = move_x != 0.0f || move_z != 0.0f;
+  MoveInput move{
+      .forward = actions.held(Action::kMoveForward),
+      .back = actions.held(Action::kMoveBack),
+      .left = actions.held(Action::kMoveLeft),
+      .right = actions.held(Action::kMoveRight),
+      .sprint = actions.held(Action::kSprint),
+      .aim = aiming_,
+      .jump = actions.pressed(Action::kJump),
+      .crouching = false,
+      .yaw = look_.yaw,
+  };
 
   // Stance. In toggle mode the latch follows the request, not the result, so
   // standing up blocked by a ceiling is retried every frame until it fits.
@@ -116,37 +119,23 @@ void PlayerController::Update(const input::InputFrame& input,
   if (want_crouch != character_->crouching()) {
     (void)character_->SetCrouching(want_crouch);
   }
-  const bool crouching = character_->crouching();
+  move.crouching = character_->crouching();
 
-  bool sprint_requested = actions.held(Action::kSprint);
   if (settings.sprint_toggle) {
     if (actions.pressed(Action::kSprint)) {
       sprint_latched_ = !sprint_latched_;
     }
-    if (!moving || aiming_) {
+    if (!IsMoving(move) || aiming_) {
       // Letting go of the keys or raising the sights ends a sprint.
       sprint_latched_ = false;
     }
-    sprint_requested = sprint_latched_;
+    move.sprint = sprint_latched_;
   }
-  sprinting_ = sprint_requested && moving && !crouching && !aiming_;
 
-  float speed = sprinting_ ? tuning_.sprint_speed : tuning_.walk_speed;
-  if (aiming_) {
-    speed = std::min(speed, tuning_.aim_speed);
-  }
-  if (crouching) {
-    speed = std::min(speed, tuning_.crouch_speed);
-  }
-  glm::vec3 direction = camera::FlatForwardFrom(look_.yaw) * move_z +
-                        camera::FlatRightFrom(look_.yaw) * move_x;
-  const float length = glm::length(direction);
-  if (length > 1.0f) {
-    direction /= length;
-  }
-  character_->SetDesiredVelocity(direction * speed);
-
-  if (actions.pressed(Action::kJump) && !crouching) {
+  const MoveIntent intent = ComputeMove(move, tuning_);
+  sprinting_ = intent.sprinting;
+  character_->SetDesiredVelocity(intent.velocity);
+  if (intent.jump) {
     character_->RequestJump(tuning_.jump_speed);
   }
 }

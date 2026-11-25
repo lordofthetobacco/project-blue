@@ -124,4 +124,54 @@ TEST_CASE("WorldPhysics builds bodies, maps hits and syncs dynamic poses") {
   CHECK_FALSE(physics.IsDynamic(*bodies.BodyFor(crate)));
 }
 
+TEST_CASE("WorldPhysics builds dynamic bodies kinematic for a client") {
+  const testing::ScratchDirectory dir("world_physics_kinematic");
+  const std::string box_path = dir.Child("box.pbo");
+  REQUIRE(
+      prefab::SavePrefab(testing::MakeCubePrefab({"a"}, true), box_path).ok());
+  prefab::Prefab dynamic_box = testing::MakeCubePrefab({"a"}, true);
+  dynamic_box.physics.dynamic = true;
+  dynamic_box.physics.mass = 5.0f;
+  const std::string crate_path = dir.Child("crate.pbo");
+  REQUIRE(prefab::SavePrefab(dynamic_box, crate_path).ok());
+
+  scene::SceneData scene;
+  Place(scene, box_path, {0, -0.5f, 0}, {20, 1, 20});
+  const scene::InstanceId crate = Place(scene, crate_path, {0, 5, 0});
+  testing::FakeGpu gpu;
+  PrefabCache cache(gpu);
+  World world(cache);
+  REQUIRE(world.Build(scene).empty());
+
+  physics::PhysicsRuntime runtime;
+  physics::PhysicsWorld physics(runtime);
+  WorldPhysics bodies(physics);
+  CHECK(
+      bodies.Build(scene, world, {.dynamic_bodies = DynamicBodies::kKinematic})
+          .created == 2);
+  REQUIRE(bodies.BodyFor(crate).has_value());
+  const physics::BodyId body = *bodies.BodyFor(crate);
+  // Gravity does not move it; MoveKinematic does, and the world follows.
+  for (int frame = 0; frame < 30; ++frame) {
+    physics.StepOnce();
+  }
+  CHECK(physics.InterpolatedPose(body).position.y == doctest::Approx(5.0f));
+  for (int step = 0; step < 10; ++step) {
+    physics.MoveKinematic(body, {.position = glm::vec3(3.0f, 2.0f, 0.0f)},
+                          1.0f / 60.0f);
+    physics.StepOnce();
+  }
+  physics.SetInterpolationAlpha(1.0f);
+  bodies.SyncToWorld(world);
+  const std::optional<asset::Bounds> moved = world.InstanceBounds(crate);
+  REQUIRE(moved.has_value());
+  CHECK((moved->min.x + moved->max.x) * 0.5f ==
+        doctest::Approx(3.0f).epsilon(0.01));
+
+  // Back to the default: simulated again, with the same counts.
+  CHECK(bodies.Build(scene, world).created == 2);
+  CHECK(physics.IsDynamic(*bodies.BodyFor(crate)));
+  CHECK(physics.Stats().bodies == 2);
+}
+
 }  // namespace blue::world

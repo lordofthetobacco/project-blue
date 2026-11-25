@@ -18,6 +18,10 @@ namespace blue::physics {
 class CookedShape;
 class PhysicsRuntime;
 
+// Length of one simulation step in seconds: the world advances in steps of
+// exactly this size, and the multiplayer tick matches it.
+inline constexpr float kFixedStepSeconds = 1.0f / 60.0f;
+
 // Handle of a body inside one PhysicsWorld. Handles of removed bodies are
 // detected as stale (operations on them are ignored), but a handle is only
 // meaningful for the world that created it.
@@ -70,6 +74,15 @@ struct ShapeBodyDesc {
   bool blocks_characters = true;
 };
 
+// Full motion state of a rigid body, for saving and rewinding world objects.
+// `pose` is the body origin (not the center of mass).
+struct BodyState {
+  Pose pose;
+  glm::vec3 linear_velocity{0.0f};   // m/s
+  glm::vec3 angular_velocity{0.0f};  // rad/s
+  bool active = false;               // Awake; sleeping bodies are skipped.
+};
+
 struct RayHit {
   BodyId body;
   glm::vec3 point;
@@ -81,8 +94,16 @@ struct PhysicsStats {
   int bodies;         // Bodies in the world, static ones included.
   int active_bodies;  // Dynamic bodies currently awake.
   // Wall-clock time spent stepping the simulation in the most recent Update
-  // call that ran at least one step.
+  // call that ran at least one step, or the most recent StepOnce.
   float last_step_ms;
+};
+
+// Construction options of a PhysicsWorld.
+struct PhysicsWorldOptions {
+  // Threads the simulation spreads its work over besides the calling thread.
+  // Negative: one less than the hardware threads (at least 1). 0 runs every
+  // job on the calling thread.
+  int worker_threads = -1;
 };
 
 // A rigid-body simulation (JoltPhysics) advanced in fixed 1/60 s steps. SI
@@ -94,6 +115,8 @@ class PhysicsWorld {
   // `runtime` must outlive the world; it only documents that process-wide
   // setup exists.
   explicit PhysicsWorld(const PhysicsRuntime& runtime);
+  PhysicsWorld(const PhysicsRuntime& runtime,
+               const PhysicsWorldOptions& options);
   PhysicsWorld(const PhysicsWorld&) = delete;
   PhysicsWorld& operator=(const PhysicsWorld&) = delete;
   ~PhysicsWorld();
@@ -134,7 +157,19 @@ class PhysicsWorld {
   // Advances the simulation by `frame_seconds` of real time using fixed 1/60 s
   // steps: time accumulates (at most 0.25 s per call), whole steps run, at most
   // 4 per call. If more were due the backlog is dropped rather than carried.
+  // Equivalent to the right number of StepOnce calls.
   void Update(float frame_seconds);
+
+  // Runs exactly one fixed step: every character that is not manually stepped
+  // moves, then the rigid bodies. For callers that count ticks with their own
+  // clock; they report the sub-step remainder with SetInterpolationAlpha.
+  void StepOnce();
+
+  // Sets the fraction of the next fixed step already elapsed, [0, 1], that
+  // InterpolatedPose and Character::position blend with. Update overwrites
+  // it with its own remainder. Out-of-range values are clamped; NaN is
+  // ignored.
+  void SetInterpolationAlpha(float alpha);
 
   // Returns the pose of `id` interpolated between its last two steps by the
   // accumulator remainder, for smooth rendering. Static bodies return their
@@ -143,6 +178,30 @@ class PhysicsWorld {
 
   glm::vec3 LinearVelocity(BodyId id) const;
   bool IsDynamic(BodyId id) const;
+  // Returns whether the body is awake. False for static, sleeping and
+  // unknown bodies.
+  bool IsActive(BodyId id) const;
+
+  // Returns the pose, velocities and activity of `id`; a default BodyState
+  // for an unknown handle.
+  BodyState GetBodyState(BodyId id) const;
+
+  // Puts `id` into `state` instantly (a rewind, not a simulated motion): its
+  // interpolation restarts from the new pose. Velocities are ignored for
+  // static bodies and putting a body to sleep zeroes them, like Jolt does.
+  // Unknown or stale handles are ignored.
+  void SetBodyState(BodyId id, const BodyState& state);
+
+  // Switches a dynamic body to kinematic (moved only by MoveKinematic,
+  // unaffected by forces and collisions) or back to dynamic. Ignored for
+  // static bodies and unknown handles.
+  void SetKinematic(BodyId id, bool kinematic);
+
+  // Sets the velocities of the kinematic body `id` so that the next
+  // `dt` seconds of simulation bring it to `target`. Ignored for bodies that
+  // are not kinematic, unknown handles and non-positive `dt`.
+  void MoveKinematic(BodyId id, const Pose& target, float dt);
+
   PhysicsStats Stats() const;
 
  private:

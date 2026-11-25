@@ -30,6 +30,12 @@ inline constexpr size_t kMaterialVariantCount = 4;
          variant == MaterialVariant::kMaskedDoubleSided;
 }
 
+// Returns whether `item` is drawn into the shadow maps: the one rule every
+// backend's shadow pass applies before culling against a cascade.
+[[nodiscard]] constexpr bool IsShadowCaster(const DrawItem& item) {
+  return item.casts_shadow;
+}
+
 // Returns the variant `desc` is drawn with.
 [[nodiscard]] MaterialVariant VariantOf(const material::MaterialDesc& desc);
 
@@ -68,14 +74,14 @@ class DrawList {
   // Rebuilds the list from the items of `view` whose `world_bounds` (parallel
   // to view.draws) intersect `frustum`; counts the others in
   // stats.culled_draws. Items whose mesh is unknown or released are
-  // skipped; unknown or released materials draw as kDefaultMaterial. For a
-  // scope's picture (`scope_view`) the items hidden_in_scope are skipped
-  // too (not counted as culled). Allocates nothing once the list has grown
-  // to its steady size.
+  // skipped; unknown or released materials draw as kDefaultMaterial. Items
+  // shadow_only are never listed (the shadow passes walk view.draws
+  // themselves), and for a scope's picture (`scope_view`) neither are the
+  // items hidden_in_scope; neither counts as culled. Allocates nothing once
+  // the list has grown to its steady size.
   void Build(const SceneView& view, std::span<const camera::Aabb> world_bounds,
-             const camera::Frustum& frustum,
-             const DrawListResources& resources, RenderStats& stats,
-             bool scope_view = false);
+             const camera::Frustum& frustum, const DrawListResources& resources,
+             RenderStats& stats, bool scope_view = false);
 
   [[nodiscard]] std::span<const DrawEntry> entries() const { return entries_; }
 

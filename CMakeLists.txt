@@ -12,125 +12,24 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-# --- Renderer backends --------------------------------------------------------------------
-# Each backend is a native renderer behind render::Renderer (src/render/renderer_backend.h),
-# in its own directory with its own CMakeLists.txt. Vulkan builds everywhere (macOS: MoltenVK
-# from the Vulkan SDK); D3D12 only on Windows, Metal only on Apple platforms. A backend whose
-# directory does not exist yet (D3D12 before package D1, Metal before the Metal branch is
-# merged) defaults to OFF and cannot be switched on.
-set(blue_d3d12_available OFF)
-if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/render/d3d12/CMakeLists.txt")
-    set(blue_d3d12_available ON)
-endif()
-set(blue_metal_available OFF)
-if(APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/render/metal/CMakeLists.txt")
-    set(blue_metal_available ON)
-endif()
+# Headless simulation core only, for the Linux dedicated server (server/): the libraries
+# behind blue_sim_c, netcode and blue_sim_tests. No renderer, UI, editor, shaders, cooking
+# or importers, so it configures without the Vulkan SDK, Slang or windowing packages.
+option(BLUE_SIM_ONLY "Build only the headless simulation core (dedicated server)" OFF)
 
-# Settings whose default is computed ("automatic") follow a changed automatic value in an
-# existing cache, while a value set by hand (or by -D) is kept: <var>_AUTO (internal) records
-# the automatic value of the last configure, and a cache entry equal to it is moved to the new
-# one. Caches written before these records existed are recognised by the STRINGS property of
-# BLUE_DEFAULT_RENDERER (a fresh -D value has none); their automatic value was <legacy_auto>.
-# Call before the option() / set(CACHE) that defines <var>. BOOL values compare as ON/OFF.
-get_property(blue_cache_predates_auto_records CACHE BLUE_DEFAULT_RENDERER PROPERTY STRINGS)
-function(blue_follow_automatic_default var type auto legacy_auto)
-    if(DEFINED ${var}_AUTO)
-        set(previous "${${var}_AUTO}")
-    elseif(blue_cache_predates_auto_records)
-        set(previous "${legacy_auto}")
-    else()
-        set(previous "")
-    endif()
-    set(current "${${var}}")
-    if(type STREQUAL "BOOL")
-        foreach(value IN ITEMS auto previous current)
-            if(NOT "${${value}}" STREQUAL "")
-                if(${${value}})
-                    set(${value} ON)
-                else()
-                    set(${value} OFF)
-                endif()
-            endif()
-        endforeach()
-    endif()
-    if(DEFINED ${var} AND NOT previous STREQUAL ""
-       AND current STREQUAL previous AND NOT current STREQUAL auto)
-        message(STATUS "${var} follows the new automatic default: ${previous} -> ${auto}")
-        set_property(CACHE ${var} PROPERTY VALUE "${auto}")
-    endif()
-    set(${var}_AUTO "${auto}" CACHE INTERNAL "The automatic ${var} of the last configure")
-endfunction()
-
-option(BLUE_RENDERER_VULKAN "Build the Vulkan renderer backend" ON)
-# Caches from before src/render/d3d12 (or src/render/metal) existed hold an automatic OFF.
-blue_follow_automatic_default(BLUE_RENDERER_D3D12 BOOL ${blue_d3d12_available} OFF)
-option(BLUE_RENDERER_D3D12 "Build the Direct3D 12 renderer backend (Windows)" ${blue_d3d12_available})
-blue_follow_automatic_default(BLUE_RENDERER_METAL BOOL ${blue_metal_available} OFF)
-option(BLUE_RENDERER_METAL "Build the Metal renderer backend (Apple)" ${blue_metal_available})
-option(BLUE_SHADER_HOT_RELOAD
-    "Link the runtime shader compiler and reload shaders when their sources change" ON)
-
-if(BLUE_RENDERER_D3D12 AND NOT WIN32)
-    message(FATAL_ERROR "BLUE_RENDERER_D3D12 is only available on Windows")
-endif()
-if(BLUE_RENDERER_METAL AND NOT APPLE)
-    message(FATAL_ERROR "BLUE_RENDERER_METAL is only available on Apple platforms")
-endif()
-if(BLUE_RENDERER_D3D12 AND NOT blue_d3d12_available)
-    message(FATAL_ERROR "BLUE_RENDERER_D3D12: src/render/d3d12 does not exist yet")
-endif()
-if(BLUE_RENDERER_METAL AND NOT blue_metal_available)
-    message(FATAL_ERROR "BLUE_RENDERER_METAL: src/render/metal does not exist yet")
-endif()
-if(NOT BLUE_RENDERER_VULKAN AND NOT BLUE_RENDERER_D3D12 AND NOT BLUE_RENDERER_METAL)
-    message(FATAL_ERROR "Enable at least one renderer backend (BLUE_RENDERER_VULKAN, "
-        "BLUE_RENDERER_D3D12, BLUE_RENDERER_METAL)")
-endif()
-if(NOT BLUE_SHADER_HOT_RELOAD AND BLUE_RENDERER_METAL)
-    # Vulkan and Direct3D 12 load the blobs the build compiles (cmake/Shaders.cmake); the
-    # Metal backend still compiles its MSL sources at run time.
-    message(FATAL_ERROR "BLUE_SHADER_HOT_RELOAD=OFF is not supported with "
-        "BLUE_RENDERER_METAL yet")
-endif()
-
-# The backend used unless --renderer= or BLUE_RENDERER names another one:
-# Metal on Apple, Direct3D 12 on Windows, Vulkan elsewhere (design §1.4).
-if(BLUE_RENDERER_METAL)
-    set(blue_default_renderer metal)
-elseif(BLUE_RENDERER_D3D12)
-    set(blue_default_renderer d3d12)
-else()
-    set(blue_default_renderer vulkan)
-endif()
-# Caches from before the record held an automatic "vulkan".
-blue_follow_automatic_default(BLUE_DEFAULT_RENDERER STRING ${blue_default_renderer} vulkan)
-set(BLUE_DEFAULT_RENDERER "${blue_default_renderer}" CACHE STRING
-    "Renderer backend used unless --renderer= or BLUE_RENDERER names another (vulkan, d3d12, metal)")
-set_property(CACHE BLUE_DEFAULT_RENDERER PROPERTY STRINGS vulkan d3d12 metal)
-string(TOUPPER "${BLUE_DEFAULT_RENDERER}" blue_default_renderer_upper)
-if(NOT BLUE_DEFAULT_RENDERER MATCHES "^(vulkan|d3d12|metal)$"
-   OR NOT BLUE_RENDERER_${blue_default_renderer_upper})
-    message(FATAL_ERROR "BLUE_DEFAULT_RENDERER '${BLUE_DEFAULT_RENDERER}' must name an "
-        "enabled backend")
-endif()
-message(STATUS "Renderer backends: Vulkan ${BLUE_RENDERER_VULKAN}, D3D12 ${BLUE_RENDERER_D3D12}, "
-    "Metal ${BLUE_RENDERER_METAL}; default ${BLUE_DEFAULT_RENDERER}")
-
-if(BLUE_RENDERER_VULKAN)
-    find_package(Vulkan 1.3 REQUIRED)
+if(NOT BLUE_SIM_ONLY)
+    include(Renderers)
 endif()
 
 # ProjectOptions first: cmake/Dependencies.cmake uses its MSVC flag helpers.
 include(ProjectOptions)
 include(Dependencies)
-include(Shaders)
-include(SampleAssets)
 
 # Path handling and file system access (src/core/path.cc is pure; file_system.cc sits on
 # SDL3). One small library because the file system layer depends on the path functions
 # and every consumer needs both.
 add_library(blue_core STATIC
+    src/core/det_math.cc
     src/core/path.cc
     src/core/text.cc
     src/platform/file_system.cc
@@ -143,27 +42,6 @@ target_include_directories(blue_core PUBLIC src)
 blue_target_defaults(blue_core)
 
 target_link_libraries(blue_core PUBLIC SDL3::SDL3-static)
-
-# Model Context Protocol server (Streamable HTTP on loopback, JSON-RPC, own JSON
-# type) used by the editor. Plain sockets; no editor, ImGui or Vulkan code.
-add_library(blue_mcp STATIC
-    src/mcp/http.cc
-    src/mcp/json.cc
-    src/mcp/protocol.cc
-    src/mcp/server.cc
-    src/mcp/tool.cc
-    src/mcp/internal/socket.cc
-)
-
-target_include_directories(blue_mcp PUBLIC src)
-
-blue_target_defaults(blue_mcp)
-
-find_package(Threads REQUIRED)
-target_link_libraries(blue_mcp
-    PUBLIC blue_core
-    PRIVATE Threads::Threads $<$<PLATFORM_ID:Windows>:ws2_32>
-)
 
 # Rigid node animation: transform hierarchy, keyframe clips (glTF sampling rules)
 # and a playback cursor. glm only, no allocation per frame.
@@ -204,35 +82,6 @@ blue_target_defaults(blue_mesh)
 
 target_link_libraries(blue_mesh PUBLIC glm::glm)
 
-# Image decoding (PNG/JPG/HDR through stb) and ORM packing: no importer code, so
-# the renderer and the game load the HDR environment without assimp.
-add_library(blue_image STATIC
-    src/asset/image_decoder.cc
-)
-
-target_include_directories(blue_image PUBLIC src)
-
-blue_target_defaults(blue_image)
-
-target_link_libraries(blue_image PUBLIC blue_core PRIVATE stb)
-
-add_library(blue_asset STATIC
-    src/asset/animated_model.cc
-    src/asset/internal/material_import.cc
-    src/asset/internal/mesh_import.cc
-    src/asset/model_importer.cc
-    src/asset/texture_loader.cc
-)
-
-target_include_directories(blue_asset PUBLIC src)
-
-blue_target_defaults(blue_asset)
-
-target_link_libraries(blue_asset
-    PUBLIC blue_mesh blue_image blue_core blue_animation blue_material glm::glm
-    PRIVATE assimp::assimp stb
-)
-
 add_library(blue_scene STATIC
     src/scene/scene.cc
     src/scene/binary_stream.cc
@@ -263,19 +112,6 @@ target_link_libraries(blue_prefab
     PRIVATE blue_scene
 )
 
-# Cascaded shadow map math for the sun and image-based lighting math
-# (equirect environments, SH9 irradiance, BRDF LUT).
-add_library(blue_lighting STATIC
-    src/lighting/cascades.cc
-    src/lighting/environment.cc
-)
-
-target_include_directories(blue_lighting PUBLIC src)
-
-blue_target_defaults(blue_lighting)
-
-target_link_libraries(blue_lighting PUBLIC blue_image glm::glm)
-
 # Rigid-body simulation on JoltPhysics. Jolt stays private: no Jolt type appears in the
 # public physics headers (its JPH_* definitions still propagate PUBLIC from Jolt itself,
 # so any target that includes Jolt headers gets matching settings).
@@ -295,51 +131,6 @@ target_link_libraries(blue_physics
     PUBLIC blue_scene blue_mesh blue_core glm::glm
     PRIVATE Jolt
 )
-
-# Offline content cooking (editor and blue-pack only, never the game): model import into
-# prefabs, BC7/BC5 texture compression with mips, mesh optimisation, collision cooking
-# and animation clip editing. The encoders are built optimised even in Debug (see
-# cmake/Dependencies.cmake).
-add_library(blue_cook STATIC
-    src/cook/clip_tools.cc
-    src/cook/collision_cook.cc
-    src/cook/cook_error.cc
-    src/cook/generated_file.cc
-    src/cook/model_cook.cc
-    src/cook/prefab_edits.cc
-    src/cook/prefab_split.cc
-    src/cook/scene_edits.cc
-    src/cook/texture_cook.cc
-)
-
-target_include_directories(blue_cook PUBLIC src)
-
-blue_target_defaults(blue_cook)
-
-target_link_libraries(blue_cook
-    PUBLIC blue_prefab blue_scene blue_asset blue_physics blue_animation blue_material blue_core glm::glm
-    PRIVATE bc7enc_rdo meshoptimizer
-)
-
-# Headless cooker: imports models into .pbo prefabs and prints their contents.
-add_executable(blue-pack
-    tools/blue-pack/main.cc
-    tools/blue-pack/sample_parts.cc
-    tools/blue-pack/samples.cc
-)
-
-set_target_properties(blue-pack PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-blue_target_defaults(blue-pack)
-
-target_include_directories(blue-pack PRIVATE ${CMAKE_SOURCE_DIR})
-
-target_link_libraries(blue-pack PRIVATE blue_cook blue_prefab blue_physics blue_scene blue_weapon blue_core)
-
-# Cooks the sample prefabs and range.mscn into <build>/bin/assets when the
-# sources or blue-pack change (see cmake/SampleAssets.cmake).
-blue_cook_sample_assets()
 
 # Actions, rebindable key bindings and the persisted settings file. SDL only for key
 # names and scancodes; no window or event handling here.
@@ -368,22 +159,12 @@ blue_target_defaults(blue_camera)
 
 target_link_libraries(blue_camera PUBLIC blue_core blue_input blue_scene glm::glm)
 
-# SDL events -> per-frame action state and mouse deltas.
-add_library(blue_input_mapper STATIC
-    src/platform/input_mapper.cc
-)
-
-target_include_directories(blue_input_mapper PUBLIC src)
-
-blue_target_defaults(blue_input_mapper)
-
-target_link_libraries(blue_input_mapper PUBLIC blue_input SDL3::SDL3-static glm::glm)
-
 # First-person player: input actions -> character movement, eye placement, head bob and
 # field of view. Jolt stays behind blue_physics' public headers.
 add_library(blue_player STATIC
     src/player/fov_controller.cc
     src/player/head_bob.cc
+    src/player/movement.cc
     src/player/player_controller.cc
 )
 
@@ -439,7 +220,242 @@ target_include_directories(blue_interact PUBLIC src)
 
 blue_target_defaults(blue_interact)
 
-target_link_libraries(blue_interact PUBLIC glm::glm)
+target_link_libraries(blue_interact PUBLIC blue_core glm::glm)
+
+# GPU-free world building shared by the runtime world and the headless simulation:
+# prefab ids and sources, the placement plan resolved from a scene, and the collision
+# world built from cooked shapes. No renderer, no importers (also built for the Linux
+# dedicated server).
+add_library(blue_world_core STATIC
+    src/world/core/collision_world.cc
+    src/world/core/placement_plan.cc
+    src/world/core/prefab_store.cc
+)
+
+target_include_directories(blue_world_core PUBLIC src)
+
+blue_target_defaults(blue_world_core)
+
+target_link_libraries(blue_world_core
+    PUBLIC blue_prefab blue_scene blue_physics blue_animation blue_core glm::glm
+)
+
+# The per-tick gameplay simulation shared by client prediction and the dedicated server:
+# tick clock, user commands, player movement, weapons and damage over a headless world.
+# No rendering, no game glue (blue_game), no UI.
+add_library(blue_sim STATIC
+    src/sim/command_builder.cc
+    src/sim/damage.cc
+    src/sim/player_sim.cc
+    src/sim/sim_world.cc
+    src/sim/tick_clock.cc
+    src/sim/weapon_table.cc
+)
+
+target_include_directories(blue_sim PUBLIC src)
+
+blue_target_defaults(blue_sim)
+
+target_link_libraries(blue_sim
+    PUBLIC blue_world_core blue_player blue_weapon blue_physics blue_input blue_camera blue_interact
+           blue_core glm::glm
+)
+
+# Plain C ABI over blue_sim for the Rust dedicated server (sim/c_api/blue_sim.h).
+add_library(blue_sim_c STATIC
+    src/sim/c_api/blue_sim.cc
+)
+
+target_include_directories(blue_sim_c PUBLIC src)
+
+blue_target_defaults(blue_sim_c)
+
+target_link_libraries(blue_sim_c PRIVATE blue_sim)
+
+# Client networking without rendering: the wire codecs of docs/netcode/protocol.md
+# (mirroring server/crates/blue-protocol bit for bit) and the netcode.io client transport.
+# netcode stays private: no netcode type appears in src/net headers.
+add_library(blue_net STATIC
+    src/net/bit_stream.cc
+    src/net/client_session.cc
+    src/net/clock_sync.cc
+    src/net/interpolation.cc
+    src/net/messages.cc
+    src/net/net_settings.cc
+    src/net/packet.cc
+    src/net/players.cc
+    src/net/prediction.cc
+    src/net/quantize.cc
+    src/net/reliable_channel.cc
+    src/net/replication.cc
+    src/net/sequence.cc
+    src/net/snapshot.cc
+    src/net/state_mapping.cc
+    src/net/transport.cc
+    src/net/user_command_codec.cc
+    src/net/wire_error.cc
+    src/net/world_object.cc
+)
+
+target_include_directories(blue_net PUBLIC src)
+
+blue_target_defaults(blue_net)
+
+target_link_libraries(blue_net
+    PUBLIC blue_sim blue_core glm::glm
+    PRIVATE netcode
+)
+
+# The networked client without a window (tools/net-probe): connects the real
+# ClientSession to a server and plays a scripted command stream. Headless, so
+# it also builds in the BLUE_SIM_ONLY configuration.
+add_executable(blue-net-probe
+    tools/net-probe/main.cc
+    tools/net-probe/net_probe.cc
+)
+
+target_include_directories(blue-net-probe PRIVATE src ${CMAKE_SOURCE_DIR})
+
+blue_target_defaults(blue-net-probe)
+
+target_link_libraries(blue-net-probe PRIVATE
+    blue_net blue_sim blue_world_core blue_physics blue_scene blue_prefab blue_core glm::glm
+)
+
+# The dedicated server stops here: its Rust build links blue_sim_c and netcode through the
+# link manifest (<build>/blue_sim_c.link and .syslibs, see cmake/ProjectOptions.cmake).
+if(BLUE_SIM_ONLY)
+    blue_write_link_manifest(blue_sim_c blue_sim_c netcode)
+    option(BLUE_BUILD_TESTS "Build the unit tests" ON)
+    if(BLUE_BUILD_TESTS)
+        enable_testing()
+        add_subdirectory(tests/sim)
+    endif()
+    return()
+endif()
+
+include(Shaders)
+include(SampleAssets)
+
+# Model Context Protocol server (Streamable HTTP on loopback, JSON-RPC, own JSON
+# type) used by the editor. Plain sockets; no editor, ImGui or Vulkan code.
+add_library(blue_mcp STATIC
+    src/mcp/http.cc
+    src/mcp/json.cc
+    src/mcp/protocol.cc
+    src/mcp/server.cc
+    src/mcp/tool.cc
+    src/mcp/internal/socket.cc
+)
+
+target_include_directories(blue_mcp PUBLIC src)
+
+blue_target_defaults(blue_mcp)
+
+find_package(Threads REQUIRED)
+target_link_libraries(blue_mcp
+    PUBLIC blue_core
+    PRIVATE Threads::Threads $<$<PLATFORM_ID:Windows>:ws2_32>
+)
+
+# Image decoding (PNG/JPG/HDR through stb) and ORM packing: no importer code, so
+# the renderer and the game load the HDR environment without assimp.
+add_library(blue_image STATIC
+    src/asset/image_decoder.cc
+)
+
+target_include_directories(blue_image PUBLIC src)
+
+blue_target_defaults(blue_image)
+
+target_link_libraries(blue_image PUBLIC blue_core PRIVATE stb)
+
+add_library(blue_asset STATIC
+    src/asset/animated_model.cc
+    src/asset/internal/material_import.cc
+    src/asset/internal/mesh_import.cc
+    src/asset/model_importer.cc
+    src/asset/texture_loader.cc
+)
+
+target_include_directories(blue_asset PUBLIC src)
+
+blue_target_defaults(blue_asset)
+
+target_link_libraries(blue_asset
+    PUBLIC blue_mesh blue_image blue_core blue_animation blue_material glm::glm
+    PRIVATE assimp::assimp stb
+)
+
+# Cascaded shadow map math for the sun and image-based lighting math
+# (equirect environments, SH9 irradiance, BRDF LUT).
+add_library(blue_lighting STATIC
+    src/lighting/cascades.cc
+    src/lighting/environment.cc
+)
+
+target_include_directories(blue_lighting PUBLIC src)
+
+blue_target_defaults(blue_lighting)
+
+target_link_libraries(blue_lighting PUBLIC blue_image glm::glm)
+
+# Offline content cooking (editor and blue-pack only, never the game): model import into
+# prefabs, BC7/BC5 texture compression with mips, mesh optimisation, collision cooking
+# and animation clip editing. The encoders are built optimised even in Debug (see
+# cmake/Dependencies.cmake).
+add_library(blue_cook STATIC
+    src/cook/clip_tools.cc
+    src/cook/collision_cook.cc
+    src/cook/cook_error.cc
+    src/cook/generated_file.cc
+    src/cook/model_cook.cc
+    src/cook/pose_file.cc
+    src/cook/prefab_edits.cc
+    src/cook/prefab_split.cc
+    src/cook/scene_edits.cc
+    src/cook/texture_cook.cc
+)
+
+target_include_directories(blue_cook PUBLIC src)
+
+blue_target_defaults(blue_cook)
+
+target_link_libraries(blue_cook
+    PUBLIC blue_prefab blue_scene blue_asset blue_physics blue_animation blue_material blue_core glm::glm
+    PRIVATE bc7enc_rdo meshoptimizer
+)
+
+# Headless cooker: imports models into .pbo prefabs and prints their contents.
+add_executable(blue-pack
+    tools/blue-pack/main.cc
+    tools/blue-pack/sample_parts.cc
+    tools/blue-pack/samples.cc
+)
+
+set_target_properties(blue-pack PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+blue_target_defaults(blue-pack)
+
+target_include_directories(blue-pack PRIVATE ${CMAKE_SOURCE_DIR})
+
+target_link_libraries(blue-pack PRIVATE blue_cook blue_prefab blue_physics blue_scene blue_weapon blue_core)
+
+# Cooks the sample prefabs and range.mscn into <build>/bin/assets when the
+# sources or blue-pack change (see cmake/SampleAssets.cmake).
+blue_cook_sample_assets()
+
+# SDL events -> per-frame action state and mouse deltas.
+add_library(blue_input_mapper STATIC
+    src/platform/input_mapper.cc
+)
+
+target_include_directories(blue_input_mapper PUBLIC src)
+
+blue_target_defaults(blue_input_mapper)
+
+target_link_libraries(blue_input_mapper PUBLIC blue_input SDL3::SDL3-static glm::glm)
 
 # The Slang library of the Vulkan SDK for the runtime shader compiler (hot reload), as
 # target blue_slang; empty without hot reload or without a backend that uses Slang.
@@ -663,7 +679,7 @@ target_include_directories(blue_world PUBLIC src)
 blue_target_defaults(blue_world)
 
 target_link_libraries(blue_world
-    PUBLIC blue_prefab blue_scene blue_render blue_physics blue_animation
+    PUBLIC blue_world_core blue_prefab blue_scene blue_render blue_physics blue_animation
            blue_material blue_mesh blue_core glm::glm
 )
 
@@ -671,23 +687,28 @@ target_link_libraries(blue_world
 # weapon pick-ups, weapons built from the part catalogue). No rendering of its
 # own; unit tested.
 add_library(blue_game STATIC
+    src/game/character_animator.cc
+    src/game/character_model.cc
     src/game/inspect_screen_rules.cc
     src/game/part_stash.cc
+    src/game/remote_players.cc
     src/game/scene_pickups.cc
     src/game/weapon_builds.cc
     src/game/weapon_modding.cc
+    src/ui/main_menu_rules.cc
 )
 
 target_include_directories(blue_game PUBLIC src)
 
 blue_target_defaults(blue_game)
 
-target_link_libraries(blue_game PUBLIC blue_world blue_weapon blue_interact blue_input
+target_link_libraries(blue_game PUBLIC blue_world blue_sim blue_weapon blue_interact blue_input
     glm::glm)
 
 add_executable(project-blue
     src/main.cc
     src/app.cc
+    src/ui/main_menu.cc
     src/ui/perf_overlay.cc
     src/ui/weapon_inspect_screen.cc
 )
@@ -715,6 +736,7 @@ target_link_libraries(project-blue PRIVATE
     blue_interact
     blue_weapon
     blue_game
+    blue_net
     blue_world
     blue_prefab
     blue_shader

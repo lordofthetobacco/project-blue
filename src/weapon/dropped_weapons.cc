@@ -66,6 +66,10 @@ asset::Bounds DroppedWeapons::bounds(WeaponDefId def) const {
 }
 
 uint32_t DroppedWeapons::Add(WeaponItem weapon, const ThrowPlan& plan) {
+  // Skips 0 (after wrapping) and ids replicated items hold.
+  while (next_id_ == 0 || Contains(next_id_)) {
+    ++next_id_;
+  }
   DroppedWeapon& item = items_.emplace_back();
   item.id = next_id_++;
   item.weapon = std::move(weapon);
@@ -74,6 +78,36 @@ uint32_t DroppedWeapons::Add(WeaponItem weapon, const ThrowPlan& plan) {
   CreateBody(item, plan.linear_velocity, plan.angular_velocity);
   return item.id;
 }
+
+bool DroppedWeapons::AddReplicated(uint32_t id, WeaponItem weapon,
+                                   const physics::Pose& pose, glm::vec3 scale) {
+  if (id == 0 || Contains(id)) {
+    return false;
+  }
+  DroppedWeapon& item = items_.emplace_back();
+  item.id = id;
+  item.weapon = std::move(weapon);
+  item.pose = pose;
+  item.scale = scale;
+  item.replicated = true;
+  CreateBody(item, glm::vec3(0.0f), glm::vec3(0.0f));
+  return true;
+}
+
+bool DroppedWeapons::SetPose(uint32_t id, const physics::Pose& pose) {
+  const auto found = std::ranges::find(items_, id, &DroppedWeapon::id);
+  if (found == items_.end()) {
+    return false;
+  }
+  found->pose = pose;
+  if (found->body.has_value()) {
+    // A teleport at rest, not a simulated motion.
+    world_.SetBodyState(*found->body, {.pose = pose});
+  }
+  return true;
+}
+
+bool DroppedWeapons::Remove(uint32_t id) { return Take(id).has_value(); }
 
 std::optional<WeaponItem> DroppedWeapons::Take(uint32_t id) {
   const auto found = std::ranges::find(items_, id, &DroppedWeapon::id);
@@ -99,7 +133,8 @@ void DroppedWeapons::Clear() {
 
 void DroppedWeapons::Sync() {
   for (DroppedWeapon& item : items_) {
-    if (item.body.has_value()) {
+    // A replicated item's pose is the one SetPose() gave.
+    if (item.body.has_value() && !item.replicated) {
       item.pose = world_.InterpolatedPose(*item.body);
     }
   }
@@ -161,6 +196,9 @@ void DroppedWeapons::CreateBody(DroppedWeapon& item, glm::vec3 linear_velocity,
     return;
   }
   item.body = body.value();
+  if (item.replicated) {
+    world_.SetKinematic(*item.body, true);
+  }
 }
 
 }  // namespace blue::weapon

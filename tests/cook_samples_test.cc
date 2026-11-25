@@ -179,7 +179,7 @@ TEST_CASE("range.mscn holds the default range and validates") {
   REQUIRE(loaded.ok());
   const scene::SceneData& scene = loaded.value();
   CHECK(scene::ValidateSceneData(scene) == std::nullopt);
-  CHECK(scene.instances.size() == 20);
+  CHECK(scene.instances.size() == 22);  // ... and the two Kyle figures
 
   int targets = 0;
   for (const scene::Instance& instance : scene.instances) {

@@ -82,6 +82,14 @@ struct MeshData {
 // at the poles they continue the neighbouring rings. One submesh, material 0.
 [[nodiscard]] MeshData MakeSphere(int segments);
 
+// Returns an upright capsule standing on the origin: total height `height`
+// (clamped to >= 2 * radius) from y = 0 to y = height, `radius` (clamped to
+// > 0), smooth normals, `segments` slices around Y (clamped to >= 3) and
+// segments / 2 stacks (>= 2, rounded up to even) split between the two
+// hemispheres, joined by a straight band. UVs and tangents as MakeSphere,
+// v running from the top (0) to the bottom (1). One submesh, material 0.
+[[nodiscard]] MeshData MakeCapsule(float radius, float height, int segments);
+
 // Returns the box enclosing `vertices`, or an empty box at the origin.
 [[nodiscard]] Bounds ComputeBounds(const std::vector<Vertex>& vertices);
 

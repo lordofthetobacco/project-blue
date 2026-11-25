@@ -14,6 +14,8 @@
 #include <glm/matrix.hpp>
 #include <glm/vec3.hpp>
 
+#include "core/det_math.h"
+
 namespace blue::interact {
 namespace {
 
@@ -153,7 +155,7 @@ AimMeasure MeasureAim(glm::vec3 eye, glm::vec3 direction,
   const glm::vec3 on_ray = origin + ray * t;
   aim.along = t;
   aim.miss_distance = local.Distance(on_ray);
-  aim.miss_angle = std::atan2(aim.miss_distance, t);
+  aim.miss_angle = core::DetAtan2(aim.miss_distance, t);
   aim.aim_point = local.ToWorld(glm::clamp(on_ray, -local.half, local.half));
   return aim;
 }

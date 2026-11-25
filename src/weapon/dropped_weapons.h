@@ -21,15 +21,19 @@ namespace blue::weapon {
 // A weapon lying in the world (or still flying), with the complete state it
 // was dropped with.
 struct DroppedWeapon {
-  uint32_t id = 0;  // never 0 for a live item; unique for the owner's life
+  uint32_t id = 0;  // never 0 for a live item; unique among live items
   WeaponItem weapon;
-  // Its dynamic body; nullopt if the physics world refused one (logged): the
-  // weapon then stays where it was planned, still drawn and picked up.
+  // Its dynamic body (kinematic for a replicated item); nullopt if the physics
+  // world refused one (logged): the weapon then stays where it was planned,
+  // still drawn and picked up.
   std::optional<physics::BodyId> body;
   // The body's interpolated pose as of the last Sync(); the planned pose
-  // before the first one.
+  // before the first one. For a replicated item: the pose last given.
   physics::Pose pose;
   glm::vec3 scale{1.0f};
+  // Added by AddReplicated(): another simulation (the server) owns it and
+  // moves it with SetPose(); its body is kinematic (pushes, is not pushed).
+  bool replicated = false;
 };
 
 // The weapons the player has dropped: their firearms, their dynamic bodies
@@ -39,10 +43,16 @@ struct DroppedWeapon {
 // Lives in the weapon library because it is gameplay state, and draws
 // nothing: the game draws each item's prefab at Matrix().
 //
+// Ids: Add() numbers items from 1 up, skipping ids in use. A networked
+// session uses replicated ids only (AddReplicated() with the server's ids);
+// a local session uses Add() only. Mixing them is safe (AddReplicated()
+// refuses an id in use, Add() skips one) but a later replicated id may then
+// be refused because a local item took it.
+//
 // Borrows `world`, which must outlive it, and adds and removes its own
 // bodies only. Must be destroyed before the PhysicsRuntime. Allocates in
-// SetShape() and Add() only, nothing per frame. Neither copyable
-// nor movable. Not thread-safe.
+// SetShape(), Add() and AddReplicated() only, nothing per frame. Neither
+// copyable nor movable. Not thread-safe.
 class DroppedWeapons {
  public:
   explicit DroppedWeapons(physics::PhysicsWorld& world) : world_(world) {}
@@ -62,9 +72,23 @@ class DroppedWeapons {
   // loses the weapon: without a body (no shape for its definition, or the
   // world refuses one) it stays at the planned pose.
   uint32_t Add(WeaponItem weapon, const ThrowPlan& plan);
+  // Puts `weapon`, owned by another simulation (the server), into the world
+  // at `pose` under the given `id`, with a kinematic body (it only moves by
+  // SetPose()). Returns false and changes nothing when `id` is
+  // 0 or already in use. Like Add(), never loses the weapon for want of a
+  // body.
+  bool AddReplicated(uint32_t id, WeaponItem weapon, const physics::Pose& pose,
+                     glm::vec3 scale = glm::vec3(1.0f));
+  // Moves item `id` and its body to `pose` at once (a teleport; the body is
+  // left at rest). Returns false for an unknown id. Meant for replicated
+  // items; a local item's dynamic body simulates on from there.
+  bool SetPose(uint32_t id, const physics::Pose& pose);
   // Removes item `id` and its body and returns its weapon; nullopt for an
   // unknown id.
   std::optional<WeaponItem> Take(uint32_t id);
+  // Removes item `id` and its body, discarding its weapon. Returns false for
+  // an unknown id.
+  bool Remove(uint32_t id);
   // Removes every item and its body.
   void Clear();
 
@@ -77,7 +101,9 @@ class DroppedWeapons {
   void RecreateBodies();
 
   [[nodiscard]] std::span<const DroppedWeapon> items() const { return items_; }
+  // The item `id`, or null. Valid until the next non-const call.
   [[nodiscard]] const DroppedWeapon* Find(uint32_t id) const;
+  [[nodiscard]] bool Contains(uint32_t id) const { return Find(id) != nullptr; }
   [[nodiscard]] const DroppedWeapon* FindByBody(physics::BodyId body) const;
 
   // Returns the prefab space -> world matrix `item` is drawn with.
