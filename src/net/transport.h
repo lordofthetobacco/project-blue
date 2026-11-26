@@ -52,7 +52,7 @@ enum class TransportState : uint8_t {
   kConnected,        // Payloads flow.
   kConnectTimedOut,  // The server never answered the handshake.
   kTimedOut,         // An established connection went silent.
-  kDenied,           // The server refused (full, or token reused).
+  kDenied,           // The server answered and refused: it is full.
   kTokenExpired,     // The connect token expired before connecting.
   kInvalidToken,     // The connect token is malformed.
 };
@@ -159,7 +159,9 @@ class Transport {
   Transport& operator=(const Transport&) = delete;
   ~Transport();
 
-  // Starts connecting to `server_address` ("host:port", IPv4 or [IPv6])
+  // Starts connecting to `server_address`, a numeric "a.b.c.d:port" or
+  // "[v6]:port" (netcode_parse_address does no name lookup; resolve host
+  // names first, see net/address_resolver.h; kInvalidAddress otherwise)
   // as `client_id`. Mints the connect token locally from
   // `dev_private_key` with netcode_generate_connect_token: this is the
   // development path until a token service exists, and only works with a

@@ -1889,10 +1889,12 @@ bool App::StartConnect(std::string_view address, std::string_view name) {
   return true;
 }
 
-void App::LeaveOnline(std::string_view reason) {
+void App::LeaveOnline(std::string reason) {
+  // `reason` is often the session's own disconnect reason: owning it here
+  // keeps it valid after the session is destroyed below.
   if (session_ != nullptr) {
     session_->Disconnect(reason.empty() ? std::string_view("left the game")
-                                        : reason);
+                                        : std::string_view(reason));
     session_.reset();
   }
   pause_open_ = false;
@@ -1942,6 +1944,7 @@ void App::UpdateConnecting() {
       LeaveOnline(session_->disconnect_reason());
       break;
     case net::SessionState::kIdle:
+    case net::SessionState::kResolving:
     case net::SessionState::kConnecting:
     case net::SessionState::kHandshaking:
     case net::SessionState::kSyncing:
@@ -2070,8 +2073,8 @@ void App::UpdateOnline(const input::InputFrame& input, float frame_seconds) {
   if (session.state() != net::SessionState::kPlaying ||
       session.player() == nullptr) {
     LeaveOnline(session.disconnect_reason().empty()
-                    ? std::string_view("connection lost")
-                    : std::string_view(session.disconnect_reason()));
+                    ? std::string("connection lost")
+                    : session.disconnect_reason());
     return;
   }
   const net::Replication& replication = session.replication();

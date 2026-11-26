@@ -206,7 +206,7 @@ class App {
   bool StartConnect(std::string_view address, std::string_view name);
   // Ends the connection (if any) and shows the menu: kDisconnected with
   // `reason`, or kMainMenu when `reason` is empty.
-  void LeaveOnline(std::string_view reason);
+  void LeaveOnline(std::string reason);
   // Seconds since the process started: the session's clock.
   [[nodiscard]] double NowSeconds() const;
   // Builds (once per scene) the headless SimWorld whose weapon table and

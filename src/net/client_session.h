@@ -8,8 +8,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/result.h"
+#include "net/address_resolver.h"
 #include "net/clock_sync.h"
 #include "net/interpolation.h"
 #include "net/messages.h"
@@ -35,6 +37,7 @@ namespace blue::net {
 // Where a ClientSession is in its connection.
 enum class SessionState : uint8_t {
   kIdle,          // Never connected.
+  kResolving,     // Looking up a host name; the transport is not started.
   kConnecting,    // netcode.io handshake.
   kHandshaking,   // Sending ClientHello, waiting for the welcome.
   kSyncing,       // Welcomed; measuring the round trip, awaiting own state.
@@ -46,6 +49,52 @@ enum class SessionState : uint8_t {
 [[nodiscard]] std::string_view SessionStateText(SessionState state);
 // Returns a sentence for ServerReject reason `reason` (reject_reason).
 [[nodiscard]] std::string_view RejectReasonText(uint8_t reason);
+
+// Why a connection attempt or session failed (not a deliberate Disconnect).
+enum class FailureCause : uint8_t {
+  kResolveFailed,       // The host name did not resolve.
+  kConnectFailed,       // The transport could not start (bad address, socket).
+  kNoReply,             // The server never answered the netcode handshake.
+  kDenied,              // The server answered and refused the connection.
+  kTokenExpired,        // The connect token expired before connecting.
+  kInvalidToken,        // The connect token is malformed.
+  kConnectionLost,      // An established connection went silent.
+  kNoHandshakeAnswer,   // Netcode connected, no ServerWelcome / ServerReject.
+  kTransportClosed,     // The transport left its states without a cause.
+  kRejectedProtocol,    // ServerReject: another protocol version.
+  kRejectedContent,     // ServerReject: another scene or other weapons.
+  kRejectedFull,        // ServerReject: the server is full.
+  kRejectedName,        // ServerReject: the player name was refused.
+  kRejectedShuttingDown,  // ServerReject: the server is shutting down.
+  kRejectedUnknown,     // ServerReject with an unknown reason code.
+  kTickRateMismatch,    // The server ticks at another rate.
+  kLocalError,          // The client could not use the server's state.
+};
+
+// What FailureText needs to name the failure; unused fields stay empty.
+struct FailureContext {
+  std::string_view typed_address;  // As the user typed it.
+  std::string_view address;        // Numeric ip:port; empty before it is known.
+  std::string_view detail;         // Cause specific text (lookup error, ...).
+  uint64_t content_hash = 0;       // This client's.
+  uint16_t server_protocol_version = 0;  // From a ServerReject.
+};
+
+// The two texts of a failure: a short sentence for the menu ("Disconnected:
+// <reason>.") and the hint lines of what to check, for the log.
+struct FailureText {
+  std::string reason;
+  // One line each: what happened, then one thing to check per line.
+  std::vector<std::string> hint;
+};
+
+// Returns the texts of `cause`. The only place the hints are written.
+[[nodiscard]] FailureText DescribeFailure(FailureCause cause,
+                                          const FailureContext& context);
+// Returns the cause of a transport that left kConnecting / kConnected.
+[[nodiscard]] FailureCause FailureCauseFor(TransportState state);
+// Returns the cause of ServerReject reason `reason` (reject_reason).
+[[nodiscard]] FailureCause FailureCauseForReject(uint8_t reason);
 
 // What the local player is predicted in: a physics world holding the scene
 // (dynamic bodies kinematic), the weapon library and table the server's
@@ -135,8 +184,12 @@ class ClientSession {
 
   // Starts connecting to `address` ("host:port") as `player_name` with the
   // content hash of the local scene and weapons (sim::SimWorld's). Replaces
-  // any previous connection. Fails (state unchanged) on a bad name or
-  // address; the error is a sentence for the menu.
+  // any previous connection. A numeric address (IsNumericAddress) starts
+  // the transport at once (kConnecting) and fails (state unchanged) when
+  // it is bad; a host name is looked up on another thread first
+  // (kResolving) and Update() then starts the transport or, when the
+  // lookup fails, ends the session with a reason. Fails (state unchanged)
+  // on a bad name; the error is a sentence for the menu.
   core::Result<void, std::string> Connect(std::string_view address,
                                           std::string_view player_name,
                                           uint64_t content_hash,
@@ -202,8 +255,21 @@ class ClientSession {
     double time = 0.0;
   };
 
-  // Ends the connection with `reason` without telling the transport twice.
+  // Resets all per-connection state for a new connection in `state`.
+  void BeginConnection(const ClientHello& hello, SessionState state,
+                       double now_seconds);
+  // While resolving: polls the lookup. Returns true once the transport
+  // connect has started (state kConnecting); false while the lookup runs or
+  // when it failed (the session has ended).
+  bool FinishResolve(double now_seconds);
+  // Ends the connection on purpose with `reason` (logged at Info).
   void End(std::string_view reason);
+  // Ends the connection because of `cause`: logs a warning with the state
+  // and timing and a hint, and sets the reason for the menu. Fills in the
+  // addresses and the content hash of `context`.
+  void Fail(FailureCause cause, FailureContext context = {});
+  // Moves to kDisconnected with `reason` and releases the connection.
+  void Finish(std::string_view reason);
   // Handles one received payload.
   void Receive(std::span<const uint8_t> payload, double now_seconds);
   void ReceiveControl(std::span<const uint8_t> payload, double now_seconds);
@@ -234,8 +300,23 @@ class ClientSession {
   SessionState state_ = SessionState::kIdle;
   std::string disconnect_reason_;
 
+  // Host name lookup (kResolving): the lookup and the client id to connect
+  // with once it succeeds.
+  std::unique_ptr<PendingResolve> pending_resolve_;
+  uint64_t resolve_client_id_ = 0;
+
+  // The server as typed and as dialled (numeric; empty until resolved), for
+  // logs. attempt_start_ is when Connect() was called, last_now_ the newest
+  // time the session saw.
+  std::string typed_address_;
+  std::string numeric_address_;
+  double attempt_start_ = 0.0;
+  double last_now_ = 0.0;
+  bool decode_error_logged_ = false;  // Once per connection.
+
   // Handshake.
   ClientHello hello_;
+  // When the transport connect started (not the host name lookup).
   double connect_time_ = 0.0;
   double last_hello_time_ = -1.0;
   std::optional<uint8_t> player_id_;

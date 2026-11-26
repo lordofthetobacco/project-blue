@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glm/geometric.hpp>
@@ -329,8 +330,143 @@ TEST_CASE("session reports a content mismatch reject") {
   CHECK_FALSE(ConnectAndPlay(loop, kAddress));
   CHECK(client.session->state() == SessionState::kDisconnected);
   CHECK(client.session->disconnect_reason() ==
-        RejectReasonText(reject_reason::kContentMismatch));
+        std::string("rejected by ") + kAddress + ": " +
+            std::string(RejectReasonText(reject_reason::kContentMismatch)));
   CHECK(server.rejected_hellos() >= 1);
+}
+
+TEST_CASE("session names the dialled address when nobody answers") {
+  NetcodeRuntime netcode;
+  REQUIRE(netcode.ok());
+  netcode_log_level(NETCODE_LOG_LEVEL_NONE);
+  physics::PhysicsRuntime runtime;
+  sim::testing::TestScene scene;
+  ClientRig client(runtime, scene, NetworkConditions{});
+  ClientSession& session = *client.session;
+  // Nothing listens on this port.
+  constexpr char kAddress[] = "127.0.0.1:47419";
+  REQUIRE(session.Connect(kAddress, "tester", 1, 1, 0.0).ok());
+  for (int i = 0; i < 2000 && session.state() != SessionState::kDisconnected;
+       ++i) {
+    session.Update(i * kFrameSeconds);
+    netcode_sleep(kRealSleepSeconds);
+  }
+  CHECK(session.state() == SessionState::kDisconnected);
+  CHECK(session.disconnect_reason() ==
+        std::string("no reply from ") + kAddress);
+}
+
+TEST_CASE("failure texts name the cause and the address to check") {
+  const FailureContext context{.typed_address = "game.example:27015",
+                               .address = "203.0.113.7:27015",
+                               .content_hash = 0xABCDEF};
+  const FailureText none = DescribeFailure(FailureCause::kNoReply, context);
+  CHECK(none.reason == "no reply from 203.0.113.7:27015");
+  const auto has = [](const FailureText& text, std::string_view needle) {
+    return std::any_of(text.hint.begin(), text.hint.end(),
+                       [&](const std::string& line) {
+                         return line.find(needle) != std::string::npos;
+                       });
+  };
+  CHECK(none.hint.size() >= 6);
+  CHECK(has(none, "BLUE_PUBLIC_ADDR must be exactly 203.0.113.7:27015"));
+  CHECK(has(none, "BLUE_PRIVATE_KEY"));
+  CHECK(has(none, "TCP"));
+  CHECK(has(none, "still connected"));
+  CHECK(has(none, "BLUE_NETCODE_LOG=3"));
+  for (const std::string& line : none.hint) {
+    CHECK(line.size() < 200);
+  }
+  CHECK(has(DescribeFailure(FailureCause::kDenied, context),
+            "BLUE_MAX_PLAYERS"));
+
+  const FailureText silent =
+      DescribeFailure(FailureCause::kNoHandshakeAnswer, context);
+  CHECK(silent.reason != none.reason);
+  CHECK(has(silent, "ClientHello"));
+
+  const FailureText content =
+      DescribeFailure(FailureCause::kRejectedContent, context);
+  CHECK(has(content, "0000000000abcdef"));
+
+  CHECK(FailureCauseFor(TransportState::kConnectTimedOut) ==
+        FailureCause::kNoReply);
+  CHECK(FailureCauseFor(TransportState::kTimedOut) ==
+        FailureCause::kConnectionLost);
+  CHECK(FailureCauseFor(TransportState::kDenied) == FailureCause::kDenied);
+  CHECK(FailureCauseForReject(reject_reason::kServerFull) ==
+        FailureCause::kRejectedFull);
+  CHECK(FailureCauseForReject(99) == FailureCause::kRejectedUnknown);
+}
+
+TEST_CASE("session connects to a host name through the resolver") {
+  NetcodeRuntime netcode;
+  REQUIRE(netcode.ok());
+  netcode_log_level(NETCODE_LOG_LEVEL_NONE);
+  constexpr char kServerAddress[] = "127.0.0.1:47414";
+  physics::PhysicsRuntime runtime;
+  sim::testing::TestScene scene;
+  testing::TestServer server(runtime, scene, kServerAddress, 0.0);
+  if (!server.ok()) {
+    MESSAGE("skipped: cannot bind ", kServerAddress);
+    return;
+  }
+  ClientRig client(runtime, scene, NetworkConditions{});
+  Loop loop{.server = server, .client = client};
+  ClientSession& session = *client.session;
+  REQUIRE(session
+              .Connect("localhost:47414", "tester",
+                       client.reference->content_hash(), 0x1234, loop.time)
+              .ok());
+  CHECK((session.state() == SessionState::kResolving ||
+         session.state() == SessionState::kConnecting));
+  CHECK(loop.RunUntilPlaying(600));
+  CHECK(session.state() == SessionState::kPlaying);
+  CHECK(session.player_id() == testing::TestServer::kClientPlayer);
+}
+
+TEST_CASE("session ends with a reason when a host name does not resolve") {
+  NetcodeRuntime netcode;
+  REQUIRE(netcode.ok());
+  netcode_log_level(NETCODE_LOG_LEVEL_NONE);
+  physics::PhysicsRuntime runtime;
+  sim::testing::TestScene scene;
+  ClientRig client(runtime, scene, NetworkConditions{});
+  ClientSession& session = *client.session;
+  REQUIRE(session.Connect("name.invalid:27015", "tester", 1, 1, 0.0).ok());
+  CHECK(session.state() == SessionState::kResolving);
+  // ".invalid" never resolves (RFC 6761); give the lookup a bounded time.
+  for (int i = 0; i < 5000 && session.state() == SessionState::kResolving;
+       ++i) {
+    session.Update(i * kFrameSeconds);
+    netcode_sleep(kRealSleepSeconds);
+  }
+  CHECK(session.state() == SessionState::kDisconnected);
+  CHECK(session.disconnect_reason().find("name.invalid:27015") !=
+        std::string::npos);
+  CHECK(session.disconnect_reason().find("cannot resolve") !=
+        std::string::npos);
+}
+
+TEST_CASE("session drops a pending lookup on disconnect and reconnect") {
+  NetcodeRuntime netcode;
+  REQUIRE(netcode.ok());
+  netcode_log_level(NETCODE_LOG_LEVEL_NONE);
+  physics::PhysicsRuntime runtime;
+  sim::testing::TestScene scene;
+  ClientRig client(runtime, scene, NetworkConditions{});
+  ClientSession& session = *client.session;
+  REQUIRE(session.Connect("name.invalid:27015", "tester", 1, 1, 0.0).ok());
+  session.Disconnect("cancelled");
+  CHECK(session.state() == SessionState::kDisconnected);
+  CHECK(session.disconnect_reason() == "cancelled");
+  session.Update(1.0);  // Does nothing, and must not touch the dropped lookup.
+  CHECK(session.state() == SessionState::kDisconnected);
+  REQUIRE(session.Connect("name.invalid:27015", "tester", 1, 1, 2.0).ok());
+  CHECK(session.state() == SessionState::kResolving);
+  CHECK(session.disconnect_reason().empty());
+  REQUIRE(session.Connect("127.0.0.1:47415", "tester", 1, 1, 3.0).ok());
+  CHECK(session.state() == SessionState::kConnecting);
 }
 
 TEST_CASE("session rejects a bad player name before connecting") {

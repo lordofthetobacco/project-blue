@@ -272,10 +272,14 @@ blue_target_defaults(blue_sim_c)
 
 target_link_libraries(blue_sim_c PRIVATE blue_sim)
 
+# std::thread users (the address resolver, the MCP server) in every configuration.
+find_package(Threads REQUIRED)
+
 # Client networking without rendering: the wire codecs of docs/netcode/protocol.md (mirroring
 # crates/blue-protocol in the blue-server repository bit for bit) and the netcode.io client
 # transport. netcode stays private: no netcode type appears in src/net headers.
 add_library(blue_net STATIC
+    src/net/address_resolver.cc
     src/net/bit_stream.cc
     src/net/client_session.cc
     src/net/clock_sync.cc
@@ -303,7 +307,7 @@ blue_target_defaults(blue_net)
 
 target_link_libraries(blue_net
     PUBLIC blue_sim blue_core glm::glm
-    PRIVATE netcode
+    PRIVATE netcode Threads::Threads $<$<PLATFORM_ID:Windows>:ws2_32>
 )
 
 # The networked client without a window (tools/net-probe): connects the real
@@ -352,7 +356,6 @@ target_include_directories(blue_mcp PUBLIC src)
 
 blue_target_defaults(blue_mcp)
 
-find_package(Threads REQUIRED)
 target_link_libraries(blue_mcp
     PUBLIC blue_core
     PRIVATE Threads::Threads $<$<PLATFORM_ID:Windows>:ws2_32>

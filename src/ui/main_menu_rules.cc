@@ -68,6 +68,12 @@ std::optional<std::string> ConnectProblem(std::string_view address,
   if (trimmed.empty() || colon == std::string_view::npos || colon == 0) {
     return "Enter the server address as host:port.";
   }
+  // A colon in the host is only valid inside the brackets of an IPv6 address.
+  const std::string_view host = trimmed.substr(0, colon);
+  if (host.find(':') != std::string_view::npos &&
+      (host.front() != '[' || host.back() != ']')) {
+    return "Write an IPv6 address in brackets: [address]:port.";
+  }
   const std::optional<int> port = core::ParseInt(trimmed.substr(colon + 1));
   if (!port || *port < 1 || *port > 65535) {
     return "The port must be a number from 1 to 65535.";

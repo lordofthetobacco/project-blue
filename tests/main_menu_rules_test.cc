@@ -81,6 +81,9 @@ TEST_CASE("connect requests are checked") {
   CHECK(ConnectProblem("host:0", "alice").has_value());
   CHECK(ConnectProblem("host:65536", "alice").has_value());
   CHECK(ConnectProblem("host:port", "alice").has_value());
+  CHECK_FALSE(ConnectProblem("play.example.com:27015", "alice").has_value());
+  CHECK(ConnectProblem("::1:27015", "alice").has_value());
+  CHECK(ConnectProblem("fe80::1", "alice").has_value());
 }
 
 }  // namespace

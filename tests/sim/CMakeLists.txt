@@ -19,6 +19,7 @@ add_executable(blue_sim_tests
     firearm_state_test.cc
     loadout_state_test.cc
     movement_test.cc
+    net_address_resolver_test.cc
     net_bit_stream_test.cc
     net_garbage_test.cc
     net_golden_vectors_test.cc

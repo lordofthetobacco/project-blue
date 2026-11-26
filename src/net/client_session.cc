@@ -12,10 +12,12 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "camera/look.h"
 #include "core/log.h"
 #include "core/result.h"
+#include "net/address_resolver.h"
 #include "net/clock_sync.h"
 #include "net/interpolation.h"
 #include "net/messages.h"
@@ -53,6 +55,8 @@ std::string_view SessionStateText(SessionState state) {
   switch (state) {
     case SessionState::kIdle:
       return "idle";
+    case SessionState::kResolving:
+      return "resolving";
     case SessionState::kConnecting:
       return "connecting";
     case SessionState::kHandshaking:
@@ -84,6 +88,153 @@ std::string_view RejectReasonText(uint8_t reason) {
   }
 }
 
+FailureCause FailureCauseFor(TransportState state) {
+  switch (state) {
+    case TransportState::kConnectTimedOut:
+      return FailureCause::kNoReply;
+    case TransportState::kTimedOut:
+      return FailureCause::kConnectionLost;
+    case TransportState::kDenied:
+      return FailureCause::kDenied;
+    case TransportState::kTokenExpired:
+      return FailureCause::kTokenExpired;
+    case TransportState::kInvalidToken:
+      return FailureCause::kInvalidToken;
+    case TransportState::kDisconnected:
+    case TransportState::kConnecting:
+    case TransportState::kConnected:
+      break;
+  }
+  return FailureCause::kTransportClosed;
+}
+
+FailureCause FailureCauseForReject(uint8_t reason) {
+  switch (reason) {
+    case reject_reason::kProtocolMismatch:
+      return FailureCause::kRejectedProtocol;
+    case reject_reason::kContentMismatch:
+      return FailureCause::kRejectedContent;
+    case reject_reason::kServerFull:
+      return FailureCause::kRejectedFull;
+    case reject_reason::kBadName:
+      return FailureCause::kRejectedName;
+    case reject_reason::kShuttingDown:
+      return FailureCause::kRejectedShuttingDown;
+    default:
+      return FailureCause::kRejectedUnknown;
+  }
+}
+
+FailureText DescribeFailure(FailureCause cause,
+                            const FailureContext& context) {
+  const std::string_view address =
+      context.address.empty() ? context.typed_address : context.address;
+  switch (cause) {
+    case FailureCause::kResolveFailed:
+      return {std::format("cannot resolve '{}': {}", context.typed_address,
+                          context.detail),
+              {"The host name did not resolve.",
+               "Check the host name for typos.",
+               "Check that this machine has a working DNS, or connect by "
+               "numeric ip:port."}};
+    case FailureCause::kConnectFailed:
+      return {std::format("cannot connect to '{}': {}", context.typed_address,
+                          context.detail),
+              {"The client could not start connecting.",
+               "Check that the address is a valid ip:port.",
+               "Check that a local UDP socket can be opened."}};
+    case FailureCause::kNoReply:
+      return {
+          std::format("no reply from {}", address),
+          {std::format("No reply over UDP from {}. A netcode server drops a "
+                       "connection request silently when:",
+                       address),
+           "(a) the packet never arrives: the server is not running, the IP "
+           "or port is wrong, the port is published as TCP instead of UDP, "
+           "or a firewall blocks it;",
+           std::format("(b) the connect token does not name the server's own "
+                       "public address: the server's BLUE_PUBLIC_ADDR must be "
+                       "exactly {};",
+                       address),
+           "(c) the token was sealed with another private key: the server's "
+           "BLUE_PRIVATE_KEY differs from this client's development key;",
+           "(d) the protocol id differs;",
+           "(e) a client with this id or from this address is still "
+           "connected on the server (a previous session that has not timed "
+           "out yet), or the token was already used: wait a few seconds and "
+           "retry.",
+           "To find out which one: run the server with BLUE_NETCODE_LOG=3 "
+           "(flag --netcode-log 3); it prints \"server ignored connection "
+           "request. <cause>\" for each dropped request."}};
+    case FailureCause::kDenied:
+      return {std::format("{} refused the connection", address),
+              {"The server answered and refused: all its client slots are "
+               "taken (BLUE_MAX_PLAYERS)."}};
+    case FailureCause::kTokenExpired:
+      return {"the connect token expired",
+              {"The token's lifetime ran out before the connection was made.",
+               "Check for a slow network or a clock problem on this "
+               "machine."}};
+    case FailureCause::kInvalidToken:
+      return {"the connect token was rejected",
+              {"The connect token is malformed: a client bug; report it."}};
+    case FailureCause::kConnectionLost:
+      return {std::format("{} stopped answering", address),
+              {"An established connection went silent.",
+               "Check that the server is still running (see its log).",
+               "Check that the network did not drop."}};
+    case FailureCause::kNoHandshakeAnswer:
+      return {std::format("{} did not answer the handshake", address),
+              {"The server accepted the netcode connection but never "
+               "answered ClientHello with ServerWelcome or ServerReject.",
+               "Check the server log.",
+               "Check that the server runs the same protocol version; an "
+               "older one may drop the hello."}};
+    case FailureCause::kTransportClosed:
+      return {std::format("the connection to {} closed", address),
+              {"The transport closed without a reason; check the server."}};
+    case FailureCause::kRejectedProtocol:
+      return {std::format("rejected by {}: {} (server {}, client {})", address,
+                          RejectReasonText(reject_reason::kProtocolMismatch),
+                          context.server_protocol_version, kProtocolVersion),
+              {"Client and server are different builds.",
+               "Update the one with the older protocol version."}};
+    case FailureCause::kRejectedContent:
+      return {std::format("rejected by {}: {}", address,
+                          RejectReasonText(reject_reason::kContentMismatch)),
+              {std::format("This client's content hash is {:016x}.",
+                           context.content_hash),
+               "The server must run the same cooked scene and weapons."}};
+    case FailureCause::kRejectedFull:
+      return {std::format("rejected by {}: {}", address,
+                          RejectReasonText(reject_reason::kServerFull)),
+              {"All player slots are taken; wait for a free slot."}};
+    case FailureCause::kRejectedName:
+      return {std::format("rejected by {}: {}", address,
+                          RejectReasonText(reject_reason::kBadName)),
+              {"Pick another player name (the server found it invalid or "
+               "already taken)."}};
+    case FailureCause::kRejectedShuttingDown:
+      return {std::format("rejected by {}: {}", address,
+                          RejectReasonText(reject_reason::kShuttingDown)),
+              {"The server is stopping or restarting; try again shortly."}};
+    case FailureCause::kRejectedUnknown:
+      return {std::format("rejected by {}: {}", address, RejectReasonText(0)),
+              {"The server sent a reject reason this client does not know.",
+               "The server is probably newer."}};
+    case FailureCause::kTickRateMismatch:
+      return {std::string(context.detail),
+              {"Client and server are different builds; run matching "
+               "versions."}};
+    case FailureCause::kLocalError:
+      return {std::string(context.detail),
+              {"The client could not use the server's state.",
+               "Check that client and server run the same content and "
+               "version."}};
+  }
+  return {"unknown failure", {}};
+}
+
 ClientSession::ClientSession(const SessionConfig& config,
                              const PredictionContext& context)
     : config_(config),
@@ -113,23 +264,53 @@ ConnectResult ClientSession::Connect(std::string_view address,
   if (!runtime_.ok()) {
     return ConnectResult::Error("Networking is not available.");
   }
-  transport_.Update(now_seconds);
-  const core::Result<void, TransportError> connected =
-      transport_.Connect(address, client_id, config_.connect_key);
-  if (!connected.ok()) {
-    return ConnectResult::Error(
-        std::format("Cannot connect to '{}': {}.", address,
-                    TransportErrorText(connected.error())));
+  const ClientHello hello{.protocol_version = kProtocolVersion,
+                          .content_hash = content_hash,
+                          .name = name.value()};
+  core::log::Info(
+      "Connecting to '{}' as '{}' (protocol {}, content {:016x}, client "
+      "{:016x})",
+      address, player_name, kProtocolVersion, content_hash, client_id);
+  if (IsNumericAddress(address)) {
+    transport_.Update(now_seconds);
+    const core::Result<void, TransportError> connected =
+        transport_.Connect(address, client_id, config_.connect_key);
+    if (!connected.ok()) {
+      core::log::Warn("Cannot connect to '{}': {}", address,
+                      TransportErrorText(connected.error()));
+      return ConnectResult::Error(
+          std::format("Cannot connect to '{}': {}.", address,
+                      TransportErrorText(connected.error())));
+    }
+    BeginConnection(hello, SessionState::kConnecting, now_seconds);
+    typed_address_ = std::string(address);
+    numeric_address_ = typed_address_;
+    return ConnectResult::Ok();
   }
 
+  // A host name: look it up off the frame loop. The old connection ends now.
+  transport_.Disconnect();
+  BeginConnection(hello, SessionState::kResolving, now_seconds);
+  typed_address_ = std::string(address);
+  pending_resolve_ = std::make_unique<PendingResolve>(typed_address_);
+  resolve_client_id_ = client_id;
+  return ConnectResult::Ok();
+}
+
+void ClientSession::BeginConnection(const ClientHello& hello,
+                                    SessionState state, double now_seconds) {
   prediction_.reset();
   player_.reset();
-  hello_ = ClientHello{.protocol_version = kProtocolVersion,
-                       .content_hash = content_hash,
-                       .name = name.value()};
-  state_ = SessionState::kConnecting;
+  pending_resolve_.reset();
+  hello_ = hello;
+  state_ = state;
   disconnect_reason_.clear();
   connect_time_ = now_seconds;
+  attempt_start_ = now_seconds;
+  last_now_ = now_seconds;
+  typed_address_.clear();
+  numeric_address_.clear();
+  decode_error_logged_ = false;
   last_hello_time_ = -1.0;
   player_id_.reset();
   welcome_.reset();
@@ -154,7 +335,6 @@ ConnectResult ClientSession::Connect(std::string_view address,
   window_replays_start_ = 0;
   snapshots_per_second_ = 0.0;
   replays_per_second_ = 0.0;
-  return ConnectResult::Ok();
 }
 
 void ClientSession::End(std::string_view reason) {
@@ -162,9 +342,34 @@ void ClientSession::End(std::string_view reason) {
     return;
   }
   core::log::Info("Disconnected: {}", reason);
+  Finish(reason);
+}
+
+void ClientSession::Fail(FailureCause cause, FailureContext context) {
+  if (state_ == SessionState::kIdle || state_ == SessionState::kDisconnected) {
+    return;
+  }
+  context.typed_address = typed_address_;
+  context.address = numeric_address_;
+  context.content_hash = hello_.content_hash;
+  FailureText text = DescribeFailure(cause, context);
+  core::log::Warn(
+      "Connection failed: {} (state {}, server {}, {:.1f} s after connecting "
+      "began, transport {})",
+      text.reason, SessionStateText(state_),
+      numeric_address_.empty() ? "unresolved" : numeric_address_,
+      last_now_ - attempt_start_, TransportStateText(transport_.state()));
+  for (size_t i = 0; i < text.hint.size(); ++i) {
+    core::log::Warn("{}{}", i == 0 ? "Hint: " : "  ", text.hint[i]);
+  }
+  Finish(text.reason);
+}
+
+void ClientSession::Finish(std::string_view reason) {
   state_ = SessionState::kDisconnected;
   disconnect_reason_ = std::string(reason);
   transport_.Disconnect();
+  pending_resolve_.reset();
   prediction_.reset();
   player_.reset();
 }
@@ -175,20 +380,54 @@ uint32_t ClientSession::next_tick() const {
   return prediction_ ? prediction_->next_tick() : 0;
 }
 
+bool ClientSession::FinishResolve(double now_seconds) {
+  const std::optional<core::Result<std::string, ResolveError>> resolved =
+      pending_resolve_->Poll();
+  if (!resolved) {
+    return false;
+  }
+  if (!resolved->ok()) {
+    Fail(FailureCause::kResolveFailed,
+         {.detail = ResolveErrorText(resolved->error())});
+    return false;
+  }
+  numeric_address_ = resolved->value();
+  core::log::Info("Resolved '{}' to {}", typed_address_, numeric_address_);
+  transport_.Update(now_seconds);
+  const core::Result<void, TransportError> connected = transport_.Connect(
+      resolved->value(), resolve_client_id_, config_.connect_key);
+  if (!connected.ok()) {
+    Fail(FailureCause::kConnectFailed,
+         {.detail = TransportErrorText(connected.error())});
+    return false;
+  }
+  pending_resolve_.reset();
+  state_ = SessionState::kConnecting;
+  connect_time_ = now_seconds;  // The handshake clock starts here.
+  return true;
+}
+
 void ClientSession::Update(double now_seconds) {
   if (state_ == SessionState::kIdle || state_ == SessionState::kDisconnected) {
+    return;
+  }
+  last_now_ = now_seconds;
+  if (state_ == SessionState::kResolving && !FinishResolve(now_seconds)) {
     return;
   }
   transport_.Update(now_seconds);
   const TransportState transport = transport_.state();
   if (transport != TransportState::kConnected &&
       transport != TransportState::kConnecting) {
-    End(std::format("connection {}", TransportStateText(transport)));
+    Fail(FailureCauseFor(transport));
     return;
   }
   if (transport == TransportState::kConnected &&
       state_ == SessionState::kConnecting) {
     state_ = SessionState::kHandshaking;
+    core::log::Info(
+        "Netcode connected to {} after {:.1f} s; sending ClientHello",
+        numeric_address_, now_seconds - attempt_start_);
   }
 
   while (std::optional<Transport::Payload> payload = transport_.Receive()) {
@@ -201,7 +440,9 @@ void ClientSession::Update(double now_seconds) {
   if (state_ == SessionState::kConnecting ||
       state_ == SessionState::kHandshaking) {
     if (now_seconds - connect_time_ > config_.handshake_timeout_seconds) {
-      End("the server did not answer");
+      Fail(state_ == SessionState::kConnecting
+               ? FailureCause::kNoReply
+               : FailureCause::kNoHandshakeAnswer);
       return;
     }
   }
@@ -257,17 +498,29 @@ void ClientSession::ReceiveControl(std::span<const uint8_t> payload,
   const WireResult<Message> message = DecodeControl(payload);
   if (!message.ok()) {
     ++counters_.decode_errors;
+    if (state_ == SessionState::kHandshaking && !decode_error_logged_) {
+      decode_error_logged_ = true;  // Once per connection.
+      core::log::Warn(
+          "Control message from {} not decoded during the handshake: {} "
+          "(further ones are only counted)",
+          numeric_address_, WireErrorText(message.error()));
+    }
     return;
   }
   if (const auto* reject = std::get_if<ServerReject>(&message.value())) {
     if (state_ == SessionState::kHandshaking) {
-      std::string reason(RejectReasonText(reject->reason));
-      if (reject->reason == reject_reason::kProtocolMismatch) {
-        reason +=
-            std::format(" (server {}, client {})",
-                        reject->server_protocol_version, kProtocolVersion);
-      }
-      End(reason);
+      core::log::Warn("ServerReject from {}: reason {} ({}), server protocol {}",
+                      numeric_address_, reject->reason,
+                      RejectReasonText(reject->reason),
+                      reject->server_protocol_version);
+      Fail(FailureCauseForReject(reject->reason),
+           {.server_protocol_version = reject->server_protocol_version});
+    } else {
+      core::log::Warn(
+          "Ignored ServerReject (reason {}, {}) in state {}: the session is "
+          "not waiting for a welcome",
+          reject->reason, RejectReasonText(reject->reason),
+          SessionStateText(state_));
     }
     return;
   }
@@ -276,8 +529,10 @@ void ClientSession::ReceiveControl(std::span<const uint8_t> payload,
     return;  // Repeated welcomes after the first are expected.
   }
   if (welcome->tick_rate != kDefaultTickRate) {
-    End(std::format("the server ticks at {} Hz; this client needs {} Hz",
-                    welcome->tick_rate, kDefaultTickRate));
+    const std::string detail =
+        std::format("the server ticks at {} Hz; this client needs {} Hz",
+                    welcome->tick_rate, kDefaultTickRate);
+    Fail(FailureCause::kTickRateMismatch, {.detail = detail});
     return;
   }
   welcome_ = *welcome;
@@ -319,7 +574,8 @@ void ClientSession::ReceiveSnapshot(std::span<const uint8_t> payload,
   }
   ++counters_.applied;
   if (!reliable_.ReceiveSection(snapshot_.reliable).ok()) {
-    End("protocol violation (reliable window)");
+    Fail(FailureCause::kLocalError,
+         {.detail = "protocol violation (reliable window)"});
     return;
   }
   while (std::optional<Message> message = reliable_.Pop()) {
@@ -393,7 +649,8 @@ void ClientSession::ApplyOwnState(uint32_t server_tick,
 bool ClientSession::CreatePlayer(const WirePlayerState& own) {
   if (context_.physics == nullptr || context_.library == nullptr ||
       context_.table == nullptr || !player_id_) {
-    End("no world to predict the player in");
+    Fail(FailureCause::kLocalError,
+         {.detail = "no world to predict the player in"});
     return false;
   }
   auto created = sim::PlayerSim::Create(
@@ -401,7 +658,8 @@ bool ClientSession::CreatePlayer(const WirePlayerState& own) {
       own.position, camera::LookAngles{.yaw = own.yaw, .pitch = own.pitch},
       weapon::Loadout(), context_.character, context_.tuning);
   if (!created.ok()) {
-    End("the player character could not be created");
+    Fail(FailureCause::kLocalError,
+         {.detail = "the player character could not be created"});
     return false;
   }
   player_ = std::move(created).value();
@@ -433,7 +691,8 @@ void ClientSession::TryStartPlaying(double now_seconds) {
   idle.pitch = sync_own_->pitch;
   PredictRepeatsUntil(start, idle);
   if (!restored) {
-    End("the server's weapons are unknown to this client");
+    Fail(FailureCause::kLocalError,
+         {.detail = "the server's weapons are unknown to this client"});
     return;
   }
   sync_own_.reset();
