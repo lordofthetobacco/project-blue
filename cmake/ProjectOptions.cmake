@@ -272,11 +272,12 @@ endfunction()
 # (the targets themselves and their transitive static dependencies), one per line, each
 # before the archives it depends on (a valid static link order); and <build>/<name>.syslibs:
 # the system libraries to link after them, one bare name per line (stdc++, m, pthread, ...),
-# including the C++ runtime a C link driver would leave out. For linkers outside CMake (the
-# Rust dedicated server's build.rs). The archives are found by walking the targets'
-# INTERFACE_LINK_LIBRARIES at configure time and their paths come from $<TARGET_FILE> at
-# generate time, so the manifest follows the CMake target graph. Multi-config generators
-# write <build>/<config>/<name>.link and .syslibs.
+# including the C++ runtime a C link driver would leave out; an Apple framework is written
+# as framework:<name> (weak frameworks too: the manifest does not keep the difference). For
+# linkers outside CMake (the Rust dedicated server's build.rs). The archives are found by
+# walking the targets' INTERFACE_LINK_LIBRARIES at configure time and their paths come from
+# $<TARGET_FILE> at generate time, so the manifest follows the CMake target graph.
+# Multi-config generators write <build>/<config>/<name>.link and .syslibs.
 function(blue_write_link_manifest name)
     set_property(GLOBAL PROPERTY blue_link_visited "")
     set_property(GLOBAL PROPERTY blue_link_archives "")
@@ -323,7 +324,16 @@ function(blue_link_manifest_visit item)
     endif()
 
     if(NOT TARGET "${item}")
-        if(item MATCHES "^\\$<")
+        if(item MATCHES "^\\$<LINK_LIBRARY:(WEAK_)?FRAMEWORK,(.+)>$")
+            # Apple frameworks (SDL3 on macOS). $<LINK_LIBRARY:...> evaluates only in a
+            # target's link libraries, not in file(GENERATE), so it is spelled out here.
+            string(REPLACE "," ";" frameworks "${CMAKE_MATCH_2}")
+            list(TRANSFORM frameworks PREPEND "framework:")
+            set_property(GLOBAL APPEND PROPERTY blue_link_syslibs ${frameworks})
+            return()
+        elseif(item MATCHES "^\\$<LINK_(LIBRARY|GROUP):")
+            message(FATAL_ERROR "blue_write_link_manifest: unsupported link feature '${item}'")
+        elseif(item MATCHES "^\\$<")
             # Conditional (e.g. $<$<PLATFORM_ID:Windows>:ws2_32>), left to file(GENERATE).
             set(lib "${item}")
         elseif(item MATCHES "^-pthreads?$")
