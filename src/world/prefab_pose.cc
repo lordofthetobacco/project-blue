@@ -1,5 +1,6 @@
 #include "world/prefab_pose.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -54,6 +55,17 @@ void PrefabPose::ResetToRest() {
   fired_.clear();
   const animation::Hierarchy& hierarchy = cache_->prefab(prefab_).hierarchy;
   animation::ResetToRest(hierarchy, local_);
+  animation::ComputeWorldMatrices(hierarchy, local_, world_);
+}
+
+void PrefabPose::SetLocalPose(std::span<const animation::Transform> local) {
+  clip_ = -1;
+  player_ = animation::ClipPlayer();
+  fired_.clear();
+  const animation::Hierarchy& hierarchy = cache_->prefab(prefab_).hierarchy;
+  animation::ResetToRest(hierarchy, local_);
+  const size_t count = std::min(local_.size(), local.size());
+  std::copy_n(local.begin(), count, local_.begin());
   animation::ComputeWorldMatrices(hierarchy, local_, world_);
 }
 

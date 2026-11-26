@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -26,6 +27,26 @@ constexpr std::array<WeaponSlot, kWeaponSlotCount> kDrawAfterDrop{
 };
 
 }  // namespace
+
+bool NearlyEqual(const LoadoutState& a, const LoadoutState& b,
+                 float tolerance) {
+  if (a.active != b.active || a.selected != b.selected ||
+      a.wait_for_release != b.wait_for_release ||
+      std::abs(a.raise - b.raise) > tolerance) {
+    return false;
+  }
+  for (size_t i = 0; i < a.slots.size(); ++i) {
+    const LoadoutSlotState& slot_a = a.slots[i];
+    const LoadoutSlotState& slot_b = b.slots[i];
+    if (slot_a.present != slot_b.present ||
+        slot_a.scope_magnification != slot_b.scope_magnification ||
+        slot_a.scope_zero != slot_b.scope_zero ||
+        !NearlyEqual(slot_a.firearm, slot_b.firearm, tolerance)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 WeaponSlot SlotFor(WeaponKind kind) {
   return kSlotForKind[static_cast<size_t>(kind)];
@@ -116,6 +137,56 @@ PickUpResult Loadout::PickUp(WeaponItem weapon) {
     (void)Select(target);
   }
   return result;
+}
+
+LoadoutState Loadout::SaveState() const {
+  LoadoutState state{.active = active_,
+                     .selected = selected_,
+                     .raise = raise_,
+                     .wait_for_release = wait_for_release_};
+  for (size_t i = 0; i < slots_.size(); ++i) {
+    const std::optional<WeaponItem>& held = slots_[i];
+    if (held.has_value()) {
+      state.slots[i] = {.present = true,
+                        .firearm = held->firearm.SaveState(),
+                        .scope_magnification = held->scope_magnification,
+                        .scope_zero = held->scope_zero};
+    }
+  }
+  return state;
+}
+
+bool Loadout::RestoreState(const LoadoutState& state) {
+  bool matched = true;
+  for (size_t i = 0; i < slots_.size(); ++i) {
+    std::optional<WeaponItem>& held = slots_[i];
+    const LoadoutSlotState& saved = state.slots[i];
+    if (held.has_value() != saved.present) {
+      matched = false;
+      continue;
+    }
+    if (held.has_value()) {
+      held->firearm.RestoreState(saved.firearm);
+      held->scope_magnification = saved.scope_magnification;
+      held->scope_zero = saved.scope_zero;
+    }
+  }
+  // Keeps the invariants: both name occupied slots, and selected_ is nullopt
+  // only together with active_.
+  const auto empty_or_occupied = [this](std::optional<WeaponSlot> target) {
+    return !target.has_value() || slot(*target).has_value();
+  };
+  const bool switch_valid =
+      empty_or_occupied(state.active) && empty_or_occupied(state.selected) &&
+      (state.selected.has_value() || !state.active.has_value());
+  if (!switch_valid) {
+    return false;
+  }
+  active_ = state.active;
+  selected_ = state.selected;
+  raise_ = state.raise;
+  wait_for_release_ = state.wait_for_release;
+  return matched;
 }
 
 float Loadout::raise_fraction() const {

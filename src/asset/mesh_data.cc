@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <numbers>
+#include <vector>
 
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
@@ -143,6 +144,81 @@ MeshData MakeSphere(int segments) {
   }
   mesh.submeshes = WholeMesh(mesh);
   mesh.bounds = {.min = glm::vec3(-kRadius), .max = glm::vec3(kRadius)};
+  return mesh;
+}
+
+MeshData MakeCapsule(float radius, float height, int segments) {
+  constexpr float kPi = std::numbers::pi_v<float>;
+  const float r = std::max(radius, 1.0e-4f);
+  const float total = std::max(height, 2.0f * r);
+  const int slices = std::max(segments, 3);
+  int stacks = std::max(slices / 2, 2);
+  stacks += stacks % 2;
+  const int half = stacks / 2;
+
+  // Rings from the top pole down: the upper hemisphere's (centred at
+  // total - r), then the lower one's (centred at r), the equator twice.
+  struct Ring {
+    float polar = 0.0f;
+    float centre = 0.0f;
+  };
+  std::vector<Ring> rings;
+  rings.reserve(static_cast<size_t>(stacks + 2));
+  for (int stack = 0; stack <= half; ++stack) {
+    rings.push_back(
+        {.polar = static_cast<float>(stack) / static_cast<float>(stacks) * kPi,
+         .centre = total - r});
+  }
+  for (int stack = half; stack <= stacks; ++stack) {
+    rings.push_back(
+        {.polar = static_cast<float>(stack) / static_cast<float>(stacks) * kPi,
+         .centre = r});
+  }
+
+  MeshData mesh;
+  const auto ring_count = static_cast<int>(rings.size());
+  mesh.vertices.reserve(static_cast<size_t>((slices + 1) * ring_count));
+  mesh.indices.reserve(static_cast<size_t>(slices * (ring_count - 1) * 6));
+  for (int k = 0; k < ring_count; ++k) {
+    const Ring& ring = rings[static_cast<size_t>(k)];
+    const float v = static_cast<float>(k) / static_cast<float>(ring_count - 1);
+    const float sin_polar = std::sin(ring.polar);
+    const float cos_polar = std::cos(ring.polar);
+    for (int slice = 0; slice <= slices; ++slice) {
+      const float u = static_cast<float>(slice) / static_cast<float>(slices);
+      const float azimuth = u * 2.0f * kPi;
+      const float sin_azimuth = std::sin(azimuth);
+      const float cos_azimuth = std::cos(azimuth);
+      const glm::vec3 normal{sin_polar * sin_azimuth, cos_polar,
+                             sin_polar * cos_azimuth};
+      const glm::vec3 tangent{cos_azimuth, 0.0f, -sin_azimuth};
+      const glm::vec3 south{cos_polar * sin_azimuth, -sin_polar,
+                            cos_polar * cos_azimuth};
+      const float w =
+          glm::dot(glm::cross(normal, tangent), south) >= 0.0f ? 1.0f : -1.0f;
+      const glm::vec3 position =
+          normal * r + glm::vec3(0.0f, ring.centre, 0.0f);
+      mesh.vertices.push_back(
+          {position, normal, {u, v}, {u, v}, glm::vec4(tangent, w)});
+    }
+  }
+  const auto row = static_cast<Index>(slices + 1);
+  for (int k = 0; k + 1 < ring_count; ++k) {
+    for (int slice = 0; slice < slices; ++slice) {
+      const auto a = static_cast<Index>(k) * row + static_cast<Index>(slice);
+      const Index b = a + row;
+      // As MakeSphere: counter-clockwise from outside, no degenerate
+      // triangles at the poles.
+      if (k != 0) {
+        mesh.indices.insert(mesh.indices.end(), {a, b, a + 1});
+      }
+      if (k != ring_count - 2) {
+        mesh.indices.insert(mesh.indices.end(), {a + 1, b, b + 1});
+      }
+    }
+  }
+  mesh.submeshes = WholeMesh(mesh);
+  mesh.bounds = {.min = glm::vec3(-r, 0.0f, -r), .max = glm::vec3(r, total, r)};
   return mesh;
 }
 

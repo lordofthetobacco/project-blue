@@ -153,4 +153,45 @@ TEST_CASE("A scope's draw list leaves out the items hidden in the scope") {
   CHECK(list.entries().size() == 2);
 }
 
+TEST_CASE("Items cast shadows unless told not to") {
+  DrawItem item;
+  CHECK(IsShadowCaster(item));
+  item.shadow_only = true;
+  CHECK(IsShadowCaster(item));  // Shadow only: in the shadow maps only.
+  item = DrawItem{};
+  item.casts_shadow = false;
+  CHECK_FALSE(IsShadowCaster(item));
+  // ... but still seen by the camera.
+  const FakeResources fake{.index_counts = {3},
+                           .variants = {MaterialVariant::kOpaque}};
+  SceneView view;
+  view.draws = std::span(&item, 1);
+  const std::array<camera::Aabb, 1> bounds{kUnitBox};
+  RenderStats stats;
+  DrawList list;
+  list.Build(view, bounds, OriginFrustum(), fake.resources(), stats);
+  CHECK(list.entries().size() == 1);
+}
+
+TEST_CASE("No camera's draw list has the shadow-only items") {
+  const FakeResources fake{.index_counts = {3},
+                           .variants = {MaterialVariant::kOpaque}};
+  std::array<DrawItem, 3> draws{};
+  draws[1].shadow_only = true;
+  draws[2].shadow_only = true;
+  draws[2].hidden_in_scope = true;
+  SceneView view;
+  view.draws = draws;
+  const std::array<camera::Aabb, 3> bounds{kUnitBox, kUnitBox, kUnitBox};
+  for (const bool scope_view : {false, true}) {
+    RenderStats stats;
+    DrawList list;
+    list.Build(view, bounds, OriginFrustum(), fake.resources(), stats,
+               scope_view);
+    REQUIRE(list.entries().size() == 1);
+    CHECK(list.entries()[0].item == 0);
+    CHECK(stats.culled_draws == 0);
+  }
+}
+
 }  // namespace blue::render

@@ -33,6 +33,50 @@ inline constexpr int kWeaponKindCount = 2;
 // this covers a 1.1 s frame; further shots due in that frame are dropped.
 inline constexpr int kMaxShotsPerUpdate = 16;
 
+// Most spare magazines a FirearmState holds. Firearm::SaveState() keeps the
+// first kMaxSavedSpareMagazines spares and counts the rest in
+// FirearmState::spares_dropped.
+inline constexpr int kMaxSavedSpareMagazines = 8;
+
+// Seconds two saved reload or cycle timers may differ by and still count as
+// the same state in NearlyEqual() (1 ms: well below one 60 Hz tick).
+inline constexpr float kStateTimeTolerance = 1.0e-3f;
+
+// Every part of a Firearm that changes while it is used, as plain data
+// (trivially copyable, fixed size) for per-tick histories and network
+// snapshots. The FirearmSpec is not part of it. Firearm::SaveState() makes
+// one and Firearm::RestoreState() applies it.
+struct FirearmState {
+  FireMode fire_mode = FireMode::kSemi;
+  int16_t magazine = 0;            // rounds in the inserted magazine
+  int16_t incoming_magazine = -1;  // rounds of the magazine being seated
+  bool magazine_inserted = false;
+  bool chambered = false;
+  bool bolt_locked = false;
+  bool empty_reload = false;
+  bool pull_used = false;        // the current trigger pull fired or clicked
+  int8_t reload_stage = 0;       // reload steps already performed
+  float reload_elapsed = 0.0f;   // s
+  float reload_duration = 0.0f;  // s, 0 when not reloading
+  float cycle_remaining = 0.0f;  // s until the bolt can fire again
+  // Round counts of the spares in the firearm's own order; entries at
+  // spare_count and above are 0.
+  std::array<int16_t, kMaxSavedSpareMagazines> spares{};
+  uint8_t spare_count = 0;
+  // Spares the firearm carried beyond kMaxSavedSpareMagazines when this state
+  // was saved; restoring the state loses them. 0 for every stock weapon.
+  uint8_t spares_dropped = 0;
+
+  // Exact comparison, float timers included.
+  bool operator==(const FirearmState&) const = default;
+};
+
+// Returns whether `a` and `b` are the same state, allowing the float timers
+// (reload_elapsed, reload_duration, cycle_remaining) to differ by up to
+// `tolerance` seconds; every other field must match exactly.
+[[nodiscard]] bool NearlyEqual(const FirearmState& a, const FirearmState& b,
+                               float tolerance = kStateTimeTolerance);
+
 // Static description of a magazine-fed, closed-bolt firearm (rifle or pistol;
 // a pistol's slide locked back counts as the bolt). Defaults describe an
 // M16A2-like rifle firing 5.56x45 mm M855.
@@ -150,6 +194,16 @@ class Firearm {
   //   mode is used.
   // Allocates nothing.
   void Refit(const FirearmSpec& spec);
+
+  // Returns the mechanism's state (the spec is not part of it). A firearm
+  // carrying more than kMaxSavedSpareMagazines spares is saved with the first
+  // ones only; FirearmState::spares_dropped counts the rest.
+  [[nodiscard]] FirearmState SaveState() const;
+  // Puts the mechanism into `state`, keeping the spec. Restoring a state saved
+  // from this firearm and running the same inputs reproduces the same events
+  // and states. Allocates only when `state` holds more spares than this
+  // firearm has room reserved for (more than it ever carried).
+  void RestoreState(const FirearmState& state);
 
   [[nodiscard]] int rounds_in_magazine() const { return magazine_; }
   [[nodiscard]] bool magazine_inserted() const { return magazine_inserted_; }

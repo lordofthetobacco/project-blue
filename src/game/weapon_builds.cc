@@ -2,8 +2,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <cstdint>
-#include <format>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -12,10 +10,9 @@
 #include "core/log.h"
 #include "core/path.h"
 #include "core/result.h"
-#include "prefab/prefab_file.h"
+#include "sim/weapon_table.h"
 #include "weapon/parts/part_catalog.h"
 #include "weapon/parts/part_catalog_file.h"
-#include "weapon/parts/weapon_assembly.h"
 #include "weapon/parts/weapon_build.h"
 #include "weapon/weapon_def.h"
 
@@ -28,8 +25,8 @@ using DefIdResult = core::Result<weapon::WeaponDefId, std::string>;
 
 }  // namespace
 
-WeaponBuilds::WeaponBuilds(world::PrefabCache& cache, std::string asset_root)
-    : cache_(cache), asset_root_(std::move(asset_root)) {}
+WeaponBuilds::WeaponBuilds(world::PrefabSource& prefabs, std::string asset_root)
+    : prefabs_(prefabs), asset_root_(std::move(asset_root)) {}
 
 bool WeaponBuilds::LoadCatalog() {
   const std::string directory =
@@ -56,50 +53,12 @@ void WeaponBuilds::SetCatalog(parts::PartCatalog catalog) {
   reported_presets_.clear();
 }
 
-core::Result<weapon::WeaponDef, std::string> WeaponBuilds::Assemble(
-    const parts::WeaponBuild& build) {
-  const parts::ModelSource models = [this](std::string_view path) {
-    using ModelResult = core::Result<parts::PartModel, std::string>;
-    core::Result<world::PrefabId, prefab::PrefabError> id =
-        cache_.Get(core::JoinPath(asset_root_, std::string(path)));
-    if (!id.ok()) {
-      return ModelResult::Error(prefab::ToString(id.error()));
-    }
-    return ModelResult::Ok({.key = static_cast<uint32_t>(id.value()),
-                            .prefab = &cache_.prefab(id.value())});
-  };
-  return parts::AssembleWeapon(*catalog_, build, models);
-}
-
 core::Result<weapon::WeaponDefId, std::string> WeaponBuilds::DefFor(
     const parts::WeaponBuild& build, weapon::WeaponLibrary& library) {
   if (!catalog_) {
     return DefIdResult::Error("there is no weapon part catalogue");
   }
-  if (build.empty()) {
-    return DefIdResult::Error("an empty build is no weapon");
-  }
-  const parts::PartDef& root = catalog_->part(build.part());
-  if (root.prefab.empty()) {
-    return DefIdResult::Error(
-        std::format("part '{}' has no model to build a weapon on", root.id));
-  }
-  core::Result<world::PrefabId, prefab::PrefabError> root_id =
-      cache_.Get(core::JoinPath(asset_root_, root.prefab));
-  if (!root_id.ok()) {
-    return DefIdResult::Error(std::format("part '{}': cannot load {}: {}",
-                                          root.id, root.prefab,
-                                          prefab::ToString(root_id.error())));
-  }
-  if (const std::optional<weapon::WeaponDefId> known =
-          library.FindBuild(build, static_cast<uint32_t>(root_id.value()))) {
-    return DefIdResult::Ok(*known);
-  }
-  core::Result<weapon::WeaponDef, std::string> def = Assemble(build);
-  if (!def.ok()) {
-    return DefIdResult::Error(def.error());
-  }
-  return DefIdResult::Ok(library.AddBuild(std::move(def).value()));
+  return sim::BuildDef(*catalog_, build, prefabs_, asset_root_, library);
 }
 
 std::optional<weapon::WeaponDefId> WeaponBuilds::PresetDef(
@@ -107,30 +66,17 @@ std::optional<weapon::WeaponDefId> WeaponBuilds::PresetDef(
   if (!catalog_) {
     return std::nullopt;
   }
-  const parts::PresetDef* preset = catalog_->FindPreset(id);
-  // A whole weapon the catalogue describes without a model (the sniper
-  // rifle) stays the single-piece weapon of its prefab.
-  if (preset == nullptr || catalog_->part(preset->root).prefab.empty()) {
-    return std::nullopt;
+  core::Result<std::optional<weapon::WeaponDefId>, std::string> def =
+      sim::PresetDef(*catalog_, id, prefabs_, asset_root_, library);
+  if (def.ok()) {
+    return def.value();
   }
-  const auto report = [this, id](const std::string& message) {
-    if (std::ranges::find(reported_presets_, id) == reported_presets_.end()) {
-      reported_presets_.emplace_back(id);
-      core::log::Warn("Weapon preset '{}' cannot be built: {}", id, message);
-    }
-  };
-  core::Result<parts::WeaponBuild, parts::BuildError> build =
-      parts::MakeBuild(*catalog_, *preset);
-  if (!build.ok()) {
-    report(build.error().message);
-    return std::nullopt;
+  // Logged once per preset.
+  if (std::ranges::find(reported_presets_, id) == reported_presets_.end()) {
+    reported_presets_.emplace_back(id);
+    core::log::Warn("Weapon preset '{}' cannot be built: {}", id, def.error());
   }
-  DefIdResult def = DefFor(build.value(), library);
-  if (!def.ok()) {
-    report(def.error());
-    return std::nullopt;
-  }
-  return def.value();
+  return std::nullopt;
 }
 
 int WeaponBuilds::RebuildDefs(weapon::WeaponLibrary& library) {
@@ -143,8 +89,8 @@ int WeaponBuilds::RebuildDefs(weapon::WeaponLibrary& library) {
     if (!library.is_build(id)) {
       continue;
     }
-    core::Result<weapon::WeaponDef, std::string> def =
-        Assemble(library.def(id).build);
+    core::Result<weapon::WeaponDef, std::string> def = sim::AssembleBuild(
+        *catalog_, library.def(id).build, prefabs_, asset_root_);
     if (!def.ok()) {
       core::log::Error("Keeping the previous data of weapon '{}': {}",
                        library.def(id).type.spec.display_name, def.error());

@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include <SDL3/SDL.h>
+#include <imgui.h>
 
 #include <algorithm>
 #include <array>
@@ -11,14 +12,17 @@
 #include <cstring>
 #include <format>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/trigonometric.hpp>
 #include <glm/vec2.hpp>
@@ -32,8 +36,13 @@
 #include "core/extent.h"
 #include "core/log.h"
 #include "core/path.h"
+#include "core/result.h"
+#include "core/text.h"
 #include "game/inspect_screen_rules.h"
+#include "game/character_animator.h"
+#include "game/character_model.h"
 #include "game/part_stash.h"
+#include "game/remote_players.h"
 #include "game/scene_pickups.h"
 #include "game/weapon_builds.h"
 #include "game/weapon_modding.h"
@@ -42,11 +51,24 @@
 #include "interact/interaction_focus.h"
 #include "lighting/environment.h"
 #include "material/material.h"
+#include "net/client_session.h"
+#include "net/interpolation.h"
+#include "net/messages.h"
+#include "net/net_settings.h"
+#include "net/replication.h"
+#include "net/user_command_codec.h"
 #include "platform/file_system.h"
 #include "prefab/prefab.h"
 #include "prefab/prefab_file.h"
 #include "scene/mscn_serializer.h"
 #include "shader/compile_mode.h"
+#include "sim/player_sim.h"
+#include "sim/player_state.h"
+#include "sim/sim_world.h"
+#include "sim/user_command.h"
+#include "sim/weapon_table.h"
+#include "ui/main_menu.h"
+#include "ui/main_menu_rules.h"
 #include "ui/weapon_inspect_screen.h"
 #include "weapon/dropped_weapons.h"
 #include "weapon/firearm.h"
@@ -79,6 +101,9 @@ constexpr float kSensitivityStep = 1.15f;
 enum class DrawRun : uint64_t {
   kWorld = 1,          // Every draw of the world; id: World::draw_layout().
   kDroppedWeapon = 2,  // One dropped weapon's draws; id: DroppedWeapon::id.
+  kRemotePlayer = 3,   // One remote player's draws; id: player id.
+  // One replicated dropped weapon's draws (online); id: its dropped id.
+  kNetDroppedWeapon = 4,
 };
 
 // Returns the key of run `id` of `kind` for world::DrawHistory::Track().
@@ -173,6 +198,18 @@ material::MaterialDesc ImpactMaterial() {
 }
 
 constexpr const char* kSettingsFileName = "input.cfg";
+
+// Remote player capsules: slices around the axis.
+constexpr int kCapsuleSegments = 16;
+// Kill feed lines stay this long, fading over the last second.
+constexpr double kKillFeedSeconds = 6.0;
+// Tracers of other players' shots fly at this speed (m/s); the bullet
+// itself is the server's.
+constexpr float kRemoteTracerSpeed = 900.0f;
+constexpr float kRemoteTracerMass = 0.004f;  // kg, cosmetic
+// Server-reported impacts older than this are not marked (a late join's
+// backlog).
+constexpr double kImpactMarkMaxAgeSeconds = 2.0;
 
 #ifdef NDEBUG
 constexpr shader::CompileMode kShaderCompileMode =
@@ -439,6 +476,28 @@ std::string ShaderSourceDirectory() {
   return std::format("{} {} ({:.1f} ms)", verb, path, MillisecondsSince(start));
 }
 
+// Copies `text` into the NUL-terminated text field `field`, cut to fit.
+template <size_t N>
+void CopyToField(std::string_view text, std::array<char, N>& field) {
+  const size_t size = std::min(text.size(), N - 1);
+  std::copy_n(text.data(), size, field.data());
+  field[size] = '\0';
+}
+
+// Returns the text of the NUL-terminated field `field`.
+template <size_t N>
+std::string_view FieldText(const std::array<char, N>& field) {
+  const auto end = std::find(field.begin(), field.end(), '\0');
+  return std::string_view(field.data(),
+                          static_cast<size_t>(end - field.begin()));
+}
+
+// Returns the world matrix of a replicated dropped weapon's prefab.
+glm::mat4 NetDroppedMatrix(const net::ReplicatedDroppedWeapon& item) {
+  return glm::translate(glm::mat4(1.0f), item.position) *
+         glm::mat4_cast(item.rotation);
+}
+
 }  // namespace
 
 std::optional<CliOptions> ParseCommandLine(int argc, const char* const argv[]) {
@@ -456,12 +515,22 @@ std::optional<CliOptions> ParseCommandLine(int argc, const char* const argv[]) {
     }
     const bool is_scene = argument == "--scene";
     const bool is_window_pos = argument == "--window-pos";
-    if ((!is_scene && !is_window_pos) || i + 1 >= argc) {
+    const bool is_connect = argument == "--connect";
+    const bool is_name = argument == "--name";
+    if ((!is_scene && !is_window_pos && !is_connect && !is_name) ||
+        i + 1 >= argc) {
       return std::nullopt;
     }
     const std::string_view value = argv[++i];
     if (is_scene) {
       options.scene_path = std::string(value);
+      continue;
+    }
+    if (is_connect || is_name) {
+      if (value.empty()) {
+        return std::nullopt;
+      }
+      (is_connect ? options.connect : options.player_name) = std::string(value);
       continue;
     }
     options.window_position = platform::ParseWindowPair(value);
@@ -520,12 +589,52 @@ App::App(const CliOptions& options, render::Backend backend,
   help_text_ = BuildHelpText(settings_.bindings);
   SDL_SetWindowTitle(window_.handle(), WindowTitle(scene_path_).c_str());
   RecordPrefabWriteTimes();
-  if (!LoadScene()) {
-    core::log::Fatal("{}", status_);
+
+  // Remote players are capsules of the character's size.
+  const asset::MeshData standing =
+      asset::MakeCapsule(remote_players_.radius(),
+                         remote_players_.height(false), kCapsuleSegments);
+  const asset::MeshData crouching = asset::MakeCapsule(
+      remote_players_.radius(), remote_players_.height(true), kCapsuleSegments);
+  capsule_meshes_ = {.standing = renderer_.UploadMesh(standing),
+                     .crouching = renderer_.UploadMesh(crouching),
+                     .standing_bounds = standing.bounds,
+                     .crouching_bounds = crouching.bounds};
+  // ... or the animated player model, when it was cooked.
+  LoadCharacterModel();
+  std::random_device entropy;
+  client_id_ = (static_cast<uint64_t>(entropy()) << 32) ^ entropy();
+  online_shots_.reserve(16);
+
+  net_settings_path_ = net::NetSettingsPathNextTo(settings_path_);
+  net_settings_ = net::LoadNetSettings(net_settings_path_);
+  if (options.player_name) {
+    net_settings_.player_name = *options.player_name;
   }
-  PlaceDebugCameraAtStart();
-  PlacePlayerAtStart();
-  ApplyWeaponToPlayer();
+  if (options.connect) {
+    net_settings_.server_address = *options.connect;
+  }
+  CopyToField(net_settings_.server_address, address_field_);
+  CopyToField(net_settings_.player_name, name_field_);
+
+  if (options.connect) {
+    // The scene given with --scene (or the default) is the one played
+    // online; a failure shows in the menu.
+    (void)StartConnect(net_settings_.server_address, net_settings_.player_name);
+  } else if (options.scene_path) {
+    // The editor's save-and-play loop: straight into offline play, as
+    // before the menu existed.
+    if (!LoadScene()) {
+      core::log::Fatal("{}", status_);
+    }
+    scene_loaded_ = true;
+    game_state_ = GameState::kOffline;
+    PlaceDebugCameraAtStart();
+    PlacePlayerAtStart();
+    ApplyWeaponToPlayer();
+  } else {
+    LoadEnvironment(/*force=*/true);  // The default sky behind the menu.
+  }
 }
 
 weapon::Loadout App::MakeStartingLoadout() const {
@@ -865,7 +974,7 @@ void App::PlaceDebugCameraAtStart() {
 
 void App::RebuildPhysics() {
   const world::PhysicsBuildSummary summary =
-      world_physics_.Build(scene_, world_);
+      world_physics_.Build(scene_, world_, {.dynamic_bodies = dynamic_bodies_});
   core::log::Info("Physics: {} bodies created, {} failed", summary.created,
                   summary.failed);
   // Building removed every body, the dropped weapons' too, and brought back
@@ -1233,9 +1342,13 @@ void App::RecordHit(const weapon::Impact& impact) {
   if (physics_world_.IsDynamic(impact.body)) {
     return;  // A mark would not move with the body.
   }
-  impact_marks_[next_impact_mark_] = BoxAlong(
-      impact.point + impact.normal * (kImpactMarkDepth * 0.5f), impact.normal,
-      {kImpactMarkSize, kImpactMarkSize, kImpactMarkDepth});
+  AddImpactMark(impact.point, impact.normal);
+}
+
+void App::AddImpactMark(glm::vec3 point, glm::vec3 normal) {
+  impact_marks_[next_impact_mark_] =
+      BoxAlong(point + normal * (kImpactMarkDepth * 0.5f), normal,
+               {kImpactMarkSize, kImpactMarkSize, kImpactMarkDepth});
   next_impact_mark_ = (next_impact_mark_ + 1) % kMaxImpactMarks;
   impact_mark_count_ = std::min(impact_mark_count_ + 1, kMaxImpactMarks);
 }
@@ -1354,6 +1467,9 @@ int App::ReloadChangedPrefabs() {
   if (weapons_changed) {
     RebuildWeaponViews();
   }
+  if (replaced > 0) {
+    LoadCharacterModel();  // Its prefab may be one of them.
+  }
   return replaced;
 }
 
@@ -1424,7 +1540,7 @@ int App::Run() {
     }
 
     ApplyMouseCapture();
-    if (input_.quit_requested()) {
+    if (input_.quit_requested() || quit_) {
       break;
     }
 
@@ -1441,62 +1557,22 @@ int App::Run() {
     previous = now;
 
     const input::InputFrame raw_input = input_.EndFrame();
-    UpdateInspectToggle(raw_input);
-    // The inspect screen keeps the player's input from the game.
-    const input::InputFrame input =
-        inspect_open_ ? game::GateInspectInput(raw_input) : raw_input;
-    const glm::vec2 inspect_turn =
-        inspect_open_ ? game::InspectTurn(raw_input) : glm::vec2(0.0f);
-    for (const input::Action action : input::AllActions()) {
-      if (input::IsEdgeTriggered(action) && input.actions.pressed(action)) {
-        HandleAction(action);
-      }
-    }
-    const float step = std::min(frame_seconds, kMaxSimulationStep);
-    if (view_mode_ == ViewMode::kPlayer) {
-      // Both hands are busy during a reload or a weapon switch, and empty
-      // hands have no sights: no aiming down the sights.
-      input::InputFrame player_input = input;
-      const weapon::Firearm* held = loadout_.active_firearm();
-      if (held == nullptr || held->reloading() || loadout_.switching()) {
-        player_input.actions.SetHeld(input::Action::kAim, false);
-      }
-      player_.Update(player_input, settings_, step);
-    } else {
-      // The character stays put under gravity while a debug camera is used.
-      player_.Update({}, settings_, step);
-      camera_.Update(input, settings_, step);
-    }
-
-    // The world clamps long frames itself. Poses must be synced before the
-    // draw items and the overlay read the world; the player's eye follows
-    // its interpolated character.
-    physics_world_.Update(frame_seconds);
-    world_physics_.SyncToWorld(world_);
-    dropped_weapons_.Sync();
-    world_.Update(step);
-    player_.UpdateView(settings_, step);
-
-    // The focus follows the final eye of this frame; a drop or pick-up
-    // happens before the weapon in hand is posed.
-    UpdateInteraction(input, step);
-    // The rifle follows the final eye of this frame. Bullets spawned now fly
-    // first by their shot age, then everything is swept against the world
-    // as just stepped.
-    scope_state_.reset();
-    ApplyInspectClicks();
-    if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
-      UpdateWeapon(input, step, inspect_turn);
-    } else {
-      // Debug cameras neither fire, aim nor switch weapons; a running reload
-      // or switch still finishes.
-      if (loadout_.Update({}, step).weapon_changed) {
-        OnWeaponChanged();
-      }
-    }
-    projectiles_.Update(physics_world_, scene_.gravity, step);
-    for (const weapon::Impact& impact : projectiles_.impacts()) {
-      RecordHit(impact);
+    const ui::MenuRules menu = UpdateMenu(raw_input);
+    switch (game_state_) {
+      case GameState::kOffline:
+        UpdateOffline(raw_input, frame_seconds);
+        break;
+      case GameState::kOnline:
+        // The game keeps running under the pause overlay, without input.
+        UpdateOnline(menu.pause_open ? input::InputFrame{} : raw_input,
+                     frame_seconds);
+        break;
+      case GameState::kConnecting:
+        UpdateConnecting();
+        break;
+      case GameState::kMainMenu:
+      case GameState::kDisconnected:
+        break;
     }
 
     // Between frames: no command buffer is being recorded.
@@ -1540,12 +1616,15 @@ int App::Run() {
         .status = status_,
         .shader_error = renderer_.last_shader_error(),
         .help = help_text_,
-        .hide_windows = inspect_open_,
+        .hide_windows = inspect_open_ || menu.main_menu_visible,
+        .net = game_state_ == GameState::kOnline ? MakeNetHudInfo(NowSeconds())
+                                                 : nullptr,
     };
     const ui::BuildResult ui =
         overlay_.Build(frame_seconds * 1000.0f, renderer_.gpu_frame_ms(),
                        scene_info, settings_, post_settings_);
     DrawInspect();
+    DrawMenus(menu);
     ImDrawData* const ui_draw_data = overlay_.Render();
     if (ui.settings_changed) {
       SaveSettings();
@@ -1563,6 +1642,790 @@ int App::Run() {
     }
   }
   return 0;
+}
+
+void App::UpdateOffline(const input::InputFrame& raw_input,
+                        float frame_seconds) {
+  UpdateInspectToggle(raw_input);
+  // The inspect screen keeps the player's input from the game.
+  const input::InputFrame input =
+      inspect_open_ ? game::GateInspectInput(raw_input) : raw_input;
+  const glm::vec2 inspect_turn =
+      inspect_open_ ? game::InspectTurn(raw_input) : glm::vec2(0.0f);
+  for (const input::Action action : input::AllActions()) {
+    if (input::IsEdgeTriggered(action) && input.actions.pressed(action)) {
+      HandleAction(action);
+    }
+  }
+  const float step = std::min(frame_seconds, kMaxSimulationStep);
+  if (view_mode_ == ViewMode::kPlayer) {
+    // Both hands are busy during a reload or a weapon switch, and empty
+    // hands have no sights: no aiming down the sights.
+    input::InputFrame player_input = input;
+    const weapon::Firearm* held = loadout_.active_firearm();
+    if (held == nullptr || held->reloading() || loadout_.switching()) {
+      player_input.actions.SetHeld(input::Action::kAim, false);
+    }
+    player_.Update(player_input, settings_, step);
+  } else {
+    // The character stays put under gravity while a debug camera is used.
+    player_.Update({}, settings_, step);
+    camera_.Update(input, settings_, step);
+  }
+
+  // The world clamps long frames itself. Poses must be synced before the
+  // draw items and the overlay read the world; the player's eye follows
+  // its interpolated character.
+  physics_world_.Update(frame_seconds);
+  world_physics_.SyncToWorld(world_);
+  dropped_weapons_.Sync();
+  world_.Update(step);
+  player_.UpdateView(settings_, step);
+
+  // The focus follows the final eye of this frame; a drop or pick-up
+  // happens before the weapon in hand is posed.
+  UpdateInteraction(input, step);
+  // The rifle follows the final eye of this frame. Bullets spawned now fly
+  // first by their shot age, then everything is swept against the world
+  // as just stepped.
+  scope_state_.reset();
+  ApplyInspectClicks();
+  if (view_mode_ == ViewMode::kPlayer && player_.spawned()) {
+    UpdateWeapon(input, step, inspect_turn);
+  } else {
+    // Debug cameras neither fire, aim nor switch weapons; a running reload
+    // or switch still finishes.
+    if (loadout_.Update({}, step).weapon_changed) {
+      OnWeaponChanged();
+    }
+  }
+  projectiles_.Update(physics_world_, scene_.gravity, step);
+  for (const weapon::Impact& impact : projectiles_.impacts()) {
+    RecordHit(impact);
+  }
+  AnimateLocalBody(step);
+}
+
+// --- Game states, menu and online play ---------------------------------------
+
+double App::NowSeconds() const {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                       process_start_)
+      .count();
+}
+
+bool App::FirstPersonActive() const {
+  if (view_mode_ != ViewMode::kPlayer) {
+    return false;
+  }
+  return game_state_ == GameState::kOnline ? online_playing()
+                                           : player_.spawned();
+}
+
+ui::MenuRules App::UpdateMenu(const input::InputFrame& raw_input) {
+  // Online, a capture the player had and lost without Escape (the window
+  // lost the focus) opens the pause overlay too.
+  if (game_state_ == GameState::kOnline && mouse_captured_) {
+    online_captured_once_ = true;
+  }
+  const bool cursor_released = game_state_ == GameState::kOnline &&
+                               online_captured_once_ && !mouse_captured_ &&
+                               view_mode_ != ViewMode::kOrbit;
+  const ui::MenuRules rules = ui::NextMenuRules(
+      {.state = game_state_,
+       .pause_open = pause_open_,
+       .escape_pressed = raw_input.actions.pressed(input::Action::kEscape),
+       .cursor_released = cursor_released});
+  pause_open_ = rules.pause_open;
+  if (rules.cursor_mode != menu_cursor_) {
+    menu_cursor_ = rules.cursor_mode;
+    if (menu_cursor_) {
+      input_.set_mouse_mode(platform::InputMapper::MouseMode::kCursor);
+    } else {
+      input_.set_mouse_mode(view_mode_ == ViewMode::kOrbit
+                                ? platform::InputMapper::MouseMode::kDrag
+                                : platform::InputMapper::MouseMode::kCapture);
+      input_.RequestCapture();
+      online_captured_once_ = false;
+    }
+  }
+  switch (rules.escape) {
+    case ui::EscapeAction::kCancelConnect:
+      LeaveOnline({});
+      menu_status_ = "Connection cancelled.";
+      break;
+    case ui::EscapeAction::kBackToMenu:
+      game_state_ = GameState::kMainMenu;
+      menu_status_.clear();
+      menu_status_error_ = false;
+      break;
+    case ui::EscapeAction::kNone:
+    case ui::EscapeAction::kOpenPause:
+    case ui::EscapeAction::kClosePause:
+      break;
+  }
+  return rules;
+}
+
+void App::DrawMenus(const ui::MenuRules& rules) {
+  if (rules.main_menu_visible) {
+    const ui::MainMenuResult clicked =
+        ui::DrawMainMenu({.state = game_state_,
+                          .address = address_field_,
+                          .player_name = name_field_,
+                          .status = menu_status_,
+                          .status_is_error = menu_status_error_});
+    if (clicked.quit) {
+      quit_ = true;
+    } else if (clicked.cancel) {
+      LeaveOnline({});
+      menu_status_ = "Connection cancelled.";
+    } else if (clicked.back) {
+      game_state_ = GameState::kMainMenu;
+      menu_status_.clear();
+      menu_status_error_ = false;
+    } else if (clicked.play_offline) {
+      StartOffline();
+    } else if (clicked.connect) {
+      (void)StartConnect(FieldText(address_field_), FieldText(name_field_));
+    }
+    return;
+  }
+  if (rules.pause_open) {
+    const ui::PauseMenuResult clicked =
+        ui::DrawPauseMenu({.server = server_address_});
+    if (clicked.quit) {
+      quit_ = true;
+    } else if (clicked.disconnect) {
+      LeaveOnline({});
+    } else if (clicked.resume) {
+      pause_open_ = false;
+    }
+  }
+}
+
+void App::StartOffline() {
+  session_.reset();
+  pause_open_ = false;
+  remote_players_.Clear();
+  dynamic_bodies_ = world::DynamicBodies::kSimulated;
+  if (!LoadScene()) {
+    menu_status_ = status_;
+    menu_status_error_ = true;
+    game_state_ = GameState::kMainMenu;
+    return;
+  }
+  scene_loaded_ = true;
+  game_state_ = GameState::kOffline;
+  menu_status_.clear();
+  menu_status_error_ = false;
+  ClearBullets();
+  ResetLoadout();
+  PlaceDebugCameraAtStart();
+  PlacePlayerAtStart();
+  ApplyWeaponToPlayer();
+}
+
+bool App::StartConnect(std::string_view address, std::string_view name) {
+  const std::string player_name = net::SanitizePlayerName(name);
+  const std::string server(core::Trim(address));
+  menu_status_error_ = true;
+  if (const std::optional<std::string> problem =
+          ui::ConnectProblem(server, player_name)) {
+    menu_status_ = *problem;
+    return false;
+  }
+  session_.reset();
+  pause_open_ = false;
+  // The server moves the dynamic bodies.
+  dynamic_bodies_ = world::DynamicBodies::kKinematic;
+  if (!LoadScene()) {
+    menu_status_ = status_;
+    game_state_ = GameState::kMainMenu;
+    return false;
+  }
+  scene_loaded_ = true;
+  // The predicted player is the only character in the world.
+  CloseInspect();
+  player_.Despawn();
+  ClearBullets();
+  ResetLoadout();
+  if (const std::optional<std::string> error = PrepareNetReference()) {
+    menu_status_ = *error;
+    game_state_ = GameState::kMainMenu;
+    return false;
+  }
+  net_settings_ = {.server_address = server, .player_name = player_name};
+  (void)net::SaveNetSettings(net_settings_, net_settings_path_);
+
+  const net::PredictionContext context{
+      .physics = &physics_world_,
+      .library = &net_reference_->weapon_library(),
+      .table = &net_reference_->weapon_table()};
+  session_ =
+      std::make_unique<net::ClientSession>(net::SessionConfig{}, context);
+  const core::Result<void, std::string> connected =
+      session_->Connect(server, player_name, net_reference_->content_hash(),
+                        client_id_, NowSeconds());
+  if (!connected.ok()) {
+    session_.reset();
+    menu_status_ = connected.error();
+    game_state_ = GameState::kMainMenu;
+    return false;
+  }
+  server_address_ = server;
+  game_state_ = GameState::kConnecting;
+  menu_status_ = std::format("Connecting to {}...", server);
+  menu_status_error_ = false;
+  display_keys_ = {};
+  next_shot_record_ = 0;
+  next_impact_record_ = 0;
+  taken_pickups_applied_ = 0;
+  kill_line_count_ = 0;
+  remote_players_.Clear();
+  command_builder_.Reset();
+  interact_kind_ = 0;
+  interact_id_ = 0;
+  return true;
+}
+
+void App::LeaveOnline(std::string reason) {
+  // `reason` is often the session's own disconnect reason: owning it here
+  // keeps it valid after the session is destroyed below.
+  if (session_ != nullptr) {
+    session_->Disconnect(reason.empty() ? std::string_view("left the game")
+                                        : std::string_view(reason));
+    session_.reset();
+  }
+  pause_open_ = false;
+  remote_players_.Clear();
+  name_tags_.clear();
+  kill_line_count_ = 0;
+  ClearBullets();
+  if (reason.empty()) {
+    game_state_ = GameState::kMainMenu;
+    menu_status_ = "Disconnected.";
+    menu_status_error_ = false;
+  } else {
+    game_state_ = GameState::kDisconnected;
+    menu_status_ = std::format("Disconnected: {}.", reason);
+    menu_status_error_ = true;
+  }
+}
+
+void App::UpdateConnecting() {
+  if (session_ == nullptr) {
+    game_state_ = GameState::kMainMenu;
+    return;
+  }
+  session_->Update(NowSeconds());
+  switch (session_->state()) {
+    case net::SessionState::kPlaying: {
+      const sim::PlayerSim& player = *session_->player();
+      game_state_ = GameState::kOnline;
+      pause_open_ = false;
+      online_look_ = player.look();
+      online_look_delta_ = glm::vec2(0.0f);
+      online_prev_feet_ = player.feet();
+      online_feet_ = player.feet();
+      online_eye_ = player.eye();
+      online_fov_ = settings_.fov_degrees;
+      online_captured_once_ = false;
+      view_mode_ = ViewMode::kPlayer;
+      camera_.set_mode(CameraModeFor(view_mode_));
+      draw_history_.Cut();
+      weapon_motion_.Invalidate();
+      menu_status_.clear();
+      menu_status_error_ = false;
+      status_ = std::format("Online at {}", server_address_);
+      break;
+    }
+    case net::SessionState::kDisconnected:
+      LeaveOnline(session_->disconnect_reason());
+      break;
+    case net::SessionState::kIdle:
+    case net::SessionState::kResolving:
+    case net::SessionState::kConnecting:
+    case net::SessionState::kHandshaking:
+    case net::SessionState::kSyncing:
+      menu_status_ = std::format("Connecting to {} ({})...", server_address_,
+                                 net::SessionStateText(session_->state()));
+      break;
+  }
+}
+
+std::optional<std::string> App::PrepareNetReference() {
+  if (net_reference_ != nullptr && net_reference_scene_ == scene_path_) {
+    return std::nullopt;
+  }
+  net_reference_.reset();
+  key_defs_.clear();
+  sim::SimWorldOptions options;
+  options.asset_dir = AssetRoot();
+  options.scene_path = scene_path_;
+  options.max_players = 1;
+  core::Result<std::unique_ptr<sim::SimWorld>, std::string> created =
+      sim::SimWorld::Create(physics_runtime_, options);
+  if (!created.ok()) {
+    return std::format("Cannot prepare {} for online play: {}", scene_name_,
+                       created.error());
+  }
+  net_reference_ = std::move(created).value();
+  net_reference_scene_ = scene_path_;
+  // The game's own definition of every weapon the server may name.
+  const size_t known = weapon_library_.size();
+  for (const sim::WeaponTable::Row& row :
+       net_reference_->weapon_table().rows()) {
+    std::optional<weapon::WeaponDefId> def;
+    constexpr std::string_view kPreset = "preset:";
+    constexpr std::string_view kPrefab = "prefab:";
+    const std::string_view name = row.name;
+    if (name.starts_with(kPreset)) {
+      def = weapon_builds_.PresetDef(name.substr(kPreset.size()),
+                                     weapon_library_);
+    } else if (name.starts_with(kPrefab)) {
+      const core::Result<world::PrefabId, prefab::PrefabError> prefab =
+          prefab_cache_.Get(AssetPath(name.substr(kPrefab.size())));
+      if (prefab.ok()) {
+        def = WeaponDefOfPrefab(prefab.value());
+      }
+    }
+    if (!def) {
+      core::log::Warn("Online weapon {} has no model here", row.name);
+    }
+    key_defs_.push_back(def);
+  }
+  if (weapon_library_.size() != known) {
+    AddWeaponViews();
+  }
+  return std::nullopt;
+}
+
+std::optional<weapon::WeaponDefId> App::DefOfKey(sim::WeaponKey key) const {
+  if (net_reference_ == nullptr || key == 0) {
+    return std::nullopt;
+  }
+  const std::span<const sim::WeaponTable::Row> rows =
+      net_reference_->weapon_table().rows();
+  const auto it =
+      std::ranges::lower_bound(rows, key, {}, &sim::WeaponTable::Row::key);
+  if (it == rows.end() || it->key != key) {
+    return std::nullopt;
+  }
+  return key_defs_[static_cast<size_t>(it - rows.begin())];
+}
+
+bool App::SyncDisplayLoadout(const sim::PlayerState& state) {
+  const weapon::WeaponItem* before = loadout_.active_item();
+  const std::optional<weapon::WeaponDefId> before_def =
+      before != nullptr ? std::optional(before->def) : std::nullopt;
+  if (state.slot_keys != display_keys_) {
+    std::vector<weapon::WeaponItem> weapons;
+    for (size_t i = 0; i < state.slot_keys.size(); ++i) {
+      if (!state.loadout.slots[i].present) {
+        continue;
+      }
+      if (const std::optional<weapon::WeaponDefId> def =
+              DefOfKey(state.slot_keys[i])) {
+        weapons.push_back(
+            weapon::MakeFreshWeapon(*def, weapon_library_.def(*def)));
+      }
+    }
+    loadout_ = weapon::Loadout(weapons);
+    display_keys_ = state.slot_keys;
+  }
+  // Fails only for a weapon without a model here; the rest still shows.
+  (void)loadout_.RestoreState(state.loadout);
+  const weapon::WeaponItem* after = loadout_.active_item();
+  const std::optional<weapon::WeaponDefId> after_def =
+      after != nullptr ? std::optional(after->def) : std::nullopt;
+  return before_def != after_def;
+}
+
+void App::UpdateOnline(const input::InputFrame& input, float frame_seconds) {
+  if (session_ == nullptr) {
+    LeaveOnline("the session ended");
+    return;
+  }
+  net::ClientSession& session = *session_;
+  const double now = NowSeconds();
+  for (const input::Action action : input::AllActions()) {
+    if (input::IsEdgeTriggered(action) && input.actions.pressed(action)) {
+      HandleAction(action);
+    }
+  }
+  const float step = std::min(frame_seconds, kMaxSimulationStep);
+  const bool player_view = view_mode_ == ViewMode::kPlayer;
+
+  // The view turns every frame; commands take the angles of their tick.
+  const camera::LookAngles before = online_look_;
+  if (player_view && input.look) {
+    online_look_ =
+        camera::ApplyMouseLook(online_look_, input.mouse_delta, settings_);
+  }
+  if (!player_view) {
+    camera_.Update(input, settings_, step);
+  }
+  command_builder_.Accumulate(player_view ? input : input::InputFrame{},
+                              settings_, online_look_);
+
+  session.Update(now);
+  if (session.state() != net::SessionState::kPlaying ||
+      session.player() == nullptr) {
+    LeaveOnline(session.disconnect_reason().empty()
+                    ? std::string("connection lost")
+                    : session.disconnect_reason());
+    return;
+  }
+  const net::Replication& replication = session.replication();
+  const int ticks = session.AdvanceTicks(frame_seconds);
+  online_shots_.clear();
+  for (int i = 0; i < ticks; ++i) {
+    sim::UserCommand command = command_builder_.Take(session.next_tick());
+    if ((command.pressed & sim::buttons::pressed::kInteract) != 0) {
+      command.interact_kind = interact_kind_;
+      command.interact_id = interact_id_;
+    }
+    online_prev_feet_ = session.player()->feet();
+    const sim::StepEvents events = session.Tick(command, now);
+    for (int shot = 0; shot < events.shot_count; ++shot) {
+      if (online_shots_.size() < online_shots_.capacity()) {
+        online_shots_.push_back(events.shots[static_cast<size_t>(shot)]);
+      }
+    }
+    // The server's bodies move like its own physics step.
+    for (const net::ReplicatedBody& body : replication.bodies()) {
+      const std::optional<physics::BodyId> id =
+          world_physics_.BodyFor(body.instance_id);
+      if (body.has_pose && id) {
+        physics_world_.MoveKinematic(
+            *id, {.position = body.position, .rotation = body.rotation},
+            sim::kTickSeconds);
+      }
+    }
+    physics_world_.StepOnce();
+  }
+  physics_world_.SetInterpolationAlpha(session.tick_alpha());
+  (void)session.UpdateView(now, frame_seconds);
+
+  // The eye between the last two predicted ticks, plus the fading
+  // correction.
+  const sim::PlayerSim& player = *session.player();
+  const sim::PlayerState state = player.Save();
+  online_feet_ = player.feet();
+  const glm::vec3 feet =
+      glm::mix(online_prev_feet_, online_feet_, session.tick_alpha()) +
+      session.prediction()->visual_offset();
+  online_eye_ = feet + glm::vec3(0.0f, state.eye_height, 0.0f);
+  const weapon::WeaponItem* held = loadout_.active_item();
+  const float aim_scale =
+      held != nullptr && state.aiming
+          ? weapon_library_.def(held->def).type.aim_fov_scale.value_or(
+                player::PlayerTuning{}.aim_fov_scale)
+          : 1.0f;
+  const float fov_target =
+      settings_.fov_degrees * aim_scale +
+      (state.sprinting ? settings_.sprint_fov_boost_degrees : 0.0f);
+  online_fov_ +=
+      (fov_target - online_fov_) *
+      (1.0f - std::exp(-player::PlayerTuning{}.aim_blend_rate * step));
+  online_look_delta_ = glm::vec2(camera::WrapYaw(online_look_.yaw - before.yaw),
+                                 online_look_.pitch - before.pitch);
+
+  ApplyReplicatedWorld();
+  world_physics_.SyncToWorld(world_);
+  world_.Update(step);
+  UpdateOnlineInteraction(step);
+  scope_state_.reset();
+  UpdateOnlineWeapon(state, step);
+  ApplyReplicatedEffects();
+  // Tracers only: the server's Impact messages mark the hits.
+  projectiles_.Update(physics_world_, scene_.gravity, step);
+  AnimateLocalBody(step);
+  UpdateRemotePlayers(step);
+}
+
+void App::ApplyReplicatedWorld() {
+  const std::span<const uint32_t> taken =
+      session_->replication().taken_pickups();
+  if (taken.size() == taken_pickups_applied_) {
+    return;
+  }
+  for (size_t i = taken_pickups_applied_; i < taken.size(); ++i) {
+    (void)world_.HideInstance(taken[i]);
+  }
+  taken_pickups_applied_ = taken.size();
+  (void)world_physics_.RemoveHiddenBodies(world_);
+  interaction_focus_.SetFocus(std::nullopt);
+}
+
+void App::ApplyReplicatedEffects() {
+  const net::Replication& replication = session_->replication();
+  const auto& shots = replication.shots();
+  for (uint64_t n = std::max(next_shot_record_, shots.first()); n < shots.end();
+       ++n) {
+    const net::ShotRecord& shot = shots.Get(n);
+    projectiles_.Spawn(shot.origin, shot.direction * kRemoteTracerSpeed,
+                       kRemoteTracerMass, 0.0f, 0.0f, 0);
+  }
+  next_shot_record_ = shots.end();
+  const double now = NowSeconds();
+  const auto& impacts = replication.impacts();
+  for (uint64_t n = std::max(next_impact_record_, impacts.first());
+       n < impacts.end(); ++n) {
+    const net::ImpactRecord& impact = impacts.Get(n);
+    if (now - impact.time_seconds <= kImpactMarkMaxAgeSeconds) {
+      AddImpactMark(impact.point, impact.normal);
+      ++impacts_total_;
+    }
+  }
+  next_impact_record_ = impacts.end();
+}
+
+void App::UpdateOnlineInteraction(float step) {
+  interact_kind_ = net::interact_kind::kNone;
+  interact_id_ = 0;
+  const bool player_view = FirstPersonActive();
+  std::optional<interact::Focus> focus;
+  if (player_view) {
+    interactables_.clear();
+    for (const net::ReplicatedDroppedWeapon& item :
+         session_->replication().dropped_weapons()) {
+      const std::optional<weapon::WeaponDefId> def = DefOfKey(item.weapon_key);
+      if (!def) {
+        continue;
+      }
+      interactables_.push_back(
+          {.id = item.dropped_id,
+           .kind = interact::InteractableKind::kDroppedWeapon,
+           .shape = game::PlacedBox(NetDroppedMatrix(item),
+                                    dropped_weapons_.bounds(*def))});
+    }
+    scene_pickups_.AppendCandidates(world_, interactables_);
+    const glm::vec3 eye = online_eye_;
+    focus = interaction_focus_.Update(
+        {.eye = eye, .direction = camera::ForwardFrom(online_look_)},
+        interactables_,
+        [&](const interact::Interactable& candidate, glm::vec3 aim_point) {
+          return IsInteractableVisible(candidate, eye, aim_point);
+        });
+  } else {
+    interaction_focus_.SetFocus(std::nullopt);
+  }
+  const float fade = step / kInteractionDotFadeSeconds;
+  interaction_dot_opacity_ =
+      focus && player_view ? std::min(interaction_dot_opacity_ + fade, 1.0f)
+                           : std::max(interaction_dot_opacity_ - fade, 0.0f);
+  if (!focus) {
+    return;
+  }
+  switch (focus->kind) {
+    case interact::InteractableKind::kDroppedWeapon:
+      interact_kind_ = net::interact_kind::kDroppedWeapon;
+      break;
+    case interact::InteractableKind::kSceneWeapon:
+      interact_kind_ = net::interact_kind::kPickup;
+      break;
+  }
+  interact_id_ = focus->id;
+}
+
+void App::UpdateOnlineWeapon(const sim::PlayerState& state, float step) {
+  if (SyncDisplayLoadout(state)) {
+    OnWeaponChanged();
+  }
+  const bool posed = FirstPersonActive() && !loadout_.hands_empty();
+  if (posed) {
+    const weapon::Firearm& firearm = *loadout_.active_firearm();
+    weapon::Viewmodel& viewmodel = active_viewmodel();
+    viewmodel.Update({
+        .eye_position = online_eye_,
+        .look = online_look_,
+        .aim_held = state.aiming,
+        .sprinting = state.sprinting,
+        .on_ground = state.on_ground,
+        .velocity = state.velocity,
+        .look_delta = online_look_delta_,
+        .shots = static_cast<int>(online_shots_.size()),
+        .reload_fraction = firearm.reload_fraction(),
+        .reloading = firearm.reloading(),
+        .raise_fraction = loadout_.raise_fraction(),
+        .dt = step,
+    });
+    // Recoil turns the view (and so the next commands), as offline.
+    const glm::vec2 kick = viewmodel.TakeLookKick();
+    constexpr float kPitchLimit = glm::radians(89.0f);
+    online_look_.pitch =
+        std::clamp(online_look_.pitch + kick.x, -kPitchLimit, kPitchLimit);
+    online_look_.yaw = camera::WrapYaw(online_look_.yaw + kick.y);
+    if (std::optional<weapon::WeaponAnimator>& animator =
+            active_view().animator) {
+      animator->Update(static_cast<int>(online_shots_.size()),
+                       firearm.bolt_locked_back(), step);
+    }
+  }
+  // Cosmetic tracers of the predicted shots: from the muzzle when it is
+  // drawn, else from the sim eye, along the simulated direction.
+  for (const sim::ShotEvent& shot : online_shots_) {
+    const glm::vec3 origin =
+        posed ? active_viewmodel().muzzle_position() : shot.origin;
+    projectiles_.Spawn(origin, shot.velocity, shot.mass, shot.drag, shot.age,
+                       ++shots_fired_);
+  }
+}
+
+void App::UpdateRemotePlayers(float step) {
+  const net::Replication& replication = session_->replication();
+  remote_views_.clear();
+  for (size_t i = 0; i < net::kMaxPlayers; ++i) {
+    const auto id = static_cast<uint8_t>(i);
+    const net::PlayerInfo& info = replication.player(id);
+    if (replication.own_id() == id || !info.has_pose) {
+      continue;
+    }
+    const net::InterpSample& pose = info.pose;
+    const std::optional<weapon::WeaponDefId> def = DefOfKey(pose.weapon_key);
+    remote_views_.push_back(
+        {.id = id,
+         .feet = pose.position,
+         .yaw = pose.yaw,
+         .pitch = pose.pitch,
+         .crouching = (pose.flags & net::player_flags::kCrouching) != 0,
+         .alive = (pose.flags & net::player_flags::kAlive) != 0,
+         .weapon = def,
+         .velocity = pose.velocity,
+         .on_ground = (pose.flags & net::player_flags::kOnGround) != 0,
+         .aiming = (pose.flags & net::player_flags::kAiming) != 0,
+         .hold =
+             remote_players_.animated() ? HoldOf(def) : game::WeaponHold{}});
+  }
+  remote_players_.Update(remote_views_, step);
+
+  // Name tags: each anchor projected with this frame's camera.
+  name_tags_.clear();
+  const ViewPose eye = CurrentView();
+  const ImVec2 display = ImGui::GetIO().DisplaySize;
+  const float aspect = display.x / std::max(display.y, 1.0f);
+  const glm::mat4 view_projection =
+      camera::ReversedInfinitePerspective(
+          glm::radians(eye.vertical_fov_degrees), aspect, kNearPlane) *
+      eye.view;
+  for (const game::RemotePlayerPlacement& placement :
+       remote_players_.placements()) {
+    const glm::vec4 clip =
+        view_projection * glm::vec4(placement.name_anchor, 1.0f);
+    if (clip.w <= kNearPlane) {
+      continue;  // Behind the eye.
+    }
+    const glm::vec2 ndc = glm::vec2(clip) / clip.w;
+    if (std::abs(ndc.x) > 1.0f || std::abs(ndc.y) > 1.0f) {
+      continue;
+    }
+    name_tags_.push_back(
+        {.screen = glm::vec2((ndc.x * 0.5f + 0.5f) * display.x,
+                             (0.5f - ndc.y * 0.5f) * display.y),
+         .name = replication.player(placement.id).name.view()});
+  }
+
+  // The kill feed, newest first.
+  kill_line_count_ = 0;
+  const double now = NowSeconds();
+  const auto& kills = replication.kills();
+  for (uint64_t n = kills.end();
+       n > kills.first() && kill_line_count_ < kKillFeedLines; --n) {
+    const net::KillRecord& kill = kills.Get(n - 1);
+    const double age = now - kill.time_seconds;
+    if (age > kKillFeedSeconds) {
+      break;
+    }
+    const std::string_view victim = kill.victim_name.view();
+    std::string& text = kill_texts_[kill_line_count_];
+    if (!kill.killer.has_value() || *kill.killer == kill.victim) {
+      text = std::format("{} died", victim.empty() ? "?" : victim);
+    } else {
+      const std::string_view killer = kill.killer_name.view();
+      text = std::format("{} > {}", killer.empty() ? "?" : killer,
+                         victim.empty() ? "?" : victim);
+    }
+    kill_lines_[kill_line_count_] = {.text = text,
+                                     .opacity = static_cast<float>(std::clamp(
+                                         kKillFeedSeconds - age, 0.0, 1.0))};
+    ++kill_line_count_;
+  }
+}
+
+void App::AppendOnlineDraws() {
+  if (session_ == nullptr) {
+    return;
+  }
+  for (const game::RemotePlayerPlacement& placement :
+       remote_players_.placements()) {
+    const size_t first = draws_.size();
+    if (placement.animator != nullptr && character_model_) {
+      character_model_->AppendDraws(*placement.animator, draws_);
+    } else {
+      draws_.push_back({.mesh = placement.crouching ? capsule_meshes_.crouching
+                                                    : capsule_meshes_.standing,
+                        .transform = placement.body,
+                        .bounds = placement.crouching
+                                      ? capsule_meshes_.crouching_bounds
+                                      : capsule_meshes_.standing_bounds});
+    }
+    if (placement.weapon) {
+      AppendRestWeaponDraws(weapon_library_.def(*placement.weapon),
+                            view_of(*placement.weapon), placement.weapon_root);
+    }
+    draw_history_.Track(DrawRunKey(DrawRun::kRemotePlayer, placement.id),
+                        std::span(draws_).subspan(first));
+  }
+  const std::optional<interact::Focus>& focus = interaction_focus_.focus();
+  for (const net::ReplicatedDroppedWeapon& item :
+       session_->replication().dropped_weapons()) {
+    const std::optional<weapon::WeaponDefId> def = DefOfKey(item.weapon_key);
+    if (!def) {
+      continue;
+    }
+    const size_t first = draws_.size();
+    AppendRestWeaponDraws(weapon_library_.def(*def), view_of(*def),
+                          NetDroppedMatrix(item));
+    draw_history_.Track(DrawRunKey(DrawRun::kNetDroppedWeapon, item.dropped_id),
+                        std::span(draws_).subspan(first));
+    if (focus && focus->kind == interact::InteractableKind::kDroppedWeapon &&
+        focus->id == item.dropped_id) {
+      for (size_t i = first; i < draws_.size(); ++i) {
+        selected_draws_.push_back(static_cast<uint32_t>(i));
+      }
+    }
+  }
+}
+
+const ui::NetHudInfo* App::MakeNetHudInfo(double now_seconds) {
+  if (!online_playing()) {
+    return nullptr;
+  }
+  const sim::PlayerState state = session_->player()->Save();
+  const net::NetStats stats = session_->stats(now_seconds);
+  net_hud_ = ui::NetHudInfo{};
+  net_hud_.health = state.health;
+  net_hud_.alive = state.alive;
+  net_hud_.respawn_seconds =
+      static_cast<float>(state.respawn_ticks) * sim::kTickSeconds;
+  if (const weapon::Firearm* firearm = loadout_.active_firearm()) {
+    net_hud_.has_weapon = true;
+    net_hud_.rounds_in_magazine = firearm->rounds_in_magazine();
+    for (const int rounds : firearm->spare_magazines()) {
+      net_hud_.spare_rounds += rounds;
+    }
+  }
+  net_hud_.ping_ms = stats.round_trip_seconds * 1000.0;
+  net_hud_.loss_percent = stats.loss_percent;
+  net_hud_.snapshots_per_second = stats.snapshots_per_second;
+  net_hud_.replays_per_second = stats.replays_per_second;
+  net_hud_.interpolation_ms = stats.interpolation_delay_seconds * 1000.0;
+  net_hud_.name_tags = name_tags_;
+  net_hud_.kill_feed =
+      std::span<const ui::KillFeedLine>(kill_lines_.data(), kill_line_count_);
+  return &net_hud_;
 }
 
 void App::HandleEvent(const SDL_Event& event) {
@@ -1616,13 +2479,19 @@ void App::HandleAction(input::Action action) {
       status_ = "Scenes are edited and saved in blue-editor";
       break;
     case Action::kLoadScene:
-      ReloadScene();
+      if (game_state_ == GameState::kOffline) {
+        ReloadScene();
+      } else {
+        status_ = "The scene reloads offline only";
+      }
       break;
     case Action::kToggleVsync:
       renderer_.SetVsync(!renderer_.vsync());
       break;
     case Action::kPush:
-      PushObject();
+      if (game_state_ == GameState::kOffline) {
+        PushObject();
+      }
       break;
     case Action::kToggleCascadeDebug:
       cascade_debug_ = !cascade_debug_;
@@ -1663,8 +2532,8 @@ void App::CycleViewMode() {
   switch (view_mode_) {
     case ViewMode::kPlayer: {
       // The debug camera takes off from where the player is looking.
-      const player::PlayerView& view = player_.view();
-      camera_.SetPose(view.eye_position, view.look);
+      const ViewPose eye = CurrentView();
+      camera_.SetPose(eye.position, eye.look);
       view_mode_ = ViewMode::kFly;
       break;
     }
@@ -1673,7 +2542,10 @@ void App::CycleViewMode() {
       input_.set_mouse_mode(platform::InputMapper::MouseMode::kDrag);
       break;
     case ViewMode::kOrbit:
-      view_mode_ = player_.spawned() ? ViewMode::kPlayer : ViewMode::kFly;
+      view_mode_ = (game_state_ == GameState::kOnline ? online_playing()
+                                                      : player_.spawned())
+                       ? ViewMode::kPlayer
+                       : ViewMode::kFly;
       input_.set_mouse_mode(platform::InputMapper::MouseMode::kCapture);
       break;
   }
@@ -1682,6 +2554,17 @@ void App::CycleViewMode() {
 }
 
 App::ViewPose App::CurrentView() const {
+  if (view_mode_ == ViewMode::kPlayer && game_state_ == GameState::kOnline) {
+    // The predicted player's eye; no head bob or roll online.
+    const player::PlayerView view{.eye_position = online_eye_,
+                                  .look = online_look_,
+                                  .vertical_fov_degrees = online_fov_};
+    return {.position = view.eye_position,
+            .forward = view.Forward(),
+            .view = view.View(),
+            .look = view.look,
+            .vertical_fov_degrees = view.vertical_fov_degrees};
+  }
   if (view_mode_ == ViewMode::kPlayer) {
     const player::PlayerView& view = player_.view();
     return {.position = view.eye_position,
@@ -1736,8 +2619,7 @@ ui::HitLogOverlayInfo App::MakeHitLogOverlayInfo() const {
 }
 
 std::optional<render::ReticleSight> App::CurrentSight() const {
-  if (view_mode_ != ViewMode::kPlayer || !player_.spawned() ||
-      loadout_.hands_empty()) {
+  if (!FirstPersonActive() || loadout_.hands_empty()) {
     return std::nullopt;
   }
   const weapon::Viewmodel& viewmodel = active_viewmodel();
@@ -1757,8 +2639,8 @@ std::optional<render::ReticleSight> App::CurrentSight() const {
 }
 
 std::optional<render::ScopeSight> App::CurrentScope() const {
-  if (!scope_state_ || !scope_zoom_ || view_mode_ != ViewMode::kPlayer ||
-      !player_.spawned() || loadout_.hands_empty()) {
+  if (!scope_state_ || !scope_zoom_ || !FirstPersonActive() ||
+      loadout_.hands_empty()) {
     return std::nullopt;
   }
   const weapon::ScopeSpec& spec = scope_zoom_->spec();
@@ -1841,8 +2723,7 @@ ui::WeaponOverlayInfo App::MakeWeaponOverlayInfo() const {
 }
 
 bool App::AppendHeldWeaponDraws() {
-  if (view_mode_ != ViewMode::kPlayer || !player_.spawned() ||
-      loadout_.hands_empty()) {
+  if (!FirstPersonActive() || loadout_.hands_empty()) {
     return false;
   }
   const WeaponView& view = active_view();
@@ -1860,6 +2741,94 @@ void App::AppendRestWeaponDraws(const weapon::WeaponDef& def,
     if (const std::optional<world::PrefabPose>& pose = view.part_poses[i]) {
       pose->AppendDraws(root * def.parts[i].rest, draws_);
     }
+  }
+}
+
+void App::LoadCharacterModel() {
+  character_model_ = game::CharacterModel::Load(
+      prefab_cache_, AssetPath(game::kCharacterModelFile));
+  if (character_model_) {
+    remote_players_.SetRig(character_model_->rig());
+    local_body_.emplace(character_model_->rig());
+  } else {
+    remote_players_.SetRig(std::nullopt);
+    local_body_.reset();
+  }
+}
+
+game::WeaponHold App::HoldOf(std::optional<weapon::WeaponDefId> def) const {
+  if (!def) {
+    return {};
+  }
+  const auto prefab =
+      static_cast<world::PrefabId>(weapon_library_.prefab_key(*def));
+  return game::MakeWeaponHold(
+      game::HeldWeaponOf(weapon_library_.def(*def).type.spec.kind),
+      prefab_cache_.prefab(prefab));
+}
+
+void App::AnimateLocalBody(float step) {
+  if (!local_body_) {
+    return;
+  }
+  const std::optional<weapon::WeaponDefId> held =
+      loadout_.hands_empty()
+          ? std::nullopt
+          : std::optional<weapon::WeaponDefId>(loadout_.active_item()->def);
+  game::CharacterInput input{.dt = step, .weapon = HoldOf(held)};
+  if (game_state_ == GameState::kOnline) {
+    if (!online_playing()) {
+      local_body_->Reset();
+      return;
+    }
+    const sim::PlayerState state = session_->player()->Save();
+    input.feet = online_eye_ - glm::vec3(0.0f, state.eye_height, 0.0f);
+    input.velocity = state.velocity;
+    input.yaw = online_look_.yaw;
+    input.pitch = online_look_.pitch;
+    input.crouching = state.crouching;
+    input.on_ground = state.on_ground;
+    input.aiming = state.aiming;
+    input.alive = state.alive;
+  } else {
+    if (!player_.spawned()) {
+      local_body_->Reset();
+      return;
+    }
+    input.feet = player_.feet_position();
+    input.velocity = player_.velocity();
+    input.yaw = player_.look().yaw;
+    input.pitch = player_.look().pitch;
+    input.crouching = player_.crouching();
+    input.on_ground = player_.on_ground();
+    input.aiming = player_.aiming();
+  }
+  local_body_->Update(input);
+}
+
+bool App::LocalBodyShown() const {
+  // Only the first-person player casts this shadow; it is hidden on the
+  // inspect screen (the weapon leaves the hands there) and while dead.
+  if (!local_body_ || !character_model_ || !FirstPersonActive() ||
+      inspect_open_) {
+    return false;
+  }
+  return game_state_ != GameState::kOnline || session_->player()->Save().alive;
+}
+
+void App::AppendLocalBodyDraws() {
+  if (!LocalBodyShown()) {
+    return;
+  }
+  const size_t first = draws_.size();
+  character_model_->AppendDraws(*local_body_, draws_);
+  if (local_body_->weapon() && !loadout_.hands_empty()) {
+    AppendRestWeaponDraws(active_def(), active_view(),
+                          local_body_->root() * *local_body_->weapon());
+  }
+  // Never seen by a camera, so no motion history either.
+  for (size_t i = first; i < draws_.size(); ++i) {
+    draws_[i].shadow_only = true;
   }
 }
 
@@ -1985,11 +2954,19 @@ render::SceneView App::BuildSceneView(float frame_seconds) {
   const size_t weapon_first = draws_.size();
   const bool weapon_drawn = AppendHeldWeaponDraws();
   const size_t weapon_count = draws_.size() - weapon_first;
-  // The weapon carries the scope: never in the scope's own picture.
+  // The weapon carries the scope: never in the scope's own picture. While
+  // the body casts the player's shadow (holding its own weapon), the
+  // weapon at the camera casts none.
+  const bool body_shadow = LocalBodyShown();
   for (size_t i = weapon_first; i < weapon_first + weapon_count; ++i) {
     draws_[i].hidden_in_scope = true;
+    draws_[i].casts_shadow = !body_shadow;
   }
   AppendDroppedWeaponDraws();
+  if (game_state_ == GameState::kOnline) {
+    AppendOnlineDraws();
+  }
+  AppendLocalBodyDraws();
   // World draws come first (index 0 on): the focused scene weapon's.
   world_.AppendSelectedDraws(scene_selection_, 0, selected_draws_);
   AppendEffectDraws();

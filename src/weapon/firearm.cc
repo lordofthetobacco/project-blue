@@ -1,7 +1,9 @@
 #include "weapon/firearm.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 
 namespace blue::weapon {
 namespace {
@@ -47,7 +49,23 @@ FireMode NextMode(FireMode current, FireModeMask modes) {
   return current;
 }
 
+// Returns whether `a` and `b` differ by at most `tolerance`.
+bool Near(float a, float b, float tolerance) {
+  return std::abs(a - b) <= tolerance;
+}
+
 }  // namespace
+
+bool NearlyEqual(const FirearmState& a, const FirearmState& b,
+                 float tolerance) {
+  FirearmState a_exact = a;
+  a_exact.reload_elapsed = b.reload_elapsed;
+  a_exact.reload_duration = b.reload_duration;
+  a_exact.cycle_remaining = b.cycle_remaining;
+  return a_exact == b && Near(a.reload_elapsed, b.reload_elapsed, tolerance) &&
+         Near(a.reload_duration, b.reload_duration, tolerance) &&
+         Near(a.cycle_remaining, b.cycle_remaining, tolerance);
+}
 
 Firearm::Firearm(const FirearmSpec& spec)
     : spec_(spec), fire_mode_(StartMode(spec.fire_mode, spec.fire_modes)) {
@@ -124,6 +142,52 @@ void Firearm::Refit(const FirearmSpec& spec) {
   }
   if ((AvailableModes(spec_.fire_modes) & FireModeBit(fire_mode_)) == 0) {
     fire_mode_ = StartMode(spec_.fire_mode, spec_.fire_modes);
+  }
+}
+
+FirearmState Firearm::SaveState() const {
+  FirearmState state{
+      .fire_mode = fire_mode_,
+      .magazine = static_cast<int16_t>(magazine_),
+      .incoming_magazine = static_cast<int16_t>(incoming_magazine_),
+      .magazine_inserted = magazine_inserted_,
+      .chambered = chambered_,
+      .bolt_locked = bolt_locked_,
+      .empty_reload = empty_reload_,
+      .pull_used = pull_used_,
+      .reload_stage = static_cast<int8_t>(reload_stage_),
+      .reload_elapsed = reload_elapsed_,
+      .reload_duration = reload_duration_,
+      .cycle_remaining = cycle_remaining_,
+  };
+  const size_t saved = std::min(spare_magazines_.size(), state.spares.size());
+  for (size_t i = 0; i < saved; ++i) {
+    state.spares[i] = static_cast<int16_t>(spare_magazines_[i]);
+  }
+  state.spare_count = static_cast<uint8_t>(saved);
+  state.spares_dropped = static_cast<uint8_t>(
+      std::min<size_t>(spare_magazines_.size() - saved, UINT8_MAX));
+  return state;
+}
+
+void Firearm::RestoreState(const FirearmState& state) {
+  fire_mode_ = state.fire_mode;
+  magazine_ = state.magazine;
+  incoming_magazine_ = state.incoming_magazine;
+  magazine_inserted_ = state.magazine_inserted;
+  chambered_ = state.chambered;
+  bolt_locked_ = state.bolt_locked;
+  empty_reload_ = state.empty_reload;
+  pull_used_ = state.pull_used;
+  reload_stage_ = state.reload_stage;
+  reload_elapsed_ = state.reload_elapsed;
+  reload_duration_ = state.reload_duration;
+  cycle_remaining_ = state.cycle_remaining;
+  const size_t count =
+      std::min(static_cast<size_t>(state.spare_count), state.spares.size());
+  spare_magazines_.clear();
+  for (size_t i = 0; i < count; ++i) {
+    spare_magazines_.push_back(state.spares[i]);
   }
 }
 

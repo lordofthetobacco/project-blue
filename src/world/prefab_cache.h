@@ -2,7 +2,6 @@
 #define BLUE_WORLD_PREFAB_CACHE_H_
 
 #include <cstddef>
-#include <cstdint>
 #include <deque>
 #include <map>
 #include <string>
@@ -16,13 +15,11 @@
 #include "prefab/prefab_file.h"
 #include "render/scene_view.h"
 #include "render/texture_types.h"
+#include "world/core/prefab_id.h"
+#include "world/core/prefab_source.h"
 #include "world/gpu_backend.h"
 
 namespace blue::world {
-
-// Handle of a prefab held by a PrefabCache. Stays valid for the cache's
-// lifetime; Replace() keeps the id and swaps what it refers to.
-enum class PrefabId : uint32_t {};
 
 // GPU resources of one prefab, parallel to its vectors.
 struct PrefabGpu {
@@ -39,22 +36,21 @@ struct PrefabGpu {
 // GPU resources. Paths are keyed after platform::AbsolutePath(), so the same
 // file reached through different relative paths loads once. Borrows `gpu`,
 // which must outlive the cache. Not thread-safe; neither copyable nor
-// movable (World and PrefabPose keep references to it).
+// movable (World and PrefabPose keep references to it). The runtime's
+// PrefabSource; the headless one is PrefabStore.
 //
 // Replace() and Release() hand the previous GPU resources back to the
 // backend (freed once no frame in flight uses them). Re-uploading a document
 // still costs a full upload, so parameter-only material changes go through
 // UpdateMaterial(), which re-uploads nothing.
-class PrefabCache {
+class PrefabCache final : public PrefabSource {
  public:
   explicit PrefabCache(GpuBackend& gpu) : gpu_(gpu) {}
-  PrefabCache(const PrefabCache&) = delete;
-  PrefabCache& operator=(const PrefabCache&) = delete;
 
   // Returns the prefab at `path`, loading and uploading it on first use (the
   // load and upload times are logged).
   [[nodiscard]] core::Result<PrefabId, prefab::PrefabError> Get(
-      std::string_view path);
+      std::string_view path) override;
 
   // Returns the id `path` is cached under, without loading.
   [[nodiscard]] std::optional<PrefabId> Find(std::string_view path) const;
@@ -96,14 +92,14 @@ class PrefabCache {
 
   // The references returned by prefab() and gpu() stay valid while other
   // prefabs load; Replace() and Release() of the same id invalidate them.
-  [[nodiscard]] const prefab::Prefab& prefab(PrefabId id) const {
+  [[nodiscard]] const prefab::Prefab& prefab(PrefabId id) const override {
     return entries_[Index(id)].prefab;
   }
   [[nodiscard]] const PrefabGpu& gpu(PrefabId id) const {
     return entries_[Index(id)].gpu;
   }
   // Returns the key (absolute path, or the Upload() key) of `id`.
-  [[nodiscard]] const std::string& key(PrefabId id) const {
+  [[nodiscard]] const std::string& key(PrefabId id) const override {
     return entries_[Index(id)].key;
   }
 

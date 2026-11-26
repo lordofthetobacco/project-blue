@@ -11,11 +11,13 @@
 #include "weapon/parts/weapon_build.h"
 #include "weapon/weapon_def.h"
 #include "weapon/weapon_item.h"
-#include "world/prefab_cache.h"
+#include "world/core/prefab_source.h"
 
 // The game's weapon part catalogue and the weapons built from it: the glue
-// between the catalogue (weapon/parts/), the prefab cache that holds the
-// part models and the weapon library that holds the definitions.
+// between the catalogue (weapon/parts/), the prefab source that holds the
+// part models and the weapon library that holds the definitions. The build
+// rule itself lives in sim/weapon_table.h, shared with the headless
+// simulation.
 
 namespace blue::game {
 
@@ -23,15 +25,16 @@ namespace blue::game {
 inline constexpr std::string_view kCatalogDirectory = "weapons/catalog";
 
 // Makes weapon definitions from part builds. Part prefabs are loaded through
-// `cache` from paths relative to `asset_root`; definitions go into the
+// `prefabs` (the game's PrefabCache) from paths relative to `asset_root`;
+// definitions go into the
 // caller's library, one per distinct build (WeaponLibrary::FindBuild).
 //
-// Borrows `cache`, which must outlive it. Allocates when a catalogue is
+// Borrows `prefabs`, which must outlive it. Allocates when a catalogue is
 // loaded and when a build is seen for the first time, not per frame.
 // Neither copyable nor movable. Not thread-safe.
 class WeaponBuilds {
  public:
-  WeaponBuilds(world::PrefabCache& cache, std::string asset_root);
+  WeaponBuilds(world::PrefabSource& prefabs, std::string asset_root);
   WeaponBuilds(const WeaponBuilds&) = delete;
   WeaponBuilds& operator=(const WeaponBuilds&) = delete;
 
@@ -64,11 +67,7 @@ class WeaponBuilds {
   int RebuildDefs(weapon::WeaponLibrary& library);
 
  private:
-  // Assembles `build` with models from cache_.
-  core::Result<weapon::WeaponDef, std::string> Assemble(
-      const weapon::parts::WeaponBuild& build);
-
-  world::PrefabCache& cache_;
+  world::PrefabSource& prefabs_;
   std::string asset_root_;
   std::optional<weapon::parts::PartCatalog> catalog_;
   std::vector<std::string> reported_presets_;  // failures already logged

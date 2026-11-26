@@ -35,8 +35,19 @@ struct SamplesOptions {
 //   target.pbo    0.5 x 1.0 x 0.05 m steel plate, static box;
 //   crate.pbo     1 m cube, dynamic 10 kg box;
 //   sphere.pbo    1 m sphere, static sphere, grey material "sphere";
+//   kyle_rifle.pbo, kyle_pistol.pbo   "Robot Kyle" posed holding m16.pbo /
+//                 glock17.pbo, from samples/kyle/<name>.glb and .pose: one
+//                 static mesh with the kyle/kyle.bmat material, the weapon
+//                 as a nested child prefab, sockets hand_r / hand_l, a
+//                 static capsule (radius 0.2 m, 1.8 m tall);
+//   kyle.pbo      the animated player model from samples/kyle/kyle.glb
+//                 (tools/assets/kyle/bake_kyle_rig.py): one rigid mesh
+//                 part per bone node, the kyle/kyle.bmat material, sockets
+//                 hand_r / hand_l / head / chest on their nodes, no
+//                 collider;
 //   materials.pbo the ten preview materials, ground and steel (no meshes);
-//   range.mscn    the default range scene, plus env/<hdri> it refers to;
+//   range.mscn    the default range scene (with the two figures beside the
+//                 player start), plus env/<hdri> it refers to;
 //                 a range.mscn edited since it was generated is kept and
 //                 the fresh scene written as range.generated.mscn instead
 //                 (cook::WriteGeneratedFile(), sidecar

@@ -52,6 +52,39 @@ struct PickUpResult {
   bool weapon_changed = false;
 };
 
+// The state of one Loadout slot, as plain data.
+struct LoadoutSlotState {
+  bool present = false;  // the slot holds a weapon; the rest is 0 otherwise
+  FirearmState firearm;
+  float scope_magnification = 0.0f;  // WeaponItem::scope_magnification
+  float scope_zero = 0.0f;           // WeaponItem::scope_zero
+
+  bool operator==(const LoadoutSlotState&) const = default;
+};
+
+// Everything of a Loadout that changes while it is used, as plain data
+// (trivially copyable, fixed size) for per-tick histories and network
+// snapshots. The weapons' definitions, parts and specs are not part of it:
+// a state applies to a loadout carrying the same weapons.
+struct LoadoutState {
+  std::optional<WeaponSlot> active;
+  std::optional<WeaponSlot> selected;
+  float raise = 0.0f;  // linear switch progress in [0, 1]
+  bool wait_for_release = false;
+  std::array<LoadoutSlotState, kWeaponSlotCount> slots{};  // by WeaponSlot
+
+  // Exact comparison, float timers included.
+  bool operator==(const LoadoutState&) const = default;
+};
+
+// Returns whether `a` and `b` are the same state, allowing the firearms'
+// float timers to differ by up to `tolerance` seconds (NearlyEqual() of
+// FirearmState) and the switch progress `raise` by up to `tolerance` as a
+// fraction (0.001 of a switch is under 1 ms at the default switch times);
+// every other field must match exactly.
+[[nodiscard]] bool NearlyEqual(const LoadoutState& a, const LoadoutState& b,
+                               float tolerance = kStateTimeTolerance);
+
 // The carried weapons and switching between them. A slot holds at most one
 // weapon (its definition id and firearm), of the kind that decides the slot
 // (SlotFor() of its firearm's spec); any slot may be empty and so may the
@@ -122,6 +155,18 @@ class Loadout {
   // changed), keeping the switch and raise state. Returns false and changes
   // nothing with empty hands or when `weapon` belongs in another slot.
   bool ReplaceActive(WeaponItem weapon);
+
+  // Returns the loadout's state (see LoadoutState).
+  [[nodiscard]] LoadoutState SaveState() const;
+  // Puts the loadout into `state`. Only slots occupied both here and in
+  // `state` are restored (firearm state, scope magnification and zero). The
+  // switch state (active, selected, raise, wait for release) is restored
+  // when it names slots occupied here; otherwise it is left as it is.
+  // Returns false when the slots do not match (a slot occupied in `state`
+  // but empty here, or the reverse) or the switch state was not applied;
+  // true when everything was restored. Allocates nothing for states saved
+  // from loadouts carrying the same weapons.
+  [[nodiscard]] bool RestoreState(const LoadoutState& state);
 
   // Sets the scope magnification remembered by the weapon in hand
   // (WeaponItem::scope_magnification). Returns false and changes nothing

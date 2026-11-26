@@ -19,6 +19,14 @@
 # fast-math (/fp:fast, -ffast-math: reassociation and finite-math assumptions change physics
 # results and break cross-platform determinism), exceptions and RTTI stay off as before.
 #
+# Floating point: the game client (MSVC) and the dedicated server (GCC) run the same
+# simulation and must get bit-identical results, so every first-party target compiles with
+# strict IEEE semantics and without fused multiply-add contraction: MSVC's default
+# /fp:precise (which does not contract since VS 2022; no first-party target may add /fp:fast
+# or /fp:contract) and -ffp-contract=off on GCC/Clang, whose defaults (=fast, =on) fuse
+# a*b+c into one FMA where the target has one. Jolt is built the same way through its
+# CROSS_PLATFORM_DETERMINISTIC option (cmake/Dependencies.cmake).
+#
 # Options (all cacheable, defaults chosen so the binary runs on any x64 / arm64 CPU):
 #   BLUE_ENABLE_LTO            Release/MinSizeRel link-time optimisation (thin LTO on Clang).
 #   BLUE_ENABLE_AVX2           Compile everything for x86-64-v3 (AVX2, FMA, BMI); x64 only.
@@ -26,6 +34,12 @@
 #   BLUE_LINKER                auto | default | mold | lld (Linux; faster links when present).
 #   BLUE_PRECOMPILED_HEADERS   Precompiled standard-library headers for first-party targets.
 #   BLUE_UNITY_BUILD           Unity builds (batches of translation units) for first-party targets.
+# BLUE_SIM_ONLY (root CMakeLists.txt, the dedicated server's headless build) overrides
+# BLUE_ENABLE_LTO to OFF and builds everything position independent, see below.
+#
+# blue_write_link_manifest(<name> <target>...)
+#   Lists the static archives and system libraries a linker outside CMake (the Rust server's
+#   build.rs) needs for <target>..., see the function below.
 #
 # MSVC: CMake's default CMAKE_CXX_FLAGS holds /EHsc, which first-party targets replace with
 # /EHs-c-; cl prints a D9025 "overriding" note for every file when both are present.
@@ -47,6 +61,15 @@ set(BLUE_LINKER "auto" CACHE STRING "Linker on Linux: auto, default, mold or lld
 set_property(CACHE BLUE_LINKER PROPERTY STRINGS auto default mold lld)
 
 get_property(blue_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+
+# --- Sim-only build (dedicated server) ---------------------------------------------------------
+# rustc links the archives with the system linker: GCC LTO objects (GIMPLE bytecode) are
+# unusable there, and Rust executables are position independent. Set before any target
+# exists, so the third-party libraries are covered too.
+if(BLUE_SIM_ONLY)
+    set(BLUE_ENABLE_LTO OFF)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # --- Optimisation level 2 everywhere (first- and third-party) -----------------------------
 if(NOT MSVC)
@@ -206,9 +229,18 @@ function(blue_target_defaults target)
         endif()
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror
+            -ffp-contract=off
             $<${optimized_configs}:-ffunction-sections -fdata-sections>)
         if(NOT ARG_ALLOW_EXCEPTIONS_AND_RTTI)
             target_compile_options(${target} PRIVATE -fno-exceptions -fno-rtti)
+        endif()
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            # Designated initializers that leave members to their defaults are project style;
+            # GCC's -Wextra flags them as missing initializers, MSVC and Clang do not.
+            # -Wmaybe-uninitialized stays visible but not fatal: GCC 15 reports false
+            # positives through std::optional payloads (src/weapon/loadout.cc:106).
+            target_compile_options(${target} PRIVATE -Wno-missing-field-initializers
+                -Wno-error=maybe-uninitialized)
         endif()
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
             # Debug info in .dwo files keeps Debug links short.
@@ -233,5 +265,118 @@ function(blue_target_defaults target)
     endif()
     if(BLUE_UNITY_BUILD)
         set_target_properties(${target} PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 8)
+    endif()
+endfunction()
+
+# Writes <build>/<name>.link: the absolute path of every static archive <target>... need
+# (the targets themselves and their transitive static dependencies), one per line, each
+# before the archives it depends on (a valid static link order); and <build>/<name>.syslibs:
+# the system libraries to link after them, one bare name per line (stdc++, m, pthread, ...),
+# including the C++ runtime a C link driver would leave out; an Apple framework is written
+# as framework:<name> (weak frameworks too: the manifest does not keep the difference). For
+# linkers outside CMake (the Rust dedicated server's build.rs). The archives are found by
+# walking the targets' INTERFACE_LINK_LIBRARIES at configure time and their paths come from
+# $<TARGET_FILE> at generate time, so the manifest follows the CMake target graph.
+# Multi-config generators write <build>/<config>/<name>.link and .syslibs.
+function(blue_write_link_manifest name)
+    set_property(GLOBAL PROPERTY blue_link_visited "")
+    set_property(GLOBAL PROPERTY blue_link_archives "")
+    set_property(GLOBAL PROPERTY blue_link_syslibs "")
+    foreach(target IN LISTS ARGN)
+        blue_link_manifest_visit("${target}")
+    endforeach()
+
+    # Visited depth first, so every archive follows its dependencies: reverse that.
+    get_property(archives GLOBAL PROPERTY blue_link_archives)
+    list(REVERSE archives)
+    list(TRANSFORM archives REPLACE "^(.+)$" "$<TARGET_FILE:\\1>")
+    list(JOIN archives "\n" archive_lines)
+
+    # The C++ runtime: what the C++ driver links implicitly beyond the C driver
+    # (stdc++ and m with GCC; nothing with MSVC).
+    set(cxx_runtime ${CMAKE_CXX_IMPLICIT_LINK_LIBRARIES})
+    if(CMAKE_C_IMPLICIT_LINK_LIBRARIES)
+        list(REMOVE_ITEM cxx_runtime ${CMAKE_C_IMPLICIT_LINK_LIBRARIES})
+    endif()
+    get_property(syslibs GLOBAL PROPERTY blue_link_syslibs)
+    list(APPEND syslibs ${cxx_runtime})
+    list(REMOVE_DUPLICATES syslibs)
+    # Conditional entries (e.g. Windows-only libraries) may evaluate to nothing.
+    set(syslib_lines "$<JOIN:$<REMOVE_DUPLICATES:$<FILTER:${syslibs},EXCLUDE,^$>>,\n>")
+
+    get_property(multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    set(output "${CMAKE_BINARY_DIR}/$<$<BOOL:${multi_config}>:$<CONFIG>/>${name}")
+    file(GENERATE OUTPUT "${output}.link" CONTENT "${archive_lines}\n")
+    file(GENERATE OUTPUT "${output}.syslibs" CONTENT "${syslib_lines}\n")
+endfunction()
+
+# Visits one link item of blue_write_link_manifest(): a target's dependencies first, then the
+# target itself if it is a static library; anything else is a system library.
+function(blue_link_manifest_visit item)
+    # Private dependencies of static libraries, items of targets that are not exported, target
+    # names spelled as $<TARGET_NAME:...>, and the directory markers (::@...)
+    # target_link_libraries() adds across directories.
+    while(item MATCHES "^\\$<(LINK_ONLY|BUILD_INTERFACE|TARGET_NAME):(.*)>$")
+        set(item "${CMAKE_MATCH_2}")
+    endwhile()
+    if(item STREQUAL "" OR item MATCHES "^::@" OR item MATCHES "^\\$<INSTALL_INTERFACE:")
+        return()
+    endif()
+
+    if(NOT TARGET "${item}")
+        if(item MATCHES "^\\$<LINK_LIBRARY:(WEAK_)?FRAMEWORK,(.+)>$")
+            # Apple frameworks (SDL3 on macOS). $<LINK_LIBRARY:...> evaluates only in a
+            # target's link libraries, not in file(GENERATE), so it is spelled out here.
+            string(REPLACE "," ";" frameworks "${CMAKE_MATCH_2}")
+            list(TRANSFORM frameworks PREPEND "framework:")
+            set_property(GLOBAL APPEND PROPERTY blue_link_syslibs ${frameworks})
+            return()
+        elseif(item MATCHES "^\\$<LINK_(LIBRARY|GROUP):")
+            message(FATAL_ERROR "blue_write_link_manifest: unsupported link feature '${item}'")
+        elseif(item MATCHES "^\\$<")
+            # Conditional (e.g. $<$<PLATFORM_ID:Windows>:ws2_32>), left to file(GENERATE).
+            set(lib "${item}")
+        elseif(item MATCHES "^-pthreads?$")
+            set(lib pthread)
+        elseif(item MATCHES "^-l(.+)$")
+            set(lib "${CMAKE_MATCH_1}")
+        elseif(item MATCHES "/lib([^/]+)\\.(so|a|dylib|tbd)(\\.[0-9.]+)?$")
+            set(lib "${CMAKE_MATCH_1}")
+        elseif(item MATCHES "^(-|SHELL:|LINKER:)")
+            message(FATAL_ERROR "blue_write_link_manifest: unsupported link flag '${item}'")
+        else()
+            set(lib "${item}")
+        endif()
+        set_property(GLOBAL APPEND PROPERTY blue_link_syslibs "${lib}")
+        return()
+    endif()
+
+    get_target_property(aliased "${item}" ALIASED_TARGET)
+    if(aliased)
+        set(item "${aliased}")
+    endif()
+    get_property(visited GLOBAL PROPERTY blue_link_visited)
+    if(item IN_LIST visited)
+        return()
+    endif()
+    set_property(GLOBAL APPEND PROPERTY blue_link_visited "${item}")
+
+    # Link options count too: Jolt passes -pthread as one.
+    foreach(property IN ITEMS INTERFACE_LINK_LIBRARIES INTERFACE_LINK_OPTIONS)
+        get_target_property(dependencies "${item}" ${property})
+        if(dependencies)
+            foreach(dependency IN LISTS dependencies)
+                blue_link_manifest_visit("${dependency}")
+            endforeach()
+        endif()
+    endforeach()
+
+    get_target_property(type "${item}" TYPE)
+    get_target_property(imported "${item}" IMPORTED)
+    if(type STREQUAL "STATIC_LIBRARY" AND NOT imported)
+        set_property(GLOBAL APPEND PROPERTY blue_link_archives "${item}")
+    elseif(NOT type STREQUAL "INTERFACE_LIBRARY")
+        message(FATAL_ERROR "blue_write_link_manifest: ${item} is a ${type}; only static "
+            "libraries built here and interface libraries are supported")
     endif()
 endfunction()

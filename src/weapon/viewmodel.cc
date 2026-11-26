@@ -183,15 +183,8 @@ void Viewmodel::Update(const ViewmodelInput& input) {
           bob_scale,
       0.0f);
 
-  // Recoil: each shot kicks the springs and the camera.
-  const float recoil_scale =
-      1.0f + (tuning_.aim_recoil_scale - 1.0f) * aim_weight;
-  for (int shot = 0; shot < input.shots; ++shot) {
-    recoil_back_velocity_ += tuning_.recoil_back_velocity * recoil_scale;
-    recoil_pitch_velocity_ += tuning_.recoil_pitch_velocity * recoil_scale;
-    look_kick_.x += tuning_.look_kick_pitch * recoil_scale;
-    look_kick_.y += tuning_.look_kick_yaw * NextSpread() * recoil_scale;
-  }
+  // Recoil springs: this frame's shots kick them only once the pose is
+  // composed (end of Update), so the bullets leave along the bore as aimed.
   StepSpring(tuning_.recoil_frequency, dt, recoil_back_, recoil_back_velocity_);
   StepSpring(tuning_.recoil_frequency, dt, recoil_pitch_,
              recoil_pitch_velocity_);
@@ -266,6 +259,19 @@ void Viewmodel::Update(const ViewmodelInput& input) {
                             (pose_rotation * glm::vec3(0.0f, 1.0f, 0.0f)));
   optic_axis_ = glm::normalize(camera_to_world_rotation *
                                (pose_rotation * glm::vec3(0.0f, 0.0f, -1.0f)));
+
+  // Recoil: each shot kicks the springs and the camera. The bullet is gone
+  // before the rifle moves, so the kick shows from the next Update on, like
+  // the look kick; kicking the pose above would fire along a barrel already
+  // rising by a frame's worth of recoil (high, and more so at low FPS).
+  const float recoil_scale =
+      1.0f + (tuning_.aim_recoil_scale - 1.0f) * aim_weight;
+  for (int shot = 0; shot < input.shots; ++shot) {
+    recoil_back_velocity_ += tuning_.recoil_back_velocity * recoil_scale;
+    recoil_pitch_velocity_ += tuning_.recoil_pitch_velocity * recoil_scale;
+    look_kick_.x += tuning_.look_kick_pitch * recoil_scale;
+    look_kick_.y += tuning_.look_kick_yaw * NextSpread() * recoil_scale;
+  }
 }
 
 void Viewmodel::Reset() {

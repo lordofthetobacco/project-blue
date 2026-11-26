@@ -94,3 +94,34 @@ jobs:
       - name: Direct3D 12 render tests (WARP)
         if: runner.os == 'Windows'
         run: out/build/${{ matrix.preset }}/tests/render/blue_render_tests --backend=d3d12 --adapter=software --gpu-validation
+
+  # The headless simulation core the Rust dedicated server links (BLUE_SIM_ONLY; the server itself
+  # is built in the blue-server repository): built with only what the server's Linux container
+  # has (cmake, make, gcc/g++, git), so no Vulkan SDK, windowing packages, ninja or compiler cache.
+  linux-sim:
+    name: linux-sim
+    runs-on: ubuntu-latest
+    env:
+      FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-sim-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake', 'tests/sim/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake --preset linux-sim
+
+      - name: Build
+        run: cmake --build --preset linux-sim --parallel
+
+      - name: Test
+        run: ctest --preset linux-sim
+
+      - name: Link manifest
+        run: |
+          cat out/build/linux-sim/blue_sim_c.link out/build/linux-sim/blue_sim_c.syslibs
+          xargs -a out/build/linux-sim/blue_sim_c.link ls -l

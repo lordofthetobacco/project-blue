@@ -34,6 +34,23 @@ struct CharacterDesc {
   // Share of the desired horizontal velocity applied per step while airborne,
   // in [0, 1]; 0 keeps the launch velocity, 1 steers freely.
   float air_control = 0.3f;
+  // False: the world moves the character inside every fixed step. True: the
+  // world leaves it alone and its owner calls Character::Step once per tick,
+  // e.g. to replay a predicted player without stepping the rigid bodies.
+  bool manual_step = false;
+};
+
+// Everything that carries a character from one step to the next, for saving
+// and rewinding it (prediction replay). The desired velocity is not part of
+// it: it is input, set again before every step.
+struct CharacterState {
+  glm::vec3 position{0.0f};  // Feet after the last step.
+  glm::vec3 velocity{0.0f};  // m/s
+  bool jump_pending = false;
+  int jump_age = 0;       // Steps since the pending jump request was made.
+  int jump_cooldown = 0;  // Steps left before the character counts as grounded.
+  bool crouching = false;
+  float jump_speed = 0.0f;  // m/s of the pending (or last) jump request.
 };
 
 // A kinematic player capsule that walks on the world's bodies, climbs steps,
@@ -41,18 +58,18 @@ struct CharacterDesc {
 // behind it), but it pushes dynamic bodies it walks into. Positions are the
 // feet: the bottom center of the capsule.
 //
-// The character is advanced by its PhysicsWorld inside every fixed step, so
-// gameplay sets the desired velocity and jump requests at any time and they
-// take effect on the next step. The character must be destroyed before the
-// world. Neither copyable nor movable. Not thread-safe.
+// Unless CharacterDesc::manual_step is set, the character is advanced by its
+// PhysicsWorld inside every fixed step, so gameplay sets the desired velocity
+// and jump requests at any time and they take effect on the next step. The
+// character must be destroyed before the world. Neither copyable nor movable.
+// Not thread-safe.
 class Character {
  public:
   // Creates a standing character with its feet at `feet_position`. Fails with
   // kInvalidShape for an inconsistent `desc` and kShapeBuildFailed when the
   // physics library rejects the capsule.
   static core::Result<std::unique_ptr<Character>, PhysicsError> Create(
-      PhysicsWorld& world, const CharacterDesc& desc,
-      glm::vec3 feet_position);
+      PhysicsWorld& world, const CharacterDesc& desc, glm::vec3 feet_position);
 
   Character(const Character&) = delete;
   Character& operator=(const Character&) = delete;
@@ -80,9 +97,25 @@ class Character {
   // rebuilt.
   void RefreshContacts();
 
+  // Advances a manual-step character by one fixed step (kFixedStepSeconds),
+  // exactly as the world would. Other bodies do not move. Does nothing but
+  // log a warning for a character the world steps.
+  void Step();
+
+  // Returns the current state, see CharacterState.
+  [[nodiscard]] CharacterState SaveState() const;
+  // Puts the character back into `state` saved earlier (by this or another
+  // character with the same desc). The stance is forced even when the
+  // standing capsule would overlap something: this is a rewind, not a stand
+  // up. The interpolation restarts at the restored position and the contacts
+  // are re-detected.
+  void RestoreState(const CharacterState& state);
+
   // Feet position interpolated between the last two steps, like
   // PhysicsWorld::InterpolatedPose.
   [[nodiscard]] glm::vec3 position() const;
+  // Feet position after the last step, without interpolation.
+  [[nodiscard]] glm::vec3 tick_position() const;
   // Velocity after the last step (m/s).
   [[nodiscard]] glm::vec3 velocity() const;
   [[nodiscard]] GroundState ground_state() const;

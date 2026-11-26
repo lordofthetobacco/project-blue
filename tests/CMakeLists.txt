@@ -57,6 +57,7 @@ add_executable(blue_tests
     physics_world_test.cc
     house_sample_test.cc
     character_test.cc
+    collision_parity_test.cc
     cascades_test.cc
     firearm_test.cc
     projectile_system_test.cc
@@ -83,6 +84,8 @@ add_executable(blue_tests
     part_stash_test.cc
     weapon_modding_test.cc
     inspect_screen_rules_test.cc
+    main_menu_rules_test.cc
+    remote_players_test.cc
     window_pair_test.cc
     shader_bindings_test.cc
     shader_preprocessor_test.cc
@@ -98,6 +101,9 @@ add_executable(blue_tests
     cook_collision_test.cc
     cook_model_test.cc
     cook_samples_test.cc
+    kyle_figures_test.cc
+    character_animator_test.cc
+    pose_file_test.cc
     cook_texture_test.cc
     editor_prefab_edit_test.cc
     editor_scene_edit_test.cc
@@ -152,7 +158,7 @@ target_compile_definitions(blue_tests PRIVATE
 
 blue_target_defaults(blue_tests ALLOW_EXCEPTIONS_AND_RTTI)
 
-target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_material blue_asset blue_animation blue_input blue_camera blue_input_mapper blue_physics blue_player blue_interact blue_weapon blue_game blue_lighting blue_shader blue_render blue_cook blue_prefab blue_world blue_editor_core blue_mcp blue_image_compare doctest::doctest)
+target_link_libraries(blue_tests PRIVATE blue_core blue_scene blue_material blue_asset blue_animation blue_input blue_camera blue_input_mapper blue_physics blue_player blue_interact blue_weapon blue_game blue_lighting blue_shader blue_render blue_cook blue_prefab blue_world blue_world_core blue_sim blue_editor_core blue_mcp blue_image_compare doctest::doctest)
 
 # assimp is a DLL (see cmake/Dependencies.cmake); copy it next to the runner.
 blue_copy_runtime_dlls(blue_tests SLANG)
@@ -162,6 +168,10 @@ blue_copy_runtime_dlls(blue_tests SLANG)
 add_dependencies(blue_tests blue_sample_assets blue_shaders)
 
 add_test(NAME blue_tests COMMAND blue_tests)
+
+# Headless simulation tests (blue_sim_tests): no GPU, shaders or cooked assets, so they
+# also build in the headless Linux configuration of the dedicated server.
+add_subdirectory(sim)
 
 # Headless GPU render tests (blue_render_tests, label gpu) and the image
 # comparison library blue_tests unit tests.

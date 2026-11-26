@@ -13,7 +13,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -23,13 +22,13 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
-#include "animation/transform.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "material/material.h"
 #include "prefab/prefab.h"
 #include "render/scene_view.h"
 #include "scene/scene_data.h"
+#include "world/core/placement_plan.h"
 
 namespace blue::world {
 namespace {
@@ -201,8 +200,8 @@ struct World::Builder {
     size_t count;
   };
   std::vector<PendingSpan> pending;
-  // scene.prefabs resolved once per build (nullopt = not tried yet).
-  std::vector<std::optional<std::optional<PrefabId>>> resolved;
+  // scene.prefabs resolved once per build, continued from the plan.
+  ScenePrefabSlots resolved;
 
   void Issue(scene::InstanceId id, std::string message) {
     issues.push_back({id, std::move(message)});
@@ -210,71 +209,8 @@ struct World::Builder {
 
   // Returns the cached prefab at scene.prefabs[index], or nullopt (issue).
   std::optional<PrefabId> ScenePrefab(scene::InstanceId owner, int index) {
-    if (index < 0 || static_cast<size_t>(index) >= scene.prefabs.size()) {
-      Issue(owner, std::format("prefab index {} out of range", index));
-      return std::nullopt;
-    }
-    if (resolved.empty()) {
-      resolved.resize(scene.prefabs.size());
-    }
-    std::optional<std::optional<PrefabId>>& slot =
-        resolved[static_cast<size_t>(index)];
-    if (slot.has_value()) {
-      return *slot;
-    }
-    const std::string& path = scene.prefabs[static_cast<size_t>(index)];
-    auto id = world.cache_.Get(path);
-    if (!id.ok()) {
-      Issue(owner, std::format("cannot load prefab {}: {}", path,
-                               prefab::ToString(id.error())));
-      slot = std::optional<PrefabId>();
-      return std::nullopt;
-    }
-    slot = id.value();
-    return id.value();
-  }
-
-  // Adds a placement of `prefab` and, depth first, its nested prefabs.
-  // `chain` holds the prefabs from the instance's own down to the parent,
-  // for cycle detection.
-  void AddPlacement(scene::InstanceId owner, PrefabId prefab, int parent,
-                    int parent_node, const glm::mat4& local, int depth,
-                    std::vector<PrefabId>& chain) {
-    const auto index = static_cast<int>(world.placements_.size());
-    world.placements_.push_back(
-        {.owner = owner, .prefab = prefab, .parent = parent, .depth = depth});
-    world.states_.push_back({.pose = PrefabPose(world.cache_, prefab),
-                             .local = local,
-                             .parent_node = parent_node});
-    chain.push_back(prefab);
-    // Copy: the cache's vectors stay put, but be robust to Get() appending.
-    const std::vector<prefab::ChildPrefab> children =
-        world.cache_.prefab(prefab).children;
-    for (const prefab::ChildPrefab& child : children) {
-      auto child_id = world.cache_.Get(child.path);
-      if (!child_id.ok()) {
-        Issue(owner, std::format("cannot load nested prefab {}: {}", child.path,
-                                 prefab::ToString(child_id.error())));
-        continue;
-      }
-      if (std::ranges::find(chain, child_id.value()) != chain.end()) {
-        std::string cycle;
-        for (const PrefabId link : chain) {
-          cycle += world.cache_.key(link) + " -> ";
-        }
-        Issue(owner, "nested prefab cycle: " + cycle + child.path);
-        continue;
-      }
-      if (depth + 1 > kMaxPrefabDepth) {
-        Issue(owner, std::format("nested prefab {} exceeds the depth limit "
-                                 "of {}",
-                                 child.path, kMaxPrefabDepth));
-        continue;
-      }
-      AddPlacement(owner, child_id.value(), index, child.node,
-                   animation::ToMatrix(child.local), depth + 1, chain);
-    }
-    chain.pop_back();
+    return ResolveScenePrefab(scene, world.cache_, owner, index, resolved,
+                              issues);
   }
 
   // Returns the material that replaces material `material` of `prefab` for
@@ -378,82 +314,45 @@ std::vector<WorldIssue> World::Build(const scene::SceneData& scene) {
   light_offsets_.clear();
   animated_.clear();
 
-  Builder builder{.world = *this, .scene = scene};
-
-  // Order the visible instances parents first; instances whose parent chain
-  // is broken or hidden are skipped.
-  std::unordered_map<scene::InstanceId, size_t> by_id;
-  for (size_t i = 0; i < scene.instances.size(); ++i) {
-    by_id.emplace(scene.instances[i].id, i);
-  }
-  // 0 = unvisited, 1 = in progress, 2 = placed, 3 = skipped.
-  std::vector<uint8_t> state(scene.instances.size(), 0);
-  std::vector<size_t> order;
-  order.reserve(scene.instances.size());
-  for (size_t root = 0; root < scene.instances.size(); ++root) {
-    // Walk up to the first resolved ancestor, then place downwards.
-    std::vector<size_t> path;
-    size_t current = root;
-    bool broken = false;
-    while (state[current] == 0) {
-      state[current] = 1;
-      path.push_back(current);
-      const scene::InstanceId parent = scene.instances[current].parent;
-      if (parent == scene::kNoInstance) {
-        break;
-      }
-      auto found = by_id.find(parent);
-      if (found == by_id.end() || state[found->second] == 1) {
-        broken = true;
-        break;
-      }
-      current = found->second;
-    }
-    // The top of the path decides for the whole path.
-    const size_t top = path.empty() ? current : path.back();
-    const scene::InstanceId top_parent = scene.instances[top].parent;
-    bool skip =
-        broken || (top_parent != scene::kNoInstance &&
-                   by_id.contains(top_parent) && state[by_id[top_parent]] == 3);
-    if (broken && !path.empty()) {
-      builder.Issue(scene.instances[path.back()].id,
-                    "broken parent chain (missing parent or a cycle)");
-    }
-    for (auto it = path.rbegin(); it != path.rend(); ++it) {
-      skip = skip || !scene.instances[*it].visible;
-      state[*it] = skip ? 3 : 2;
-      if (!skip) {
-        order.push_back(*it);
-      }
-    }
+  // Which prefabs go where comes from the GPU-free plan (shared with the
+  // dedicated server); poses, overrides, lights and draws are added here.
+  PlacementPlan plan = ResolvePlacements(scene, cache_);
+  Builder builder{.world = *this,
+                  .scene = scene,
+                  .resolved = std::move(plan.scene_prefabs)};
+  placements_ = std::move(plan.placements);
+  states_.reserve(placements_.size());
+  for (size_t p = 0; p < placements_.size(); ++p) {
+    states_.push_back({.pose = PrefabPose(cache_, placements_[p].prefab),
+                       .local = plan.attachments[p].local,
+                       .parent_node = plan.attachments[p].parent_node});
   }
 
-  for (const size_t index : order) {
-    const scene::Instance& instance = scene.instances[index];
-    InstanceEntry entry{.id = instance.id, .parent = instance.parent};
-    glm::mat4 parent_world(1.0f);
-    if (const InstanceEntry* parent = FindEntry(instance.parent)) {
-      parent_world = parent->world;
+  // The plan's issues come first per instance, then its override issues, as
+  // when one pass did both.
+  size_t next_issue = 0;
+  const auto take_issues = [&](size_t end) {
+    for (; next_issue < end; ++next_issue) {
+      builder.issues.push_back(std::move(plan.issues[next_issue]));
     }
-    entry.world = parent_world * instance.transform.Matrix();
-    entry.first_placement = -1;
-    if (instance.prefab != scene::kNoPrefab) {
-      if (std::optional<PrefabId> prefab =
-              builder.ScenePrefab(instance.id, instance.prefab)) {
-        entry.first_placement = static_cast<int>(placements_.size());
-        std::vector<PrefabId> chain;
-        builder.AddPlacement(instance.id, *prefab, -1, -1, glm::mat4(1.0f), 0,
-                             chain);
-        entry.placement_count =
-            static_cast<int>(placements_.size()) - entry.first_placement;
-        builder.ApplyOverrides(instance,
-                               static_cast<size_t>(entry.first_placement),
-                               static_cast<size_t>(entry.placement_count));
-      }
+  };
+  instances_.reserve(plan.instances.size());
+  for (const PlannedInstance& planned : plan.instances) {
+    take_issues(planned.issue_end);
+    const InstanceEntry entry{.id = planned.id,
+                              .parent = planned.parent,
+                              .world = planned.world,
+                              .first_placement = planned.first_placement,
+                              .placement_count = planned.placement_count};
+    if (entry.first_placement >= 0) {
+      builder.ApplyOverrides(scene.instances[planned.scene_index],
+                             static_cast<size_t>(entry.first_placement),
+                             static_cast<size_t>(entry.placement_count));
     }
     entry_index_.emplace(entry.id, instances_.size());
     instances_.push_back(entry);
   }
+  take_issues(plan.issues.size());
 
   // override_draws_ is complete: hand out the views.
   for (PlacementState& placement : states_) {

@@ -7,6 +7,8 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/trigonometric.hpp>
 
+#include "core/det_math.h"
+
 namespace blue::camera {
 namespace {
 
@@ -22,17 +24,20 @@ float WrapYaw(float yaw) {
 }
 
 glm::vec3 ForwardFrom(LookAngles look) {
-  const float cos_pitch = std::cos(look.pitch);
-  return {-std::sin(look.yaw) * cos_pitch, std::sin(look.pitch),
-          -std::cos(look.yaw) * cos_pitch};
+  // Deterministic trigonometry: the simulation aims and moves with these.
+  const core::SinCos yaw = core::DetSinCos(look.yaw);
+  const core::SinCos pitch = core::DetSinCos(look.pitch);
+  return {-yaw.sin * pitch.cos, pitch.sin, -yaw.cos * pitch.cos};
 }
 
 glm::vec3 FlatRightFrom(float yaw) {
-  return {std::cos(yaw), 0.0f, -std::sin(yaw)};
+  const core::SinCos angle = core::DetSinCos(yaw);
+  return {angle.cos, 0.0f, -angle.sin};
 }
 
 glm::vec3 FlatForwardFrom(float yaw) {
-  return {-std::sin(yaw), 0.0f, -std::cos(yaw)};
+  const core::SinCos angle = core::DetSinCos(yaw);
+  return {-angle.sin, 0.0f, -angle.cos};
 }
 
 LookAngles ApplyMouseLook(LookAngles look, glm::vec2 delta,
@@ -54,8 +59,8 @@ LookAngles LookTowards(glm::vec3 from, glm::vec3 to) {
   }
   const glm::vec3 direction = offset / distance;
   return {
-      .yaw = std::atan2(-direction.x, -direction.z),
-      .pitch = std::clamp(std::asin(std::clamp(direction.y, -1.0f, 1.0f)),
+      .yaw = core::DetAtan2(-direction.x, -direction.z),
+      .pitch = std::clamp(core::DetAsin(std::clamp(direction.y, -1.0f, 1.0f)),
                           -kMaxPitch, kMaxPitch),
   };
 }

@@ -7,6 +7,8 @@
 #include <glm/geometric.hpp>
 #include <glm/vec3.hpp>
 
+#include "core/det_math.h"
+
 namespace blue::weapon {
 namespace {
 
@@ -37,8 +39,11 @@ glm::vec3 Dispersion::Apply(glm::vec3 direction, float accuracy_moa) {
   const float max_angle = 0.5f * accuracy_moa * kRadiansPerMoa;
   const float angle = max_angle * std::sqrt(NextUnit());
   const float turn = 2.0f * std::numbers::pi_v<float> * NextUnit();
+  // Deterministic trigonometry: the server and the shooter's prediction
+  // spread the same shot the same way.
+  const core::SinCos around = core::DetSinCos(turn);
   const glm::vec3 offset =
-      std::tan(angle) * (std::cos(turn) * right + std::sin(turn) * up);
+      core::DetTan(angle) * (around.cos * right + around.sin * up);
   return glm::normalize(forward + offset) * length;
 }
 

@@ -20,6 +20,7 @@
 #include <glm/vec3.hpp>
 
 #include "animation/clip.h"
+#include "animation/hierarchy.h"
 #include "animation/transform.h"
 #include "asset/mesh_data.h"
 #include "cook/clip_tools.h"
@@ -27,6 +28,7 @@
 #include "cook/cook_error.h"
 #include "cook/generated_file.h"
 #include "cook/model_cook.h"
+#include "cook/pose_file.h"
 #include "core/log.h"
 #include "core/path.h"
 #include "material/material.h"
@@ -128,6 +130,35 @@ constexpr glm::vec3 kLampColor{1.0f, 0.96f, 0.9f};
 constexpr float kLampRange = 20.0f;
 
 constexpr const char* kHdri = "env/kloofendal_48d_partly_cloudy_puresky_2k.hdr";
+
+// ---------------------------------------------------------------------------
+// "Robot Kyle" figures: static meshes posed holding a weapon, baked by
+// tools/assets/kyle/bake_kyle_poses.py into samples/kyle/<name>.glb plus
+// <name>.pose (cook/pose_file.h), the weapon nested as a child prefab.
+
+constexpr std::string_view kFigureDirectory = "kyle";
+constexpr std::string_view kFigureMaterial = "kyle/kyle.bmat";
+struct Figure {
+  std::string_view name;  // kyle/<name>.glb, kyle/<name>.pose -> <name>.pbo
+  std::string_view instance;
+};
+constexpr Figure kFigures[] = {{"kyle_rifle", "kyle rifle"},
+                               {"kyle_pistol", "kyle pistol"}};
+// One static capsule round the 1.8 m body, standing on the ground.
+constexpr float kFigureHeight = 1.8f;  // m
+constexpr float kFigureRadius = 0.2f;  // m
+// Beside the shooter, out of the lanes: the first figure 3 m to the right
+// of the player start, the next 1.5 m further, facing down range like the
+// player start; feet on the ground.
+constexpr float kFigureFirstOffset = 3.0f;  // m right of the player start
+constexpr float kFigureSpacing = 1.5f;      // m
+
+// The animated player model: Kyle split into rigid parts on the bone
+// hierarchy, baked by tools/assets/kyle/bake_kyle_rig.py into
+// samples/kyle/kyle.glb. Its empty nodes of these names become sockets.
+constexpr std::string_view kCharacterModel = "kyle/kyle.glb";
+constexpr std::string_view kCharacterSockets[] = {"hand_r", "hand_l", "head",
+                                                  "chest"};
 
 // Returns the rotation that turns +Z into `axis` (unit).
 glm::quat RotationFromZ(glm::vec3 axis) {
@@ -439,6 +470,108 @@ bool CookSphere(SampleCooker& cooker) {
          cooker.Save(prefab, "sphere", start);
 }
 
+// A posed figure: its baked mesh with the plain kyle material, the weapon of
+// its pose file nested at the hands, the hand sockets and one static capsule.
+// The weapon prefab must have been cooked already.
+bool CookFigure(SampleCooker& cooker, std::string_view name) {
+  const Clock::time_point start = Clock::now();
+  const std::string source =
+      cooker.Source(std::format("{}/{}.glb", kFigureDirectory, name));
+  auto pose = cook::LoadPoseFile(
+      cooker.Source(std::format("{}/{}.pose", kFigureDirectory, name)));
+  if (!pose.ok()) {
+    core::log::Error("blue-pack samples: {}", pose.error());
+    return false;
+  }
+  cook::ModelCookOptions options = cooker.cook_options();
+  options.merge_static_nodes = true;
+  options.use_material_overrides = false;
+  auto cooked = cook::CookModel(source, options);
+  if (!cooked.ok()) {
+    core::log::Error("blue-pack samples: {}: {}", source,
+                     cook::ToString(cooked.error()));
+    return false;
+  }
+  prefab::Prefab prefab = std::move(cooked).value();
+  // The bake writes one material; kyle.bmat replaces it in place.
+  std::optional<material::MaterialDesc> paint =
+      cooker.Material(kFigureMaterial);
+  if (prefab.materials.size() != 1 || !paint) {
+    core::log::Error("blue-pack samples: {}: expected one material", source);
+    return false;
+  }
+  prefab.materials.clear();
+  if (!cooker.AddMaterial(prefab, *paint)) {
+    return false;
+  }
+  prefab.children.push_back({.path = cooker.Out(pose.value().weapon),
+                             .local = pose.value().weapon_local});
+  prefab.sockets = std::move(pose.value().sockets);
+
+  const float half_height = 0.5f * kFigureHeight - kFigureRadius;
+  auto collider = cook::CookCollision(
+      prefab,
+      {.kind = prefab::ColliderKind::kCapsule,
+       .center = {0.0f, 0.5f * kFigureHeight, 0.0f},
+       .radius = kFigureRadius,
+       .half_height = half_height,
+       .friction = kFriction,
+       .restitution = kRestitution},
+      cook::ShapeFit::kParameters);
+  if (!collider.ok()) {
+    core::log::Error("blue-pack samples: {} collider: {}", name,
+                     cook::ToString(collider.error()));
+    return false;
+  }
+  return cooker.Save(prefab, name, start);
+}
+
+// The player model: one mesh per body part on its bone node, the kyle
+// material, sockets on the socket nodes; no collider (the character's
+// capsule collides).
+bool CookCharacter(SampleCooker& cooker) {
+  const Clock::time_point start = Clock::now();
+  const std::string source = cooker.Source(kCharacterModel);
+  cook::ModelCookOptions options = cooker.cook_options();
+  options.use_material_overrides = false;
+  auto cooked = cook::CookModel(source, options);
+  if (!cooked.ok()) {
+    core::log::Error("blue-pack samples: {}: {}", source,
+                     cook::ToString(cooked.error()));
+    return false;
+  }
+  prefab::Prefab prefab = std::move(cooked).value();
+  std::optional<material::MaterialDesc> paint =
+      cooker.Material(kFigureMaterial);
+  if (prefab.materials.size() != 1 || !paint) {
+    core::log::Error("blue-pack samples: {}: expected one material", source);
+    return false;
+  }
+  prefab.materials.clear();
+  if (!cooker.AddMaterial(prefab, *paint)) {
+    return false;
+  }
+  for (const std::string_view name : kCharacterSockets) {
+    const int node = animation::FindNode(prefab.hierarchy, name);
+    if (node < 0) {
+      core::log::Error("blue-pack samples: {}: no socket node '{}'", source,
+                       name);
+      return false;
+    }
+    prefab.sockets.push_back({.name = std::string(name), .node = node});
+  }
+  return cooker.Save(prefab, "kyle", start);
+}
+
+bool CookFigures(SampleCooker& cooker) {
+  for (const Figure& figure : kFigures) {
+    if (!CookFigure(cooker, figure.name)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string PreviewMaterialFile(std::string_view kind, std::string_view tag) {
   return std::format("materials/preview/{}_r{}.bmat", kind, tag);
 }
@@ -534,6 +667,16 @@ bool CookRangeScene(
     }
   }
 
+  for (size_t i = 0; i < std::size(kFigures); ++i) {
+    glm::vec3 position =
+        kFiringPosition +
+        kRight * (kFigureFirstOffset +
+                  kFigureSpacing * static_cast<float>(i));
+    position.y = 0.0f;
+    Place(scene, cooker, std::format("{}.pbo", kFigures[i].name),
+          std::string(kFigures[i].instance), {.position = position});
+  }
+
   scene.sun.direction = scene::kDefaultSunDirection;
   scene.sun.color = scene::kDefaultSunColor;
   scene.sun.intensity = scene::kDefaultSunIntensity;
@@ -604,12 +747,12 @@ bool CookSamples(const SamplesOptions& options) {
   physics::PhysicsRuntime runtime;
   SampleCooker cooker(options);
   std::array<std::array<std::string, 5>, 2> preview_names;
-  const bool ok = CookRifle(cooker) && CookPistol(cooker) &&
-                  CookPartsCatalog(cooker) && CookHouse(cooker) &&
-                  CookGround(cooker) && CookTarget(cooker) &&
-                  CookCrate(cooker) && CookSphere(cooker) &&
-                  CookMaterialLibrary(cooker, preview_names) &&
-                  CookRangeScene(cooker, preview_names);
+  const bool ok =
+      CookRifle(cooker) && CookPistol(cooker) && CookPartsCatalog(cooker) &&
+      CookHouse(cooker) && CookGround(cooker) && CookTarget(cooker) &&
+      CookCrate(cooker) && CookSphere(cooker) && CookFigures(cooker) &&
+      CookCharacter(cooker) && CookMaterialLibrary(cooker, preview_names) &&
+      CookRangeScene(cooker, preview_names);
   core::log::Info("blue-pack samples: {} in {:.1f} s ({} textures)",
                   ok ? "done" : "FAILED",
                   std::chrono::duration<double>(Clock::now() - start).count(),

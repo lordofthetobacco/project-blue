@@ -22,6 +22,8 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 // clang-format on
 
+#include <glm/gtc/quaternion.hpp>
+
 #include "core/log.h"
 #include "physics/internal/cooked_shape_access.h"
 #include "physics/internal/jolt_math.h"
@@ -40,6 +42,9 @@ constexpr double kMaxFrameSeconds = 0.25;
 constexpr int kMaxStepsPerUpdate = 4;
 // Absorbs float rounding so e.g. 60 calls of 1/60 s yield exactly 60 steps.
 constexpr double kStepEpsilon = 1.0e-6;
+// Callers that step the world themselves rely on the published step being the
+// one the world simulates with.
+static_assert(static_cast<float>(kFixedStep) == kFixedStepSeconds);
 
 // Capacity of the simulation.
 constexpr JPH::uint kMaxBodies = 65536;
@@ -73,6 +78,26 @@ bool IsFiniteVec(glm::vec3 v) {
   return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
+// Returns whether `rotation` is finite and long enough to normalize.
+bool IsValidRotation(const glm::quat& rotation) {
+  const float length = glm::length(rotation);
+  return std::isfinite(length) && length > 1.0e-6f;
+}
+
+// Returns the fraction of a fixed step that `accumulator` seconds make up,
+// clamped to [0, 1].
+float AlphaOf(double accumulator) {
+  return static_cast<float>(std::clamp(accumulator / kFixedStep, 0.0, 1.0));
+}
+
+// Returns the number of job threads for `options`.
+int WorkerThreads(const PhysicsWorldOptions& options) {
+  if (options.worker_threads >= 0) {
+    return options.worker_threads;
+  }
+  return std::max(1, static_cast<int>(std::thread::hardware_concurrency()) - 1);
+}
+
 // Returns whether `desc` can be turned into a body, ignoring the shape.
 bool IsValidScale(glm::vec3 scale) {
   return IsFiniteVec(scale) && std::abs(scale.x) > 1.0e-4f &&
@@ -95,12 +120,10 @@ const char* ToString(PhysicsError error) {
   return "unknown physics error";
 }
 
-PhysicsWorld::Impl::Impl()
+PhysicsWorld::Impl::Impl(const PhysicsWorldOptions& options)
     : temp_allocator_(kTempAllocatorBytes),
-      job_system_(
-          JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
-          std::max(1,
-                   static_cast<int>(std::thread::hardware_concurrency()) - 1)) {
+      job_system_(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers,
+                  WorkerThreads(options)) {
   system_.Init(kMaxBodies, kNumBodyMutexes, kMaxBodyPairs,
                kMaxContactConstraints, layer_mapping_, object_vs_broad_,
                object_pair_);
@@ -129,8 +152,10 @@ void PhysicsWorld::Impl::RemoveParticipant(
   std::erase(participants_, participant);
 }
 
-float PhysicsWorld::Impl::interpolation_alpha() const {
-  return static_cast<float>(std::clamp(accumulator_ / kFixedStep, 0.0, 1.0));
+void PhysicsWorld::Impl::set_interpolation_alpha(float alpha) {
+  if (!std::isnan(alpha)) {
+    interpolation_alpha_ = std::clamp(alpha, 0.0f, 1.0f);
+  }
 }
 
 core::Result<JPH::ShapeRefC, PhysicsError> PhysicsWorld::Impl::GetShape(
@@ -301,6 +326,7 @@ void PhysicsWorld::Impl::Update(float frame_seconds) {
   const int due = static_cast<int>(
       std::floor((accumulator_ + kStepEpsilon * kFixedStep) / kFixedStep));
   if (due <= 0) {
+    interpolation_alpha_ = AlphaOf(accumulator_);
     return;
   }
   const int steps = std::min(due, kMaxStepsPerUpdate);
@@ -309,7 +335,14 @@ void PhysicsWorld::Impl::Update(float frame_seconds) {
     // Drop the backlog instead of spiraling; keep only the sub-step remainder.
     accumulator_ = std::fmod(accumulator_, kFixedStep);
   }
+  interpolation_alpha_ = AlphaOf(accumulator_);
+  RunSteps(steps);
+}
 
+void PhysicsWorld::Impl::RunSteps(int count) {
+  if (count <= 0) {
+    return;
+  }
   if (bodies_added_since_optimize_ > 0 &&
       (!has_stepped_ || bodies_added_since_optimize_ >= kBulkAddThreshold)) {
     system_.OptimizeBroadPhase();
@@ -317,7 +350,7 @@ void PhysicsWorld::Impl::Update(float frame_seconds) {
   }
 
   const auto start = std::chrono::steady_clock::now();
-  for (int i = 0; i < steps; ++i) {
+  for (int i = 0; i < count; ++i) {
     Step();
   }
   has_stepped_ = true;
@@ -343,8 +376,56 @@ Pose PhysicsWorld::Impl::InterpolatedPose(BodyId id) const {
   return ReadPose(bodies, jolt_id);
 }
 
-PhysicsWorld::PhysicsWorld(const PhysicsRuntime& /*runtime*/)
-    : impl_(std::make_unique<Impl>()) {}
+BodyState PhysicsWorld::Impl::GetBodyState(BodyId id) const {
+  const JPH::BodyID jolt_id = ToJolt(id);
+  const JPH::BodyInterface& bodies = system_.GetBodyInterface();
+  if (!bodies.IsAdded(jolt_id)) {
+    return BodyState{};
+  }
+  JPH::Vec3 linear;
+  JPH::Vec3 angular;
+  bodies.GetLinearAndAngularVelocity(jolt_id, linear, angular);
+  return BodyState{.pose = ReadPose(bodies, jolt_id),
+                   .linear_velocity = FromJolt(linear),
+                   .angular_velocity = FromJolt(angular),
+                   .active = bodies.IsActive(jolt_id)};
+}
+
+void PhysicsWorld::Impl::SetBodyState(BodyId id, const BodyState& state) {
+  const JPH::BodyID jolt_id = ToJolt(id);
+  JPH::BodyInterface& bodies = system_.GetBodyInterface();
+  if (!bodies.IsAdded(jolt_id) || !IsFiniteVec(state.pose.position) ||
+      !IsValidRotation(state.pose.rotation) ||
+      !IsFiniteVec(state.linear_velocity) ||
+      !IsFiniteVec(state.angular_velocity)) {
+    return;
+  }
+  bodies.SetPositionAndRotation(jolt_id,
+                                JPH::RVec3(ToJolt(state.pose.position)),
+                                ToJolt(glm::normalize(state.pose.rotation)),
+                                JPH::EActivation::DontActivate);
+  if (bodies.GetMotionType(jolt_id) != JPH::EMotionType::Static) {
+    bodies.SetLinearAndAngularVelocity(jolt_id, ToJolt(state.linear_velocity),
+                                       ToJolt(state.angular_velocity));
+    if (state.active) {
+      bodies.ActivateBody(jolt_id);
+    } else {
+      bodies.DeactivateBody(jolt_id);
+    }
+  }
+  if (auto tracked = tracked_.find(static_cast<uint32_t>(id));
+      tracked != tracked_.end()) {
+    const Pose pose = ReadPose(bodies, jolt_id);
+    tracked->second = TrackedPose{pose, pose};
+  }
+}
+
+PhysicsWorld::PhysicsWorld(const PhysicsRuntime& runtime)
+    : PhysicsWorld(runtime, PhysicsWorldOptions{}) {}
+
+PhysicsWorld::PhysicsWorld(const PhysicsRuntime& /*runtime*/,
+                           const PhysicsWorldOptions& options)
+    : impl_(std::make_unique<Impl>(options)) {}
 
 PhysicsWorld::~PhysicsWorld() = default;
 
@@ -409,6 +490,12 @@ std::optional<RayHit> PhysicsWorld::CastRay(glm::vec3 origin,
 
 void PhysicsWorld::Update(float frame_seconds) { impl_->Update(frame_seconds); }
 
+void PhysicsWorld::StepOnce() { impl_->RunSteps(1); }
+
+void PhysicsWorld::SetInterpolationAlpha(float alpha) {
+  impl_->set_interpolation_alpha(alpha);
+}
+
 Pose PhysicsWorld::InterpolatedPose(BodyId id) const {
   return impl_->InterpolatedPose(id);
 }
@@ -425,6 +512,45 @@ bool PhysicsWorld::IsDynamic(BodyId id) const {
   const JPH::BodyInterface& bodies = impl_->system().GetBodyInterface();
   return bodies.IsAdded(jolt_id) &&
          bodies.GetMotionType(jolt_id) == JPH::EMotionType::Dynamic;
+}
+
+bool PhysicsWorld::IsActive(BodyId id) const {
+  const JPH::BodyID jolt_id = ToJolt(id);
+  const JPH::BodyInterface& bodies = impl_->system().GetBodyInterface();
+  return bodies.IsAdded(jolt_id) && bodies.IsActive(jolt_id);
+}
+
+BodyState PhysicsWorld::GetBodyState(BodyId id) const {
+  return impl_->GetBodyState(id);
+}
+
+void PhysicsWorld::SetBodyState(BodyId id, const BodyState& state) {
+  impl_->SetBodyState(id, state);
+}
+
+void PhysicsWorld::SetKinematic(BodyId id, bool kinematic) {
+  const JPH::BodyID jolt_id = ToJolt(id);
+  JPH::BodyInterface& bodies = impl_->system().GetBodyInterface();
+  if (!bodies.IsAdded(jolt_id) ||
+      bodies.GetMotionType(jolt_id) == JPH::EMotionType::Static) {
+    return;
+  }
+  bodies.SetMotionType(
+      jolt_id,
+      kinematic ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic,
+      JPH::EActivation::Activate);
+}
+
+void PhysicsWorld::MoveKinematic(BodyId id, const Pose& target, float dt) {
+  const JPH::BodyID jolt_id = ToJolt(id);
+  JPH::BodyInterface& bodies = impl_->system().GetBodyInterface();
+  if (!(dt > 0.0f) || !std::isfinite(dt) || !IsFiniteVec(target.position) ||
+      !IsValidRotation(target.rotation) || !bodies.IsAdded(jolt_id) ||
+      bodies.GetMotionType(jolt_id) != JPH::EMotionType::Kinematic) {
+    return;
+  }
+  bodies.MoveKinematic(jolt_id, JPH::RVec3(ToJolt(target.position)),
+                       ToJolt(glm::normalize(target.rotation)), dt);
 }
 
 PhysicsStats PhysicsWorld::Stats() const {

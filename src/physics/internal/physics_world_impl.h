@@ -97,7 +97,7 @@ namespace blue::physics {
 // reverse, so the system goes first.
 class PhysicsWorld::Impl {
  public:
-  Impl();
+  explicit Impl(const PhysicsWorldOptions& options);
   Impl(const Impl&) = delete;
   Impl& operator=(const Impl&) = delete;
   ~Impl();
@@ -108,7 +108,11 @@ class PhysicsWorld::Impl {
   void RemoveBody(BodyId id);
   void RemoveAllBodies();
   void Update(float frame_seconds);
+  // Runs `count` fixed steps back to back and times them for Stats().
+  void RunSteps(int count);
   Pose InterpolatedPose(BodyId id) const;
+  BodyState GetBodyState(BodyId id) const;
+  void SetBodyState(BodyId id, const BodyState& state);
 
   // Registers / unregisters a participant (not owned). Adding one twice or
   // removing an unknown one is ignored.
@@ -117,7 +121,9 @@ class PhysicsWorld::Impl {
 
   // Fraction of the next fixed step already elapsed, in [0, 1], for blending
   // the previous and current step state.
-  float interpolation_alpha() const;
+  float interpolation_alpha() const { return interpolation_alpha_; }
+  // Clamps `alpha` into [0, 1]; NaN is ignored.
+  void set_interpolation_alpha(float alpha);
 
   JPH::PhysicsSystem& system() { return system_; }
   const JPH::PhysicsSystem& system() const { return system_; }
@@ -151,6 +157,8 @@ class PhysicsWorld::Impl {
   std::vector<internal::FixedStepParticipant*> participants_;
 
   double accumulator_ = 0.0;
+  // Set from the accumulator by Update, or by the caller that drives steps.
+  float interpolation_alpha_ = 0.0f;
   float last_step_ms_ = 0.0f;
   int bodies_added_since_optimize_ = 0;
   bool has_stepped_ = false;
