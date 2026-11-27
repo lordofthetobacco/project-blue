@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <span>
+#include <string_view>
 #include <vector>
 
 #include <glm/geometric.hpp>
@@ -13,8 +15,12 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+#include "animation/transform.h"
 #include "asset/mesh_data.h"
+#include "core/path.h"
+#include "game/character_animator.h"
 #include "physics/character.h"
+#include "prefab/prefab_file.h"
 #include "weapon/weapon_def.h"
 
 namespace blue::game {
@@ -124,6 +130,61 @@ TEST_CASE("remote player pitch tilts the weapon") {
   CHECK(forward.z == doctest::Approx(-std::sqrt(0.5f)).epsilon(0.001));
   players.Clear();
   CHECK(players.placements().empty());
+}
+
+const CharacterRig& KyleRig() {
+  static const CharacterRig* const rig = [] {
+    auto loaded = prefab::LoadPrefab(
+        core::JoinPath(BLUE_ASSETS_DIR, std::string_view("kyle.pbo")));
+    REQUIRE(loaded.ok());
+    auto made =
+        MakeCharacterRig(loaded.value().hierarchy, loaded.value().sockets);
+    REQUIRE(made.ok());
+    return new CharacterRig(std::move(made).value());
+  }();
+  return *rig;
+}
+
+TEST_CASE("the animator of a dead player keeps its last pose") {
+  RemotePlayers players;
+  players.SetRig(KyleRig());
+  CHECK(players.animator(3) == nullptr);  // Never animated.
+
+  std::vector<RemotePlayerView> views = {
+      {.id = 3,
+       .feet = glm::vec3(1.0f, 0.0f, 2.0f),
+       .yaw = 0.7f,
+       .velocity = glm::vec3(0.0f, 0.0f, -3.0f)}};
+  for (int i = 0; i < 30; ++i) {
+    players.Update(views, 1.0f / 60.0f);
+  }
+  REQUIRE(players.animator(3) != nullptr);
+  const std::vector<animation::Transform> alive_pose(
+      players.animator(3)->locals().begin(),
+      players.animator(3)->locals().end());
+  const glm::mat4 alive_root = players.animator(3)->root();
+  CHECK(players.animator(3)->locals().size() == KyleRig().node_count);
+  CHECK(players.animator(4) == nullptr);  // Another id, never animated.
+
+  // The player turns dead: no placement, but the pose is still there.
+  views[0].alive = false;
+  views[0].feet = glm::vec3(8.0f, 0.0f, 8.0f);  // The sample may drift on.
+  players.Update(views, 1.0f / 60.0f);
+  CHECK(players.placements().empty());
+  REQUIRE(players.animator(3) != nullptr);
+  const std::span<const animation::Transform> dead_pose =
+      players.animator(3)->locals();
+  REQUIRE(dead_pose.size() == alive_pose.size());
+  for (size_t i = 0; i < alive_pose.size(); ++i) {
+    CHECK(dead_pose[i].translation == alive_pose[i].translation);
+    CHECK(dead_pose[i].rotation == alive_pose[i].rotation);
+  }
+  CHECK(players.animator(3)->root() == alive_root);
+
+  // Out-of-range ids are null, and so is everything after Clear().
+  CHECK(players.animator(200) == nullptr);
+  players.Clear();
+  CHECK(players.animator(3) == nullptr);
 }
 
 }  // namespace

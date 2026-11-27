@@ -4,6 +4,7 @@
 #include <SDL3/SDL_events.h>
 
 #include <array>
+#include <bitset>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -23,6 +25,8 @@
 #include "game/character_animator.h"
 #include "game/character_model.h"
 #include "game/part_stash.h"
+#include "game/practice_dummies.h"
+#include "game/ragdolls.h"
 #include "game/remote_players.h"
 #include "game/scene_pickups.h"
 #include "game/weapon_builds.h"
@@ -34,6 +38,7 @@
 #include "lighting/environment.h"
 #include "net/client_session.h"
 #include "net/net_settings.h"
+#include "net/replication.h"
 #include "physics/physics_runtime.h"
 #include "physics/physics_world.h"
 #include "platform/input_mapper.h"
@@ -252,11 +257,42 @@ class App {
   [[nodiscard]] bool LocalBodyShown() const;
   // Appends the remote players' and replicated dropped weapons' draws.
   void AppendOnlineDraws();
+  // Turns the deaths the server reported since the last frame into ragdolls
+  // (the victim's animated pose, velocity and the bullet that killed it), and
+  // forgets the hidden corpses whose player has moved on.
+  void SpawnDeathRagdolls(double now_seconds);
+  // Spawns the ragdoll of one reported death; for the own death it also
+  // starts the death camera.
+  void SpawnDeathRagdoll(const net::DeathRecord& death, double now_seconds);
+  // The bullet of `death` for the ragdoll of a victim standing at `feet`:
+  // the reported hit, else one rebuilt from the killer's eye, else nullopt.
+  [[nodiscard]] std::optional<game::RagdollHit> DeathHitOf(
+      const net::DeathRecord& death, glm::vec3 feet) const;
+  // Follows the own ragdoll's head with death_view_ and ends the death
+  // camera when the player lives again or the ragdoll is gone.
+  void UpdateDeathCamera(float step, double now_seconds);
+  void EndDeathCamera();
+  // Appends the ragdolls' draws (identity root); the own head is shadow-only
+  // while the death camera looks through it.
+  void AppendRagdollDraws();
+  // Removes every ragdoll, hidden corpse, practice dummy and the death
+  // camera; call before the physics world drops its bodies.
+  void ClearRagdolls();
+  // Offline: swaps the range's static Kyle figures for practice dummies.
+  void SetUpPracticeDummies();
+  // Appends the standing practice dummies and the weapons in their hands.
+  void AppendPracticeDummyDraws();
+  // Finds which of the head's meshes (Neck node and below) the death camera
+  // must keep out of the picture; after the character model changed.
+  void FindHeadMeshes();
   // The HUD of a networked game for this frame (data in net_hud_).
   [[nodiscard]] const ui::NetHudInfo* MakeNetHudInfo(double now_seconds);
   // The first-person player view is active (offline: a spawned character;
-  // online: a predicted player).
+  // online: a predicted player that is not riding its own ragdoll).
   [[nodiscard]] bool FirstPersonActive() const;
+  // Online, dead and looking through the own ragdoll's head: the view comes
+  // from death_view_ and there is no viewmodel, scope or local body.
+  [[nodiscard]] bool DeathCameraActive() const;
   [[nodiscard]] bool online_playing() const {
     return game_state_ == GameState::kOnline && session_ != nullptr &&
            session_->player() != nullptr;
@@ -508,6 +544,10 @@ class App {
   // The weapons the player threw away, with their bodies. Not part of the
   // scene: removed by every loadout reset (F9).
   weapon::DroppedWeapons dropped_weapons_;
+  // Ragdolls of killed characters and the offline practice dummies; both
+  // own bodies of the physics world.
+  game::Ragdolls ragdolls_;
+  game::PracticeDummies dummies_;
   player::PlayerController player_;  // Owns a character in physics_world_.
   ui::PerfOverlay overlay_;
 
@@ -656,6 +696,7 @@ class App {
   std::array<sim::WeaponKey, weapon::kWeaponSlotCount> display_keys_{};
   uint64_t next_shot_record_ = 0;    // replication shots read so far
   uint64_t next_impact_record_ = 0;  // replication impacts read so far
+  uint64_t next_death_record_ = 0;   // replication deaths read so far
   size_t taken_pickups_applied_ = 0;
   game::RemotePlayers remote_players_;
   CapsuleMeshes capsule_meshes_;
@@ -663,6 +704,19 @@ class App {
   // local player's body animation, drawn into the shadow maps only.
   std::optional<game::CharacterModel> character_model_;
   std::optional<game::CharacterAnimator> local_body_;
+  // Remote players whose animated body is hidden because their ragdoll lies
+  // in its place, until their interpolated sample shows them dead.
+  std::bitset<net::kMaxPlayers> corpse_hidden_;
+  // Per mesh of the character model: it belongs to the head (Neck node).
+  std::vector<bool> head_meshes_;
+  // The own ragdoll (0: none) and the death camera that rides its head.
+  game::RagdollId own_ragdoll_ = 0;
+  bool death_camera_ = false;
+  bool death_confirmed_ = false;     // The predicted player was seen dead.
+  double death_camera_since_ = 0.0;  // NowSeconds() when it began.
+  bool death_view_valid_ = false;
+  glm::quat death_rotation_{1.0f, 0.0f, 0.0f, 0.0f};
+  ViewPose death_view_;
   std::vector<game::RemotePlayerView> remote_views_;    // reused
   std::vector<ui::NameTag> name_tags_;                  // reused
   std::array<std::string, kKillFeedLines> kill_texts_;  // reused

@@ -23,6 +23,7 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/mat3x3.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/trigonometric.hpp>
 #include <glm/vec2.hpp>
@@ -42,6 +43,8 @@
 #include "game/character_animator.h"
 #include "game/character_model.h"
 #include "game/part_stash.h"
+#include "game/practice_dummies.h"
+#include "game/ragdolls.h"
 #include "game/remote_players.h"
 #include "game/scene_pickups.h"
 #include "game/weapon_builds.h"
@@ -104,12 +107,35 @@ enum class DrawRun : uint64_t {
   kRemotePlayer = 3,   // One remote player's draws; id: player id.
   // One replicated dropped weapon's draws (online); id: its dropped id.
   kNetDroppedWeapon = 4,
+  kRagdoll = 5,        // One ragdoll's draws; id: RagdollView::id.
+  kPracticeDummy = 6,  // One standing practice dummy; id: its index.
 };
 
 // Returns the key of run `id` of `kind` for world::DrawHistory::Track().
 constexpr uint64_t DrawRunKey(DrawRun kind, uint64_t id) {
   return (static_cast<uint64_t>(kind) << 56) | (id & ((uint64_t{1} << 56) - 1));
 }
+
+// A death older than this when it is read (the backlog after joining) gets no
+// ragdoll.
+constexpr double kDeathMaxAgeSeconds = 0.5;
+// Mass of the bullet of an unknown weapon key, kg.
+constexpr float kDefaultBulletMass = 0.004f;
+// A death reported without a hit but with a killer gets a bullet fired from
+// the killer's eye at the victim's chest, m/s and m above the feet.
+constexpr float kRebuiltBulletSpeed = 300.0f;
+constexpr float kRebuiltHitHeight = 1.2f;
+// The death camera's eye in the ragdoll's head node: the face looks along
+// -Z, +Y is up the head.
+constexpr glm::vec3 kDeathEyeInHead{0.0f, 0.10f, -0.06f};
+// Time constant of the death camera's rotation smoothing, s.
+constexpr float kDeathCameraSmoothing = 0.08f;
+// The own death is reported before the prediction has seen it; a living
+// player at this age without ever being seen dead ends the death camera.
+constexpr double kDeathConfirmSeconds = 1.0;
+// The range's static figures that become practice dummies.
+constexpr std::string_view kRifleFigure = "kyle_rifle.pbo";
+constexpr std::string_view kPistolFigure = "kyle_pistol.pbo";
 
 constexpr float kPushReach = 100.0f;   // m
 constexpr float kPushImpulse = 40.0f;  // N*s, about 4 m/s on a 10 kg body.
@@ -557,11 +583,14 @@ App::App(const CliOptions& options, render::Backend backend,
       physics_world_(physics_runtime_),
       world_physics_(physics_world_),
       dropped_weapons_(physics_world_),
+      ragdolls_(physics_world_),
+      dummies_(physics_world_),
       overlay_(window_, renderer_),
       scene_path_(options.scene_path.value_or(AssetPath(kDefaultScene))),
       scene_name_(core::FileName(scene_path_)),
       settings_path_(InputSettingsPath()),
       weapon_builds_(prefab_cache_, AssetRoot()),
+      projectiles_(weapon::ProjectileTuning{.hits_cosmetic = true}),
       process_start_(process_start) {
   (void)weapon_builds_.LoadCatalog();
   for (const StartingWeapon& weapon : kStartingWeapons) {
@@ -973,6 +1002,8 @@ void App::PlaceDebugCameraAtStart() {
 }
 
 void App::RebuildPhysics() {
+  // Building removes every body: the ragdolls and dummy proxies go first.
+  ClearRagdolls();
   const world::PhysicsBuildSummary summary =
       world_physics_.Build(scene_, world_, {.dynamic_bodies = dynamic_bodies_});
   core::log::Info("Physics: {} bodies created, {} failed", summary.created,
@@ -986,19 +1017,25 @@ void App::RebuildPhysics() {
 void App::PushObject() {
   const ViewPose eye = CurrentView();
   const glm::vec3 forward = eye.forward;
-  const std::optional<physics::RayHit> hit =
-      physics_world_.CastRay(eye.position, forward, kPushReach);
+  // Corpses can be pushed too.
+  const std::optional<physics::RayHit> hit = physics_world_.CastRay(
+      eye.position, forward, kPushReach, physics::RayFilter::kEverything);
   const bool dynamic = hit && physics_world_.IsDynamic(hit->body);
   const std::optional<scene::InstanceId> instance =
       dynamic ? world_physics_.InstanceFor(hit->body) : std::nullopt;
   const weapon::DroppedWeapon* dropped =
       dynamic ? dropped_weapons_.FindByBody(hit->body) : nullptr;
-  if (!instance && dropped == nullptr) {
+  const bool corpse = dynamic && ragdolls_.FindByBody(hit->body) != 0;
+  if (!instance && dropped == nullptr && !corpse) {
     status_ = "Push: nothing in reach";
     return;
   }
   physics_world_.AddImpulseAtPoint(hit->body, forward * kPushImpulse,
                                    hit->point);
+  if (corpse) {
+    status_ = "Pushed a body";
+    return;
+  }
   if (dropped != nullptr) {
     status_ = std::format("Pushed the dropped {}",
                           dropped->weapon.firearm.spec().display_name);
@@ -1323,6 +1360,13 @@ void App::FireBullet(float age) {
 
 void App::RecordHit(const weapon::Impact& impact) {
   ++impacts_total_;
+  // A practice dummy goes down as a ragdoll; no mark in the air where it
+  // stood.
+  if (const std::optional<game::RagdollSpawn> spawn = dummies_.Hit(
+          impact.body, impact.point, impact.velocity, impact.mass)) {
+    (void)ragdolls_.Spawn(*spawn);
+    return;
+  }
   if (const std::optional<scene::InstanceId> instance =
           world_physics_.InstanceFor(impact.body)) {
     for (size_t i = 0; i < targets_.size(); ++i) {
@@ -1421,6 +1465,7 @@ void App::RebuildWorld() {
   RebuildPhysics();
   FindTargets();
   FindScenePickups();
+  SetUpPracticeDummies();
 }
 
 void App::RecordPrefabWriteTimes() {
@@ -1679,6 +1724,8 @@ void App::UpdateOffline(const input::InputFrame& raw_input,
   physics_world_.Update(frame_seconds);
   world_physics_.SyncToWorld(world_);
   dropped_weapons_.Sync();
+  ragdolls_.Update(step);
+  dummies_.Update(step);
   world_.Update(step);
   player_.UpdateView(settings_, step);
 
@@ -1718,8 +1765,15 @@ bool App::FirstPersonActive() const {
   if (view_mode_ != ViewMode::kPlayer) {
     return false;
   }
-  return game_state_ == GameState::kOnline ? online_playing()
-                                           : player_.spawned();
+  if (game_state_ != GameState::kOnline) {
+    return player_.spawned();
+  }
+  return online_playing() && !DeathCameraActive();
+}
+
+bool App::DeathCameraActive() const {
+  return death_camera_ && death_view_valid_ &&
+         view_mode_ == ViewMode::kPlayer && online_playing();
 }
 
 ui::MenuRules App::UpdateMenu(const input::InputFrame& raw_input) {
@@ -1880,6 +1934,7 @@ bool App::StartConnect(std::string_view address, std::string_view name) {
   display_keys_ = {};
   next_shot_record_ = 0;
   next_impact_record_ = 0;
+  next_death_record_ = 0;
   taken_pickups_applied_ = 0;
   kill_line_count_ = 0;
   remote_players_.Clear();
@@ -1899,6 +1954,7 @@ void App::LeaveOnline(std::string reason) {
   }
   pause_open_ = false;
   remote_players_.Clear();
+  ClearRagdolls();
   name_tags_.clear();
   kill_line_count_ = 0;
   ClearBullets();
@@ -2142,6 +2198,9 @@ void App::UpdateOnline(const input::InputFrame& input, float frame_seconds) {
   // Tracers only: the server's Impact messages mark the hits.
   projectiles_.Update(physics_world_, scene_.gravity, step);
   AnimateLocalBody(step);
+  SpawnDeathRagdolls(now);
+  ragdolls_.Update(step);
+  UpdateDeathCamera(step, now);
   UpdateRemotePlayers(step);
 }
 
@@ -2291,7 +2350,8 @@ void App::UpdateRemotePlayers(float step) {
          .yaw = pose.yaw,
          .pitch = pose.pitch,
          .crouching = (pose.flags & net::player_flags::kCrouching) != 0,
-         .alive = (pose.flags & net::player_flags::kAlive) != 0,
+         .alive = (pose.flags & net::player_flags::kAlive) != 0 &&
+                  !corpse_hidden_.test(id),
          .weapon = def,
          .velocity = pose.velocity,
          .on_ground = (pose.flags & net::player_flags::kOnGround) != 0,
@@ -2554,6 +2614,9 @@ void App::CycleViewMode() {
 }
 
 App::ViewPose App::CurrentView() const {
+  if (DeathCameraActive()) {
+    return death_view_;
+  }
   if (view_mode_ == ViewMode::kPlayer && game_state_ == GameState::kOnline) {
     // The predicted player's eye; no head bob or roll online.
     const player::PlayerView view{.eye_position = online_eye_,
@@ -2750,10 +2813,21 @@ void App::LoadCharacterModel() {
   if (character_model_) {
     remote_players_.SetRig(character_model_->rig());
     local_body_.emplace(character_model_->rig());
+    if (!ragdolls_.SetModel(character_model_->rig(),
+                            prefab_cache_.prefab(character_model_->prefab()))) {
+      core::log::Warn(
+          "The player model cannot be ragdolled; killed players vanish");
+    }
   } else {
     remote_players_.SetRig(std::nullopt);
     local_body_.reset();
+    ragdolls_.ClearModel();
   }
+  // The ragdolls of the old model are gone.
+  own_ragdoll_ = 0;
+  EndDeathCamera();
+  corpse_hidden_.reset();
+  FindHeadMeshes();
 }
 
 game::WeaponHold App::HoldOf(std::optional<weapon::WeaponDefId> def) const {
@@ -2829,6 +2903,287 @@ void App::AppendLocalBodyDraws() {
   // Never seen by a camera, so no motion history either.
   for (size_t i = first; i < draws_.size(); ++i) {
     draws_[i].shadow_only = true;
+  }
+}
+
+void App::ClearRagdolls() {
+  dummies_.Clear();
+  ragdolls_.Clear();
+  own_ragdoll_ = 0;
+  corpse_hidden_.reset();
+  EndDeathCamera();
+}
+
+void App::FindHeadMeshes() {
+  head_meshes_.clear();
+  if (!character_model_) {
+    return;
+  }
+  const prefab::Prefab& prefab =
+      prefab_cache_.prefab(character_model_->prefab());
+  const int neck =
+      character_model_->rig().nodes[static_cast<size_t>(game::Joint::kNeck)];
+  head_meshes_.assign(prefab.meshes.size(), false);
+  for (size_t i = 0; i < prefab.meshes.size(); ++i) {
+    int node = prefab.meshes[i].node;
+    while (node >= 0 && node != neck) {
+      node = prefab.hierarchy.nodes[static_cast<size_t>(node)].parent;
+    }
+    head_meshes_[i] = node == neck;
+  }
+}
+
+void App::AppendRagdollDraws() {
+  if (!character_model_) {
+    return;  // Nothing is drawn with the capsule fallback.
+  }
+  const bool through_own_head = DeathCameraActive();
+  for (const game::RagdollView& view : ragdolls_.views()) {
+    const size_t first = draws_.size();
+    character_model_->AppendDraws(glm::mat4(1.0f), view.locals, draws_);
+    if (through_own_head && view.id == own_ragdoll_) {
+      // The camera sits inside the head: it must not block the view.
+      for (size_t i = 0; i < head_meshes_.size() && first + i < draws_.size();
+           ++i) {
+        draws_[first + i].shadow_only = head_meshes_[i];
+      }
+    }
+    draw_history_.Track(DrawRunKey(DrawRun::kRagdoll, view.id),
+                        std::span(draws_).subspan(first));
+  }
+}
+
+void App::SetUpPracticeDummies() {
+  // Without a ragdoll model a dummy could not fall: the figures stay as they
+  // are. Online the server moves everything, there are no dummies.
+  if (!character_model_ || !ragdolls_.has_model() ||
+      dynamic_bodies_ != world::DynamicBodies::kSimulated) {
+    return;
+  }
+  std::vector<game::DummyPlacement> placements;
+  std::vector<scene::InstanceId> owners;
+  for (const world::Placement& placement : world_.placements()) {
+    if (placement.parent != -1) {
+      continue;
+    }
+    const std::string& file = prefab_cache_.key(placement.prefab);
+    const game::HeldWeapon kind =
+        file.ends_with(kRifleFigure)    ? game::HeldWeapon::kRifle
+        : file.ends_with(kPistolFigure) ? game::HeldWeapon::kPistol
+                                        : game::HeldWeapon::kNone;
+    if (kind == game::HeldWeapon::kNone) {
+      continue;
+    }
+    // The figure holds the starting weapon of its kind.
+    std::optional<weapon::WeaponDefId> held;
+    for (const weapon::WeaponDefId def : starting_weapons_) {
+      if (game::HeldWeaponOf(weapon_library_.def(def).type.spec.kind) == kind) {
+        held = def;
+        break;
+      }
+    }
+    // The figure faces -Z of its prefab space; yaw turns -Z about +Y.
+    const glm::vec3 facing =
+        glm::vec3(placement.world * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f));
+    placements.push_back({.feet = glm::vec3(placement.world[3]),
+                          .yaw = std::atan2(-facing.x, -facing.z),
+                          .hold = HoldOf(held),
+                          .tag = held ? static_cast<uint32_t>(*held) + 1 : 0});
+    owners.push_back(placement.owner);
+  }
+  if (placements.empty() ||
+      dummies_.Reset(character_model_->rig(), placements) == 0) {
+    return;
+  }
+  for (const scene::InstanceId owner : owners) {
+    (void)world_.HideInstance(owner);
+  }
+  (void)world_physics_.RemoveHiddenBodies(world_);
+}
+
+void App::AppendPracticeDummyDraws() {
+  if (!character_model_) {
+    return;
+  }
+  const std::span<const game::PracticeDummy> dummies = dummies_.dummies();
+  for (size_t i = 0; i < dummies.size(); ++i) {
+    const game::PracticeDummy& dummy = dummies[i];
+    if (!dummy.standing) {
+      continue;  // A ragdoll lies in its place.
+    }
+    const size_t first = draws_.size();
+    character_model_->AppendDraws(*dummy.animator, draws_);
+    if (dummy.placement.tag != 0 && dummy.animator->weapon()) {
+      const auto def =
+          static_cast<weapon::WeaponDefId>(dummy.placement.tag - 1);
+      AppendRestWeaponDraws(weapon_library_.def(def), view_of(def),
+                            dummy.animator->root() * *dummy.animator->weapon());
+    }
+    draw_history_.Track(DrawRunKey(DrawRun::kPracticeDummy, i),
+                        std::span(draws_).subspan(first));
+  }
+}
+
+void App::SpawnDeathRagdolls(double now_seconds) {
+  const net::Replication& replication = session_->replication();
+  const auto& deaths = replication.deaths();
+  for (uint64_t n = std::max(next_death_record_, deaths.first());
+       n < deaths.end(); ++n) {
+    const net::DeathRecord& death = deaths.Get(n);
+    if (now_seconds - death.time_seconds <= kDeathMaxAgeSeconds) {
+      SpawnDeathRagdoll(death, now_seconds);
+    }
+  }
+  next_death_record_ = deaths.end();
+  // The animated body stays hidden until the interpolated sample catches up
+  // with the death (or the respawn emptied the buffer).
+  for (size_t id = 0; id < net::kMaxPlayers; ++id) {
+    if (!corpse_hidden_.test(id)) {
+      continue;
+    }
+    const net::PlayerInfo& info = replication.player(static_cast<uint8_t>(id));
+    if (!info.has_pose || (info.pose.flags & net::player_flags::kAlive) == 0) {
+      corpse_hidden_.reset(id);
+    }
+  }
+}
+
+void App::SpawnDeathRagdoll(const net::DeathRecord& death, double now_seconds) {
+  const net::Replication& replication = session_->replication();
+  const bool own = replication.own_id() == death.victim;
+  const game::CharacterAnimator* body = nullptr;
+  game::RagdollSpawn spawn{.owner = uint64_t{death.victim} + 1};
+  if (own) {
+    if (!local_body_) {
+      return;
+    }
+    body = &*local_body_;
+    spawn.velocity = session_->player()->Save().velocity;
+  } else {
+    const net::PlayerInfo& info = replication.player(death.victim);
+    body = remote_players_.animator(death.victim);
+    if (!info.has_pose || body == nullptr) {
+      return;
+    }
+    spawn.velocity = info.pose.velocity;
+  }
+  // Where the body was drawn: the root of its last animated pose.
+  spawn.root = body->root();
+  spawn.locals = body->locals();
+  spawn.hit = DeathHitOf(death, glm::vec3(body->root()[3]));
+  const game::RagdollId id = ragdolls_.Spawn(spawn);
+  if (id == 0) {
+    return;  // The body stays as it is until the sample shows it dead.
+  }
+  if (!own) {
+    corpse_hidden_.set(death.victim);
+    return;
+  }
+  own_ragdoll_ = id;
+  death_camera_ = true;
+  death_confirmed_ = !session_->player()->Save().alive;
+  death_camera_since_ = now_seconds;
+  death_view_valid_ = false;  // UpdateDeathCamera() takes the first view.
+  draw_history_.Cut();
+  weapon_motion_.Invalidate();
+}
+
+std::optional<game::RagdollHit> App::DeathHitOf(const net::DeathRecord& death,
+                                                glm::vec3 feet) const {
+  const net::Replication& replication = session_->replication();
+  const std::optional<weapon::WeaponDefId> def = DefOfKey(death.weapon_key);
+  game::RagdollHit hit{.mass =
+                           def ? weapon_library_.def(*def).type.spec.bullet_mass
+                               : kDefaultBulletMass};
+  switch (death.zone) {
+    case net::hit_zone::kHead:
+      hit.zone = game::RagdollZone::kHead;
+      break;
+    case net::hit_zone::kTorso:
+      hit.zone = game::RagdollZone::kTorso;
+      break;
+    case net::hit_zone::kLegs:
+      hit.zone = game::RagdollZone::kLegs;
+      break;
+    default:
+      hit.zone = game::RagdollZone::kAny;
+      break;
+  }
+  if (death.has_hit) {
+    hit.point = feet + death.hit_offset;
+    hit.velocity = death.hit_velocity;
+    return hit;
+  }
+  if (!death.killer || *death.killer == death.victim) {
+    return std::nullopt;  // The world killed it: no bullet.
+  }
+  // No hit data: the bullet flew from the killer's eye at the victim's chest.
+  glm::vec3 eye = online_eye_;
+  if (replication.own_id() != death.killer) {
+    const net::PlayerInfo& killer = replication.player(*death.killer);
+    if (!killer.has_pose) {
+      return std::nullopt;
+    }
+    const bool crouching =
+        (killer.pose.flags & net::player_flags::kCrouching) != 0;
+    eye = killer.pose.position +
+          glm::vec3(0.0f, remote_players_.eye_height(crouching), 0.0f);
+  }
+  hit.point = feet + glm::vec3(0.0f, kRebuiltHitHeight, 0.0f);
+  const glm::vec3 line = hit.point - eye;
+  const float length = glm::length(line);
+  if (!(length > 1.0e-3f)) {
+    return std::nullopt;
+  }
+  hit.velocity = line / length * kRebuiltBulletSpeed;
+  return hit;
+}
+
+void App::UpdateDeathCamera(float step, double now_seconds) {
+  if (!death_camera_) {
+    return;
+  }
+  const game::RagdollView* ragdoll = ragdolls_.Find(own_ragdoll_);
+  const bool alive = session_->player()->Save().alive;
+  death_confirmed_ = death_confirmed_ || !alive;
+  const bool lives_again =
+      alive && (death_confirmed_ ||
+                now_seconds - death_camera_since_ > kDeathConfirmSeconds);
+  if (ragdoll == nullptr || lives_again) {
+    EndDeathCamera();
+    return;
+  }
+  // The head node's frame, orthonormalised: -Z is where the face looks.
+  const glm::vec3 x = glm::normalize(glm::vec3(ragdoll->head[0]));
+  const glm::vec3 y_raw = glm::vec3(ragdoll->head[1]);
+  const glm::vec3 y = glm::normalize(y_raw - x * glm::dot(x, y_raw));
+  const glm::quat target =
+      glm::normalize(glm::quat_cast(glm::mat3(x, y, glm::cross(x, y))));
+  death_rotation_ = death_view_valid_
+                        ? glm::normalize(glm::slerp(
+                              death_rotation_, target,
+                              1.0f - std::exp(-step / kDeathCameraSmoothing)))
+                        : target;
+  death_view_valid_ = true;
+  const glm::vec3 position =
+      glm::vec3(ragdoll->head * glm::vec4(kDeathEyeInHead, 1.0f));
+  const glm::vec3 forward = death_rotation_ * glm::vec3(0.0f, 0.0f, -1.0f);
+  const glm::vec3 up = death_rotation_ * glm::vec3(0.0f, 1.0f, 0.0f);
+  death_view_ = {.position = position,
+                 .forward = forward,
+                 .view = glm::lookAt(position, position + forward, up),
+                 .look = camera::LookTowards(position, position + forward),
+                 .vertical_fov_degrees = settings_.fov_degrees};
+}
+
+void App::EndDeathCamera() {
+  const bool was_on = death_camera_ || death_view_valid_;
+  death_camera_ = false;
+  death_confirmed_ = false;
+  death_view_valid_ = false;
+  if (was_on) {
+    draw_history_.Cut();  // The view jumps back to the player's eye.
+    weapon_motion_.Invalidate();
   }
 }
 
@@ -2966,6 +3321,8 @@ render::SceneView App::BuildSceneView(float frame_seconds) {
   if (game_state_ == GameState::kOnline) {
     AppendOnlineDraws();
   }
+  AppendPracticeDummyDraws();
+  AppendRagdollDraws();
   AppendLocalBodyDraws();
   // World draws come first (index 0 on): the focused scene weapon's.
   world_.AppendSelectedDraws(scene_selection_, 0, selected_draws_);
