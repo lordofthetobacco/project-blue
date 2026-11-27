@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -15,6 +16,7 @@
 #include <glm/vec3.hpp>
 
 #include "net/messages.h"
+#include "net/protocol.h"
 #include "net/wire_error.h"
 
 namespace blue::net {
@@ -89,6 +91,11 @@ TEST_CASE("every message round trips with boundary values") {
              .zone = 0,
              .health_after = 0},
       Death{.victim = 1, .killer = 0, .weapon_key = UINT32_MAX},
+      Death{.victim = 2,
+            .killer = std::nullopt,
+            .weapon_key = 0,
+            .hit = DeathHit{.offset = glm::vec3(-3.0f, 0.0f, 3.0e30f),
+                            .velocity = glm::vec3(1.0f, -0.0f, 1.0e-30f)}},
       Respawn{.player_id = 2,
               .position = glm::vec3(std::numeric_limits<float>::max()),
               .yaw = std::numeric_limits<float>::lowest()},
@@ -112,6 +119,62 @@ TEST_CASE("every message round trips with boundary values") {
     CAPTURE(static_cast<int>(TypeOf(message)));
     CheckRoundTrip(message);
   }
+}
+
+TEST_CASE("Death carries the killing bullet bit-exactly") {
+  CHECK(kProtocolVersion == 4);
+  const Death with_hit{
+      .victim = 3,
+      .killer = 4,
+      .weapon_key = 0x12345678,
+      .hit = DeathHit{.offset = glm::vec3(0.25f, 1.5f, -0.5f),
+                      .velocity = glm::vec3(-300.0f, 2.0f, 40.0f)}};
+  const Death without_hit{.victim = 3, .killer = 4, .weapon_key = 0x12345678};
+  std::array<uint8_t, 128> buffer{};
+  WireResult<size_t> size = EncodeStandaloneMessage(with_hit, buffer);
+  REQUIRE(size.ok());
+  WireResult<Message> decoded = DecodeStandaloneMessage(
+      std::span<const uint8_t>(buffer.data(), size.value()));
+  REQUIRE(decoded.ok());
+  const auto* death = std::get_if<Death>(&decoded.value());
+  REQUIRE(death != nullptr);
+  REQUIRE(death->hit.has_value());
+  CHECK(death->hit->offset.x == 0.25f);
+  CHECK(death->hit->offset.y == 1.5f);
+  CHECK(death->hit->offset.z == -0.5f);
+  CHECK(death->hit->velocity.x == -300.0f);
+  CHECK(death->hit->velocity.y == 2.0f);
+  CHECK(death->hit->velocity.z == 40.0f);
+
+  // A bullet adds exactly two vec3 and nothing else is left over.
+  WireResult<size_t> bits_with = MessageBits(with_hit);
+  WireResult<size_t> bits_without = MessageBits(without_hit);
+  REQUIRE(bits_with.ok());
+  REQUIRE(bits_without.ok());
+  CHECK(bits_with.value() == bits_without.value() + 6 * 32);
+
+  size = EncodeStandaloneMessage(without_hit, buffer);
+  REQUIRE(size.ok());
+  decoded = DecodeStandaloneMessage(
+      std::span<const uint8_t>(buffer.data(), size.value()));
+  REQUIRE(decoded.ok());
+  CHECK(std::get<Death>(decoded.value()).hit == std::nullopt);
+
+  // Data after the message is rejected, as for every message.
+  buffer[size.value()] = 0xFF;
+  CHECK(DecodeStandaloneMessage(
+            std::span<const uint8_t>(buffer.data(), size.value() + 1))
+            .error() == WireError::kTrailingData);
+  // A hit announced but cut short.
+  size = EncodeStandaloneMessage(with_hit, buffer);
+  REQUIRE(size.ok());
+  CHECK(DecodeStandaloneMessage(
+            std::span<const uint8_t>(buffer.data(), size.value() - 4))
+            .error() == WireError::kTruncated);
+  // A non-finite component cannot be encoded.
+  Death bad = with_hit;
+  bad.hit->velocity.y = std::numeric_limits<float>::quiet_NaN();
+  CHECK(EncodeStandaloneMessage(bad, buffer).error() == WireError::kOutOfRange);
 }
 
 TEST_CASE("handshake messages are classified") {

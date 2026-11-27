@@ -102,7 +102,14 @@ std::vector<std::pair<std::string_view, Message>> GoldenMessages() {
                         .amount = 37,
                         .zone = hit_zone::kHead,
                         .health_after = -12}},
-      {"death", Death{.victim = 3, .killer = std::nullopt, .weapon_key = 0}},
+      {"death",
+       Death{.victim = 3,
+             .killer = 4,
+             .weapon_key = 0x12345678,
+             .hit = DeathHit{.offset = glm::vec3(0.25f, 1.5f, -0.5f),
+                             .velocity = glm::vec3(-300.0f, 2.0f, 40.0f)}}},
+      {"death_no_hit",
+       Death{.victim = 3, .killer = std::nullopt, .weapon_key = 0}},
       {"respawn", Respawn{.player_id = 3,
                           .position = glm::vec3(-8.0f, 0.5f, 16.25f),
                           .yaw = 3.0f}},
@@ -484,9 +491,9 @@ TEST_CASE("golden snapshot values match vectors.md") {
 }
 
 TEST_CASE("every golden vector file is covered") {
-  // The 24 files of the vectors directory; a new vector must be added to
+  // The 25 files of the vectors directory; a new vector must be added to
   // this test (and to the cases above).
-  constexpr std::array<std::string_view, 24> kAll = {
+  constexpr std::array<std::string_view, 25> kAll = {
       "client_input_multi",
       "client_input_single",
       "control_client_hello",
@@ -495,6 +502,7 @@ TEST_CASE("every golden vector file is covered") {
       "msg_client_hello",
       "msg_damage",
       "msg_death",
+      "msg_death_no_hit",
       "msg_dropped_taken",
       "msg_impact",
       "msg_pickup_taken",
@@ -516,7 +524,7 @@ TEST_CASE("every golden vector file is covered") {
     CAPTURE(name);
     CHECK_FALSE(LoadVector(name).empty());
   }
-  CHECK(GoldenMessages().size() == 17);
+  CHECK(GoldenMessages().size() == 18);
 }
 
 }  // namespace

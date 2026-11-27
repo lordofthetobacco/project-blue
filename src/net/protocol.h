@@ -12,7 +12,7 @@ namespace blue::net {
 // version bump.
 
 // Sent in ClientHello; a mismatch is answered with ServerReject.
-inline constexpr uint16_t kProtocolVersion = 3;
+inline constexpr uint16_t kProtocolVersion = 4;
 // No packet is larger (the netcode.io payload limit).
 inline constexpr size_t kMaxPayloadBytes = 1200;
 // Ticks per second, the physics fixed step.

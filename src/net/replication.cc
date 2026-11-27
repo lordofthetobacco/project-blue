@@ -23,6 +23,10 @@ constexpr size_t kReservedDropped = 64;
 constexpr size_t kReservedBodies = 256;
 constexpr size_t kReservedPickups = 64;
 
+// A Damage counts for the zone of the following Death when it arrived at most
+// this long before it.
+constexpr double kDeathZoneWindowSeconds = 1.0;
+
 InterpSample SampleOf(uint32_t tick, const RemotePlayer& player) {
   return InterpSample{.tick = tick,
                       .position = player.position,
@@ -65,6 +69,7 @@ void Replication::Reset(std::optional<uint8_t> own_id) {
   impacts_.Clear();
   kills_.Clear();
   deaths_.Clear();
+  last_damage_.fill(LastDamage{});
 }
 
 PlayerInfo* Replication::Find(uint8_t id) {
@@ -157,8 +162,30 @@ void Replication::Apply(const Message& message, double now_seconds) {
   } else if (const auto* damage = std::get_if<Damage>(&message)) {
     if (PlayerInfo* player = Find(damage->victim)) {
       player->health = damage->health_after;
+      last_damage_[damage->victim] = LastDamage{.valid = true,
+                                                .attacker = damage->attacker,
+                                                .zone = damage->zone,
+                                                .time_seconds = now_seconds};
     }
   } else if (const auto* death = std::get_if<Death>(&message)) {
+    DeathRecord death_record{.victim = death->victim,
+                             .killer = death->killer,
+                             .weapon_key = death->weapon_key,
+                             .time_seconds = now_seconds};
+    if (death->victim < last_damage_.size()) {
+      LastDamage& last = last_damage_[death->victim];
+      if (last.valid && last.attacker == death->killer &&
+          now_seconds - last.time_seconds <= kDeathZoneWindowSeconds) {
+        death_record.zone = last.zone;
+      }
+      last = LastDamage{};
+    }
+    if (death->hit.has_value()) {
+      death_record.has_hit = true;
+      death_record.hit_offset = death->hit->offset;
+      death_record.hit_velocity = death->hit->velocity;
+    }
+    deaths_.Push(death_record);
     KillRecord record{.killer = death->killer,
                       .victim = death->victim,
                       .weapon_key = death->weapon_key,

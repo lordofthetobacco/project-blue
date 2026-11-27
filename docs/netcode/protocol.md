@@ -6,7 +6,7 @@ payload. The Rust reference implementation is `crates/blue-protocol` in the
 C++ client codec must follow this document and reproduce the golden vectors in
 `docs/netcode/vectors/` byte for byte.
 
-**Protocol version: 3** (`PROTOCOL_VERSION`). Layouts marked *provisional*
+**Protocol version: 4** (`PROTOCOL_VERSION`). Layouts marked *provisional*
 follow the sim core and will change with it; every change bumps the version
 and gets a changelog entry (section 14).
 
@@ -24,7 +24,7 @@ rejects the whole payload with an error (section 12).
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `PROTOCOL_VERSION` | 3 | sent in `ClientHello` |
+| `PROTOCOL_VERSION` | 4 | sent in `ClientHello` |
 | `MAX_PAYLOAD_BYTES` | 1200 | no packet is larger |
 | `DEFAULT_TICK_RATE` | 60 | ticks per second (the physics fixed step) |
 | `MAX_PLAYERS` | 64 | player ids are `0..=63` |
@@ -653,7 +653,8 @@ Bodies:
 17 PlayerLeft       player_id player_id
 18 Damage           player_id victim; optional<player_id> attacker; i16 amount;
                     bounded(0, 7) zone; i16 health_after
-19 Death            player_id victim; optional<player_id> killer; u32 weapon_key
+19 Death            player_id victim; optional<player_id> killer; u32 weapon_key;
+                    bool has_hit; if has_hit: vec3 hit_offset; vec3 hit_velocity
 20 Respawn          player_id player_id; vec3 position; f32 yaw
 21 Shot             player_id shooter; vec3 origin; vec3 direction; u32 weapon_key;
                     u32 shot_number
@@ -675,6 +676,11 @@ Enumerations:
   (display as "unknown").
 - `Damage.zone`: 0 head, 1 torso, 2 legs, 3 other (world); 4..7 reserved.
 - `attacker` / `killer` absent: world damage. `weapon_key` 0: none.
+- `Death.hit` (`has_hit` 1) describes the bullet that landed the killing hit,
+  for the victim's ragdoll: `hit_offset` is the hit point minus the victim's
+  feet position at death (world axes, metres) and `hit_velocity` the bullet's
+  velocity at impact (m/s); both are `vec3` (3 x `f32`). A death without a
+  bullet (kill plane, world damage) has `has_hit` 0 and no vectors.
 - `WorldSyncPickupsTaken` entries past `count` are 0 in the decoded value.
 - `DroppedRemoved`: a dropped weapon left the world without a taker (its
   lifetime expired, the world's dropped-weapon cap evicted it, or it fell
@@ -752,7 +758,8 @@ interaction reach and line of sight, name contents.
 blue-server repository) holds one `<name>.bin` per vector
 and `vectors.md` with the logical value of each (Rust `Debug` output, plus a hex
 dump). Vectors: `msg_<name>` for every message type (type id + body, zero
-padded), `control_client_hello`, `control_server_welcome`,
+padded; `Death` has two: `msg_death` with a hit and `msg_death_no_hit`),
+`control_client_hello`, `control_server_welcome`,
 `control_server_reject`, `client_input_single`, `client_input_multi`
 (several delta-encoded commands, sequence and message-id wrap),
 `server_snapshot_full` (own state, reliable messages, three players without
@@ -780,6 +787,11 @@ values to identical bytes and decode the bytes to the same values.
   dropped_id }` (dropped weapons now despawn: lifetime, cap, kill plane).
   Late-join sync is capped to the reliable window (section 10). Golden
   vectors regenerated (new `msg_dropped_removed`).
+- **4** (2026-11-27): `Death` (19) gains `bool has_hit` after `weapon_key` and,
+  when set, `vec3 hit_offset` and `vec3 hit_velocity` (the killing bullet, for
+  ragdolls; section 10). Golden vectors regenerated: `msg_death` now carries a
+  hit, new `msg_death_no_hit` is the old no-hit value; every vector that embeds
+  the protocol version changed.
 
 ## 15. Contract notes for the sim core and the C++ client
 

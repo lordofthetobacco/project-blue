@@ -164,12 +164,24 @@ void WriteBody(const Death& m, BitWriter& writer) {
   WritePlayerId(m.victim, writer);
   WriteOptionalPlayerId(m.killer, writer);
   writer.WriteU32(m.weapon_key);
+  writer.WriteBool(m.hit.has_value());
+  if (m.hit.has_value()) {
+    writer.WriteVec3(m.hit->offset);
+    writer.WriteVec3(m.hit->velocity);
+  }
 }
 
 void ReadBody(BitReader& reader, Death& m) {
   m.victim = ReadPlayerId(reader);
   m.killer = ReadOptionalPlayerId(reader);
   m.weapon_key = reader.ReadU32();
+  m.hit.reset();
+  if (reader.ReadBool()) {
+    DeathHit hit;
+    hit.offset = reader.ReadVec3();
+    hit.velocity = reader.ReadVec3();
+    m.hit = hit;
+  }
 }
 
 void WriteBody(const Respawn& m, BitWriter& writer) {

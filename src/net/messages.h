@@ -153,7 +153,7 @@ struct Death {
   uint8_t victim = 0;
   std::optional<uint8_t> killer;  // nullopt: world.
   uint32_t weapon_key = 0;        // 0: none.
-  // nullopt: no bullet (kill plane, world damage). Not on the wire yet.
+  // nullopt: no bullet (kill plane, world damage).
   std::optional<DeathHit> hit;
   friend bool operator==(const Death&, const Death&) = default;
 };

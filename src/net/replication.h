@@ -213,10 +213,19 @@ class Replication {
   void AddTakenPickup(uint32_t instance_id);
   [[nodiscard]] PlayerInfo* Find(uint8_t id);
 
+  // The latest Damage a victim took, to give its Death a hit zone.
+  struct LastDamage {
+    bool valid = false;
+    std::optional<uint8_t> attacker;
+    uint8_t zone = hit_zone::kOther;
+    double time_seconds = 0.0;  // When it was received.
+  };
+
   std::optional<uint8_t> own_id_;
   MessageCounts message_counts_;
   uint64_t players_seen_ = 0;
   std::array<PlayerInfo, kMaxPlayers> players_{};
+  std::array<LastDamage, kMaxPlayers> last_damage_{};
   std::vector<ReplicatedDroppedWeapon> dropped_;
   std::vector<ReplicatedBody> bodies_;
   std::vector<uint32_t> taken_pickups_;
