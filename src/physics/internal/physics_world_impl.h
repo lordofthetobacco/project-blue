@@ -8,8 +8,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Jolt.h must be the first Jolt header included.
@@ -21,6 +23,7 @@
 #include <Jolt/Physics/Collision/ObjectLayer.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Ragdoll/Ragdoll.h>
 // clang-format on
 
 #include "core/result.h"
@@ -69,11 +72,20 @@ class ObjectPairFilter final : public JPH::ObjectLayerPairFilter {
 };
 
 // What a character collides with: everything but the bodies created with
-// ShapeBodyDesc::blocks_characters false.
+// ShapeBodyDesc::blocks_characters false and the cosmetic bodies (ragdoll
+// parts).
 class CharacterObjectFilter final : public JPH::ObjectLayerFilter {
  public:
   bool ShouldCollide(JPH::ObjectLayer layer) const override {
-    return layer != layers::kMovingNoCharacter;
+    return layer != layers::kMovingNoCharacter && layer != layers::kCosmetic;
+  }
+};
+
+// What a gameplay ray cast hits: everything but the cosmetic bodies.
+class GameplayObjectFilter final : public JPH::ObjectLayerFilter {
+ public:
+  bool ShouldCollide(JPH::ObjectLayer layer) const override {
+    return layer != layers::kCosmetic;
   }
 };
 
@@ -114,6 +126,19 @@ class PhysicsWorld::Impl {
   BodyState GetBodyState(BodyId id) const;
   void SetBodyState(BodyId id, const BodyState& state);
 
+  // Ragdolls (physics/ragdoll.h). AddRagdoll creates the ragdoll from
+  // `settings`, puts part i at poses[i] (one per part), adds it to the system
+  // and gives every part `linear_velocity`. It returns the registry key
+  // (never reused, never 0) and the body of every part. The parts are
+  // tracked for interpolation but do not count for broad phase optimization.
+  core::Result<uint32_t, PhysicsError> AddRagdoll(
+      const JPH::RagdollSettings& settings, std::span<const Pose> poses,
+      glm::vec3 linear_velocity, std::vector<BodyId>& bodies);
+  // Removes the constraints, then the bodies. Unknown keys are ignored.
+  void RemoveRagdoll(uint32_t key);
+  bool HasRagdoll(uint32_t key) const;
+  bool IsRagdollActive(uint32_t key) const;
+
   // Registers / unregisters a participant (not owned). Adding one twice or
   // removing an unknown one is ignored.
   void AddParticipant(internal::FixedStepParticipant* participant);
@@ -144,6 +169,7 @@ class PhysicsWorld::Impl {
                                              const ShapeBodyDesc& desc);
   // Runs one fixed step and refreshes the tracked poses.
   void Step();
+  void RemoveAllRagdolls();
 
   internal::BroadPhaseLayerMapping layer_mapping_;
   internal::ObjectVsBroadPhaseFilter object_vs_broad_;
@@ -154,6 +180,11 @@ class PhysicsWorld::Impl {
   // Unscaled shapes by shape_key + shape type, shared between bodies.
   std::unordered_map<std::string, JPH::ShapeRefC> shape_cache_;
   std::unordered_map<uint32_t, TrackedPose> tracked_;
+  // Live ragdolls by key, and the ids of their bodies (RemoveBody leaves
+  // those alone). Declared after system_: destroyed before it.
+  std::unordered_map<uint32_t, JPH::Ref<JPH::Ragdoll>> ragdolls_;
+  std::unordered_set<uint32_t> ragdoll_bodies_;
+  uint32_t next_ragdoll_key_ = 1;
   std::vector<internal::FixedStepParticipant*> participants_;
 
   double accumulator_ = 0.0;

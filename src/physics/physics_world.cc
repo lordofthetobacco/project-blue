@@ -130,6 +130,7 @@ PhysicsWorld::Impl::Impl(const PhysicsWorldOptions& options)
 }
 
 PhysicsWorld::Impl::~Impl() {
+  RemoveAllRagdolls();
   if (!participants_.empty()) {
     core::log::Warn(
         "PhysicsWorld destroyed with {} fixed-step participant(s) still "
@@ -275,6 +276,9 @@ core::Result<BodyId, PhysicsError> PhysicsWorld::Impl::AddBody(
 
 void PhysicsWorld::Impl::RemoveBody(BodyId id) {
   const JPH::BodyID jolt_id = ToJolt(id);
+  if (ragdoll_bodies_.contains(jolt_id.GetIndexAndSequenceNumber())) {
+    return;
+  }
   JPH::BodyInterface& bodies = system_.GetBodyInterface();
   if (!bodies.IsAdded(jolt_id)) {
     return;
@@ -285,6 +289,7 @@ void PhysicsWorld::Impl::RemoveBody(BodyId id) {
 }
 
 void PhysicsWorld::Impl::RemoveAllBodies() {
+  RemoveAllRagdolls();
   JPH::BodyIDVector ids;
   system_.GetBodies(ids);
   JPH::BodyInterface& bodies = system_.GetBodyInterface();
@@ -296,6 +301,82 @@ void PhysicsWorld::Impl::RemoveAllBodies() {
   bodies.DestroyBodies(ids.data(), static_cast<int>(ids.size()));
   tracked_.clear();
   bodies_added_since_optimize_ = 0;
+}
+
+core::Result<uint32_t, PhysicsError> PhysicsWorld::Impl::AddRagdoll(
+    const JPH::RagdollSettings& settings, std::span<const Pose> poses,
+    glm::vec3 linear_velocity, std::vector<BodyId>& bodies) {
+  using Result = core::Result<uint32_t, PhysicsError>;
+  if (poses.size() != settings.mParts.size() || !IsFiniteVec(linear_velocity)) {
+    return Result::Error(PhysicsError::kInvalidShape);
+  }
+  for (const Pose& pose : poses) {
+    if (!IsFiniteVec(pose.position) || !IsValidRotation(pose.rotation)) {
+      return Result::Error(PhysicsError::kInvalidShape);
+    }
+  }
+
+  const uint32_t key = next_ragdoll_key_;
+  JPH::Ref<JPH::Ragdoll> ragdoll(settings.CreateRagdoll(key, key, &system_));
+  if (ragdoll == nullptr) {
+    return Result::Error(PhysicsError::kTooManyBodies);
+  }
+  ++next_ragdoll_key_;
+
+  // The constraints were built with the parts at their rest poses; moving
+  // the parts afterwards only changes where the ragdoll starts. Poses are set
+  // before the bodies enter the system, velocities after (a velocity set
+  // earlier would be lost).
+  JPH::BodyInterface& body_interface = system_.GetBodyInterface();
+  for (size_t i = 0; i < poses.size(); ++i) {
+    body_interface.SetPositionAndRotation(
+        ragdoll->GetBodyID(static_cast<int>(i)),
+        JPH::RVec3(ToJolt(poses[i].position)),
+        ToJolt(glm::normalize(poses[i].rotation)),
+        JPH::EActivation::DontActivate);
+  }
+  ragdoll->AddToPhysicsSystem(JPH::EActivation::Activate);
+  ragdoll->SetLinearVelocity(ToJolt(linear_velocity));
+
+  bodies.clear();
+  for (const JPH::BodyID& id : ragdoll->GetBodyIDs()) {
+    const Pose pose = ReadPose(body_interface, id);
+    tracked_[id.GetIndexAndSequenceNumber()] = TrackedPose{pose, pose};
+    ragdoll_bodies_.insert(id.GetIndexAndSequenceNumber());
+    bodies.push_back(FromJolt(id));
+  }
+  ragdolls_.emplace(key, std::move(ragdoll));
+  return Result::Ok(key);
+}
+
+void PhysicsWorld::Impl::RemoveRagdoll(uint32_t key) {
+  const auto found = ragdolls_.find(key);
+  if (found == ragdolls_.end()) {
+    return;
+  }
+  JPH::Ragdoll& ragdoll = *found->second;
+  ragdoll.RemoveFromPhysicsSystem();
+  for (const JPH::BodyID& id : ragdoll.GetBodyIDs()) {
+    tracked_.erase(id.GetIndexAndSequenceNumber());
+    ragdoll_bodies_.erase(id.GetIndexAndSequenceNumber());
+  }
+  // The last reference destroys the bodies.
+  ragdolls_.erase(found);
+}
+
+void PhysicsWorld::Impl::RemoveAllRagdolls() {
+  while (!ragdolls_.empty()) {
+    RemoveRagdoll(ragdolls_.begin()->first);
+  }
+}
+
+bool PhysicsWorld::Impl::HasRagdoll(uint32_t key) const {
+  return ragdolls_.contains(key);
+}
+
+bool PhysicsWorld::Impl::IsRagdollActive(uint32_t key) const {
+  const auto found = ragdolls_.find(key);
+  return found != ragdolls_.end() && found->second->IsActive();
 }
 
 void PhysicsWorld::Impl::Step() {
@@ -464,14 +545,14 @@ void PhysicsWorld::AddImpulseAtPoint(BodyId id, glm::vec3 impulse,
 
 std::optional<RayHit> PhysicsWorld::CastRay(glm::vec3 origin,
                                             glm::vec3 direction,
-                                            float max_distance,
-                                            RayFilter /*filter*/) const {
-  return CastRay(origin, direction, max_distance);
+                                            float max_distance) const {
+  return CastRay(origin, direction, max_distance, RayFilter::kGameplay);
 }
 
 std::optional<RayHit> PhysicsWorld::CastRay(glm::vec3 origin,
                                             glm::vec3 direction,
-                                            float max_distance) const {
+                                            float max_distance,
+                                            RayFilter filter) const {
   const float length = glm::length(direction);
   if (!(max_distance > 0.0f) || !(length > 1.0e-6f) || !IsFiniteVec(origin)) {
     return std::nullopt;
@@ -481,7 +562,13 @@ std::optional<RayHit> PhysicsWorld::CastRay(glm::vec3 origin,
                           ToJolt(unit_direction * max_distance));
   JPH::RayCastResult hit;
   const JPH::PhysicsSystem& system = impl_->system();
-  if (!system.GetNarrowPhaseQuery().CastRay(ray, hit)) {
+  const internal::GameplayObjectFilter gameplay_filter;
+  const bool hit_something =
+      filter == RayFilter::kGameplay
+          ? system.GetNarrowPhaseQuery().CastRay(
+                ray, hit, JPH::BroadPhaseLayerFilter(), gameplay_filter)
+          : system.GetNarrowPhaseQuery().CastRay(ray, hit);
+  if (!hit_something) {
     return std::nullopt;
   }
   const glm::vec3 point =

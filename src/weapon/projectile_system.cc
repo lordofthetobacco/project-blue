@@ -226,7 +226,9 @@ ProjectileSystem::Flight ProjectileSystem::SweepBullet(
       const glm::vec3 segment = next.displacement;
       const float length = glm::length(segment);
       const std::optional<physics::RayHit> hit =
-          world.CastRay(bullet.position, segment, length);
+          world.CastRay(bullet.position, segment, length,
+                        tuning_.hits_cosmetic ? physics::RayFilter::kEverything
+                                              : physics::RayFilter::kGameplay);
       segments_.push_back(Segment{
           .projectile = bullet.id,
           .shot_number = bullet.shot_number,
