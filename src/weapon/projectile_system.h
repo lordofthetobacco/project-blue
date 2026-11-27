@@ -99,6 +99,10 @@ struct ProjectileTuning {
   float max_age = 6.0f;          // s before a bullet expires
   float max_distance = 3000.0f;  // m travelled before a bullet expires
   float max_substep = 1.0f / 240.0f;  // s, longest integration step
+  // Whether bullets also hit cosmetic bodies (ragdoll parts). Only the
+  // client app sets this, so tracers and impacts show on corpses; every
+  // simulated (server-side) system keeps the default.
+  bool hits_cosmetic = false;
 };
 
 // Simulates bullets as point masses under gravity and quadratic air drag

@@ -139,11 +139,22 @@ struct Damage {
   friend bool operator==(const Damage&, const Damage&) = default;
 };
 
+// The bullet that landed the killing hit, for the victim's ragdoll.
+struct DeathHit {
+  // Hit point minus the victim's feet at death, metres.
+  glm::vec3 offset = glm::vec3(0.0f);
+  // Bullet velocity at impact, m/s.
+  glm::vec3 velocity = glm::vec3(0.0f);
+  friend bool operator==(const DeathHit&, const DeathHit&) = default;
+};
+
 struct Death {
   static constexpr MessageType kType = MessageType::kDeath;
   uint8_t victim = 0;
   std::optional<uint8_t> killer;  // nullopt: world.
   uint32_t weapon_key = 0;        // 0: none.
+  // nullopt: no bullet (kill plane, world damage). Not on the wire yet.
+  std::optional<DeathHit> hit;
   friend bool operator==(const Death&, const Death&) = default;
 };
 

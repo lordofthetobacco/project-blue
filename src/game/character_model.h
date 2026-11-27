@@ -2,8 +2,11 @@
 #define BLUE_GAME_CHARACTER_MODEL_H_
 
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
+
+#include <glm/mat4x4.hpp>
 
 #include "game/character_animator.h"
 #include "render/scene_view.h"
@@ -41,6 +44,13 @@ class CharacterModel {
   // Poses the model as `animator` (made with rig()) and appends its draws
   // placed by animator.root(). Does not allocate beyond `out`'s growth.
   void AppendDraws(const CharacterAnimator& animator,
+                   std::vector<render::DrawItem>& out);
+
+  // Poses the model with `locals` (one transform per node of rig()'s
+  // hierarchy, as CharacterAnimator::locals()) and appends its draws placed
+  // by `root`. Does not allocate beyond `out`'s growth.
+  void AppendDraws(const glm::mat4& root,
+                   std::span<const animation::Transform> locals,
                    std::vector<render::DrawItem>& out);
 
  private:

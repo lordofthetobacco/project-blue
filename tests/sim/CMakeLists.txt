@@ -26,6 +26,7 @@ add_executable(blue_sim_tests
     net_messages_test.cc
     net_quantize_test.cc
     net_reliable_channel_test.cc
+    net_replication_death_test.cc
     net_session_clock_sync_test.cc
     net_session_interpolation_test.cc
     net_session_loopback_test.cc

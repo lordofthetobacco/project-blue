@@ -464,6 +464,13 @@ void PhysicsWorld::AddImpulseAtPoint(BodyId id, glm::vec3 impulse,
 
 std::optional<RayHit> PhysicsWorld::CastRay(glm::vec3 origin,
                                             glm::vec3 direction,
+                                            float max_distance,
+                                            RayFilter /*filter*/) const {
+  return CastRay(origin, direction, max_distance);
+}
+
+std::optional<RayHit> PhysicsWorld::CastRay(glm::vec3 origin,
+                                            glm::vec3 direction,
                                             float max_distance) const {
   const float length = glm::length(direction);
   if (!(max_distance > 0.0f) || !(length > 1.0e-6f) || !IsFiniteVec(origin)) {

@@ -89,6 +89,16 @@ class RemotePlayers {
   [[nodiscard]] std::span<const RemotePlayerPlacement> placements() const {
     return placements_;
   }
+  // The animator of player `id` with its last animated pose (kept while the
+  // player is dead and not updated; Reset() keeps the pose), or null when the
+  // id is out of range or the player was never animated. Valid until the next
+  // Update(), SetRig() or Clear().
+  [[nodiscard]] const CharacterAnimator* animator(uint8_t id) const {
+    if (id >= animators_.size() || !animators_[id]) {
+      return nullptr;
+    }
+    return &*animators_[id];
+  }
   // Capsule size the meshes must be made with (m).
   [[nodiscard]] float radius() const { return character_.radius; }
   [[nodiscard]] float height(bool crouching) const {

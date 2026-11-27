@@ -90,6 +90,12 @@ struct RayHit {
   float fraction;  // Hit distance divided by the cast's max_distance, [0, 1].
 };
 
+// Which bodies a ray cast can hit.
+enum class RayFilter : uint8_t {
+  kGameplay,    // Everything but cosmetic bodies (ragdoll parts). The default.
+  kEverything,  // Cosmetic bodies too.
+};
+
 struct PhysicsStats {
   int bodies;         // Bodies in the world, static ones included.
   int active_bodies;  // Dynamic bodies currently awake.
@@ -133,8 +139,11 @@ class PhysicsWorld {
   core::Result<BodyId, PhysicsError> CreateBody(const CookedShape& shape,
                                                 const ShapeBodyDesc& desc);
 
-  // Removes a body. Unknown or stale handles are ignored.
+  // Removes a body. Unknown or stale handles are ignored, and so are the
+  // parts of a Ragdoll (they live and die with their Ragdoll handle).
   void RemoveBody(BodyId id);
+  // Removes every body, including every ragdoll (constraints first). Ragdoll
+  // handles outliving the call report valid() == false.
   void RemoveAllBodies();
 
   void SetGravity(glm::vec3 gravity);
@@ -151,8 +160,13 @@ class PhysicsWorld {
 
   // Casts a ray from `origin` along `direction` (need not be normalized) and
   // returns the closest hit within `max_distance` meters, if any.
+  // Skips cosmetic bodies (ragdoll parts), like CastRay(..., kGameplay).
   std::optional<RayHit> CastRay(glm::vec3 origin, glm::vec3 direction,
                                 float max_distance) const;
+
+  // As above, but `filter` chooses whether cosmetic bodies are hit too.
+  std::optional<RayHit> CastRay(glm::vec3 origin, glm::vec3 direction,
+                                float max_distance, RayFilter filter) const;
 
   // Advances the simulation by `frame_seconds` of real time using fixed 1/60 s
   // steps: time accumulates (at most 0.25 s per call), whole steps run, at most
@@ -207,6 +221,8 @@ class PhysicsWorld {
  private:
   // The character reaches the simulation behind the world through Impl.
   friend class Character;
+  // A ragdoll registers its bodies and constraints through Impl.
+  friend class Ragdoll;
 
   class Impl;
   std::unique_ptr<Impl> impl_;

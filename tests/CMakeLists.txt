@@ -86,6 +86,10 @@ add_executable(blue_tests
     inspect_screen_rules_test.cc
     main_menu_rules_test.cc
     remote_players_test.cc
+    practice_dummies_test.cc
+    ragdoll_physics_test.cc
+    ragdoll_rig_test.cc
+    ragdolls_test.cc
     window_pair_test.cc
     shader_bindings_test.cc
     shader_preprocessor_test.cc

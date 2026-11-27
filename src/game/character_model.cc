@@ -52,8 +52,14 @@ CharacterModel::CharacterModel(const world::PrefabCache& cache,
 
 void CharacterModel::AppendDraws(const CharacterAnimator& animator,
                                  std::vector<render::DrawItem>& out) {
-  pose_.SetLocalPose(animator.locals());
-  pose_.AppendDraws(animator.root(), out);
+  AppendDraws(animator.root(), animator.locals(), out);
+}
+
+void CharacterModel::AppendDraws(const glm::mat4& root,
+                                 std::span<const animation::Transform> locals,
+                                 std::vector<render::DrawItem>& out) {
+  pose_.SetLocalPose(locals);
+  pose_.AppendDraws(root, out);
 }
 
 }  // namespace blue::game

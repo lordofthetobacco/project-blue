@@ -121,6 +121,7 @@ add_library(blue_physics STATIC
     src/physics/character.cc
     src/physics/internal/shape_builder.cc
     src/physics/shape_cooking.cc
+    src/physics/ragdoll.cc
 )
 
 target_include_directories(blue_physics PUBLIC src)
@@ -694,6 +695,9 @@ add_library(blue_game STATIC
     src/game/character_model.cc
     src/game/inspect_screen_rules.cc
     src/game/part_stash.cc
+    src/game/practice_dummies.cc
+    src/game/ragdoll_rig.cc
+    src/game/ragdolls.cc
     src/game/remote_players.cc
     src/game/scene_pickups.cc
     src/game/weapon_builds.cc

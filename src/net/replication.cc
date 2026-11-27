@@ -64,6 +64,7 @@ void Replication::Reset(std::optional<uint8_t> own_id) {
   shots_.Clear();
   impacts_.Clear();
   kills_.Clear();
+  deaths_.Clear();
 }
 
 PlayerInfo* Replication::Find(uint8_t id) {

@@ -96,6 +96,19 @@ struct KillRecord {
   double time_seconds = 0.0;
 };
 
+// One death, for the victim's ragdoll (the kill feed keeps names, this keeps
+// where and how the victim was hit).
+struct DeathRecord {
+  uint8_t victim = 0;
+  std::optional<uint8_t> killer;  // nullopt: the world
+  uint32_t weapon_key = 0;
+  uint8_t zone = hit_zone::kOther;  // Zone of the killing Damage.
+  bool has_hit = false;
+  glm::vec3 hit_offset{0.0f};    // Hit point minus the victim's feet, m.
+  glm::vec3 hit_velocity{0.0f};  // Bullet velocity at impact, m/s.
+  double time_seconds = 0.0;     // When it was received.
+};
+
 // A fixed ring of the most recent records of one kind, numbered from 0 in
 // arrival order: a reader keeps the number of the next record it wants and
 // reads Get(n) for n in [first(), end()).
@@ -134,6 +147,7 @@ class Replication {
   static constexpr size_t kShotHistory = 64;
   static constexpr size_t kImpactHistory = 64;
   static constexpr size_t kKillFeed = 8;
+  static constexpr size_t kDeathHistory = 16;
 
   Replication();
   Replication(const Replication&) = delete;
@@ -186,6 +200,10 @@ class Replication {
   [[nodiscard]] const RecordRing<KillRecord, kKillFeed>& kills() const {
     return kills_;
   }
+  // Recent deaths with their hit data, oldest first by number.
+  [[nodiscard]] const RecordRing<DeathRecord, kDeathHistory>& deaths() const {
+    return deaths_;
+  }
 
  private:
   // Counts `message` in message_counts_.
@@ -206,6 +224,7 @@ class Replication {
   RecordRing<ShotRecord, kShotHistory> shots_;
   RecordRing<ImpactRecord, kImpactHistory> impacts_;
   RecordRing<KillRecord, kKillFeed> kills_;
+  RecordRing<DeathRecord, kDeathHistory> deaths_;
 };
 
 }  // namespace blue::net

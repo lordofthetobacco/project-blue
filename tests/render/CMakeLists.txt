@@ -19,6 +19,7 @@ add_executable(blue_render_tests
     render_test_main.cc
     kyle_anim_preview_test.cc
     kyle_preview_test.cc
+    ragdoll_preview_test.cc
     render_test.cc
     scenes.cc
 )
