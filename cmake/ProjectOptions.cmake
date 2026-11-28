@@ -91,6 +91,10 @@ endif()
 if(BLUE_ENABLE_LTO AND (blue_multi_config OR CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel)$"))
     check_ipo_supported(RESULT blue_ipo_supported OUTPUT blue_ipo_output LANGUAGES C CXX)
     if(blue_ipo_supported)
+        # Sub-projects that ask for a CMake older than 3.9 (glm, doctest) leave CMP0069 unset;
+        # CMake then warns per target and ignores the LTO default for them. NEW applies it
+        # like for every other target, which is safe because check_ipo_supported passed.
+        set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
     else()
